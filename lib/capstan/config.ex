@@ -226,13 +226,21 @@ defmodule Capstan.Config do
     end
   end
 
-  # host is required: a non-empty string or a charlist (design's `charlist() | String.t()`).
+  # host is required: a non-empty string or a proper charlist (design's
+  # `charlist() | String.t()`). A non-empty list that is not all integer codepoints
+  # (e.g. `[:foo]`) is not a charlist and is refused.
   defp fetch_host(conn) do
     case Keyword.get(conn, :host) do
       host when is_binary(host) and host != "" -> {:ok, host}
-      host when is_list(host) and host != [] -> {:ok, host}
+      host when is_list(host) -> validate_charlist_host(host)
       _ -> {:error, :config_invalid}
     end
+  end
+
+  defp validate_charlist_host(host) do
+    if host != [] and Enum.all?(host, &is_integer/1),
+      do: {:ok, host},
+      else: {:error, :config_invalid}
   end
 
   defp fetch_port(conn) do

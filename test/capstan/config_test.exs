@@ -67,6 +67,25 @@ defmodule Capstan.ConfigTest do
       assert resolved.connection[:host] == ~c"127.0.0.1"
     end
 
+    test "a valid charlist host (~c\"localhost\") is accepted" do
+      conn = [host: ~c"localhost", port: 5633, username: "root", ssl: false]
+      assert {:ok, resolved} = Config.validate(server_id: 5115, connection: conn)
+      assert resolved.connection[:host] == ~c"localhost"
+    end
+
+    test "a non-charlist list host ([:foo]) is refused :config_invalid" do
+      conn = [host: [:foo], port: 5633, username: "root", ssl: false]
+      assert {:error, :config_invalid} = Config.validate(server_id: 5115, connection: conn)
+    end
+
+    test "port 0 is a config error (must be positive)" do
+      assert {:error, :config_invalid} = Config.validate(opts([], port: 0))
+    end
+
+    test "port above 65535 is a config error" do
+      assert {:error, :config_invalid} = Config.validate(opts([], port: 65_536))
+    end
+
     test "password defaults to an empty string when omitted" do
       conn = [host: "127.0.0.1", port: 5633, username: "root", ssl: false]
       assert {:ok, resolved} = Config.validate(server_id: 5115, connection: conn)
@@ -237,6 +256,23 @@ defmodule Capstan.ConfigTest do
     test "a server error while reading the variables propagates fail-closed, never :ok" do
       assert {:error, {:query_error, 1227}} = query_error_result(1227)
     end
+
+    test "an OK packet (no resultset) → :precondition_query_failed, never a spurious :ok" do
+      assert {:error, :precondition_query_failed} = ok_packet_result()
+    end
+
+    test "a wrong-width resultset (a 4-column row) → :precondition_query_failed" do
+      assert {:error, :precondition_query_failed} =
+               resultset_result(4, [["ROW", "FULL", "FULL", ""]])
+    end
+
+    test "a multi-row resultset → :precondition_query_failed" do
+      assert {:error, :precondition_query_failed} =
+               resultset_result(5, [
+                 ["ROW", "FULL", "FULL", "", "ON"],
+                 ["ROW", "FULL", "FULL", "", "ON"]
+               ])
+    end
   end
 
   ## ---------------------------------------------------------------------------
@@ -300,6 +336,37 @@ defmodule Capstan.ConfigTest do
       mock_client(fn srv ->
         {0, _request} = t_recv_pkt(srv)
         t_send(srv, <<0xFF, code::16-little, "#HY000the variables read failed">>, 1)
+      end)
+
+    Config.check_preconditions(socket)
+  end
+
+  # Serves an OK packet (no resultset) — `Command.query` returns `:ok`, so the gate
+  # must refuse fail-closed rather than treat "no rows" as "all preconditions met".
+  defp ok_packet_result do
+    socket =
+      mock_client(fn srv ->
+        {0, _request} = t_recv_pkt(srv)
+        t_send(srv, <<0x00, 0, 0, 2, 0, 0, 0>>, 1)
+      end)
+
+    Config.check_preconditions(socket)
+  end
+
+  # Serves a resultset of arbitrary shape (`ncols` columns, `rows` rows). Any shape
+  # other than a single five-column row must refuse fail-closed.
+  defp resultset_result(ncols, rows) do
+    socket =
+      mock_client(fn srv ->
+        {0, _request} = t_recv_pkt(srv)
+        t_send(srv, <<ncols>>, 1)
+        Enum.each(1..ncols, fn i -> t_send(srv, "coldef_#{i}", i + 1) end)
+
+        rows
+        |> Enum.with_index(ncols + 2)
+        |> Enum.each(fn {row, seq} -> t_send(srv, encode_text_row(row), seq) end)
+
+        t_send(srv, <<0xFE, 0, 0, 2, 0, 0, 0>>, ncols + 2 + length(rows))
       end)
 
     Config.check_preconditions(socket)
