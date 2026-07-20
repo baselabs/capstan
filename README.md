@@ -23,19 +23,29 @@ capstan is a **library in your supervision tree**, not a daemon.
 
 ## The contract, shared with replicant
 
-capstan deliberately mirrors replicant's consumer-facing contracts so a sink written against
-one works against the other, and so downstream consumers (notably
-[beamline](https://github.com/baselabs/beamline)) are source-blind:
+capstan deliberately aligns with replicant's consumer-facing contracts so that porting a sink
+between them is a small, *explicit* change rather than a rewrite:
 
-- the same `Sink` behaviour shape (`handle_transaction/1`, optional `handle_batch/1`,
+- the same `Sink` behaviour **shape** (`handle_transaction/1`, optional `handle_batch/1`,
   schema-change and snapshot callbacks),
 - the same lib-owned `CheckpointStore` alternative for non-transactional sinks,
 - the same delivery-guarantee taxonomy — effect-once on the sink-owned atomic path,
   at-least-once with a bounded duplicate window in lib-checkpoint mode,
 - the same value-free error and telemetry conventions (row values never reach a log line).
 
-Where MySQL genuinely differs from Postgres, capstan differs honestly rather than pretending
-parity. Those deltas are the subject of the design pass.
+**The contracts are aligned, not identical, and a sink is not source-blind by default.** Two
+differences are forced by MySQL and are deliberate:
+
+1. **Position type.** replicant's position is a scalar `commit_lsn`; capstan's is a GTID set.
+   A GTID set is legitimately non-contiguous (failover, purged ranges, multi-source), so it
+   cannot be reduced to a comparable integer without lying about gaps.
+2. **Dedup idiom.** replicant dedups with `commit_lsn <= checkpoint`; capstan dedups by set
+   membership (`Capstan.Gtid.member?/2`). A `<=` comparison on GTIDs is *wrong*, not merely
+   different — it would silently skip or re-apply transactions.
+
+Consumers such as [beamline](https://github.com/baselabs/beamline) stay source-agnostic through
+a thin per-source adapter package, which is that project's existing pattern — not by the two
+libraries presenting one identical type.
 
 ## Substrate requirements
 
