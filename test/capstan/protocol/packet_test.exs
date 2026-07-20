@@ -109,6 +109,28 @@ defmodule Capstan.Protocol.PacketTest do
       assert payload == head
     end
 
+    test "a payload spanning THREE frames reassembles in order" do
+      # Two-frame cases cannot distinguish an n-ary reassembly loop from one capped
+      # at a single continuation. A >32 MiB payload is reachable in practice (a large
+      # WRITE_ROWS batch, a BLOB column), and a capped loop would truncate it SILENTLY
+      # — the F15 desync class this module exists to prevent.
+      a = :binary.copy(<<0xA1>>, @max)
+      b = :binary.copy(<<0xB2>>, @max)
+      c = :binary.copy(<<0xC3>>, 7)
+
+      sock =
+        packet_source([
+          <<@max::24-little, 0::8, a::binary>>,
+          <<@max::24-little, 1::8, b::binary>>,
+          <<7::24-little, 2::8, c::binary>>
+        ])
+
+      assert {seq, payload} = Packet.read_packet(sock, 30_000)
+      assert seq == 2, "the LAST sequence id across all three frames must be returned"
+      assert byte_size(payload) == 2 * @max + 7
+      assert payload == a <> b <> c, "frames must reassemble in wire order"
+    end
+
     test "the packet after a completed split sequence is framed independently" do
       head = :binary.copy(<<0xAB>>, @max)
 
@@ -179,6 +201,20 @@ defmodule Capstan.Protocol.PacketTest do
       encoded = IO.iodata_to_binary(Packet.encode(payload, 0))
 
       assert encoded == <<@max::24-little, 0::8, payload::binary, 0::24-little, 1::8>>
+    end
+
+    test "splits a payload spanning THREE frames, incrementing the sequence id per frame" do
+      # Mirrors the read-side three-frame case: a split loop capped at one
+      # continuation would truncate a >32 MiB write SILENTLY.
+      full = :binary.copy(<<0xAB>>, @max)
+      remainder = :binary.copy(<<0xAB>>, 7)
+      encoded = IO.iodata_to_binary(Packet.encode(full <> full <> remainder, 0))
+
+      frame_0 = <<@max::24-little, 0::8, full::binary>>
+      frame_1 = <<@max::24-little, 1::8, full::binary>>
+      frame_2 = <<7::24-little, 2::8, remainder::binary>>
+
+      assert encoded == frame_0 <> frame_1 <> frame_2
     end
 
     test "splits an over-length payload with incrementing sequence ids" do
