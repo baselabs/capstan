@@ -26,8 +26,8 @@ capstan is a **library in your supervision tree**, not a daemon.
 capstan deliberately aligns with replicant's consumer-facing contracts so that porting a sink
 between them is a small, *explicit* change rather than a rewrite:
 
-- the same `Sink` behaviour **shape** (`handle_transaction/1`, optional `handle_batch/1`,
-  schema-change and snapshot callbacks),
+- the same `Sink` behaviour **shape** — `handle_transaction/1`, plus `checkpoint/0` and
+  `handle_schema_change/2` (batch and snapshot callbacks are later rows, not shipped yet),
 - the same lib-owned `CheckpointStore` alternative for non-transactional sinks,
 - the same delivery-guarantee taxonomy — effect-once on the sink-owned atomic path,
   at-least-once with a bounded duplicate window in lib-checkpoint mode,
@@ -55,9 +55,14 @@ MySQL 8.0+ configured for row-based replication with GTIDs:
 binlog_format            = ROW
 binlog_row_image         = FULL
 binlog_row_metadata      = FULL
+binlog_row_value_options = ''      # PARTIAL_JSON emits JSON diffs, not values
 gtid_mode                = ON
-enforce_gtid_consistency = ON
+enforce_gtid_consistency = ON      # implied by gtid_mode=ON; not separately checked
 ```
+
+capstan verifies the first five at connect and refuses to start if any is wrong. Multi-source
+replication (a server aggregating several upstreams) is supported — a GTID set expresses multiple
+source UUIDs natively.
 
 `binlog_row_metadata = FULL` is **required**, not advisory: it is what puts column names and
 types in-band on every `TABLE_MAP` event, giving capstan near-parity with pgoutput's `Relation`

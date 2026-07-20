@@ -1,0 +1,12 @@
+# capstan ROADMAP
+
+Authored definitions only. Status and evidence are DERIVED by
+`~/.claude/scripts/forge-roadmap.py --repo .` — never hand-edited here.
+
+| ID | What | Acceptance | Depends | Why |
+|---|---|---|---|---|
+| C1 | **Streaming spine** — connect to MySQL as a replica, tail the row-based binlog from a GTID position, assemble committed transactions, deliver to a sink, durably advance a processed-GTID checkpoint, and halt fail-closed on every silent-loss condition. slug:c1-streaming-spine | A sink receives every committed row change of the configured tables exactly once across a kill/restart, proven on live MySQL by an append-only ledger; every fail-closed halt has a red-capable tripwire (gap, precondition, unmapped table_id, XA, unknown type, compression, server_id conflict); Rule 1 proven on all four leak vectors; README + usage-rules + CHANGELOG authored | — | [ADR-0001](adr/0001-position-and-dedup-model.md), [ADR-0002](adr/0002-fail-closed-server-preconditions.md), [ADR-0003](adr/0003-transaction-shape-and-checkpoint-semantics.md) |
+| C2 | **Initial snapshot** — consistent backfill of existing rows before/alongside streaming, using DBLog-style watermark chunking (MySQL has no `EXPORT_SNAPSHOT`). slug:c2-snapshot | A table with pre-existing rows is backfilled and then streamed with no gap and no duplicate at the handoff, proven live; resumable mid-backfill | C1 | TBD at design |
+| C3 | **Batching** — lib-owned batched checkpointing and sink-owned `handle_batch/1` atomic batch delivery. slug:c3-batching | Batch modes preserve their stated guarantees under kill/restart; the composition of each batch mode with every durability-signal path is tripwired (replicant's cross-mode-composition class) | C1 | TBD at design |
+| C4 | **Type + payload breadth** — exotic column types (spatial, `SET`, pre-5.6 temporals) and zstd `TRANSACTION_PAYLOAD_EVENT` decompression. slug:c4-type-breadth | Each type previously halting `:unsupported_column_type` decodes correctly against captured real bytes; a compressed transaction decodes; the fail-closed halts remain for anything still unsupported | C1 | TBD at design |
+| C5 | **XA transactions** — track `XA_PREPARE` → commit/rollback rather than halting. slug:c5-xa | A prepared-then-rolled-back XA transaction delivers zero rows; a prepared-then-committed one delivers exactly once; bounded state under an unbounded prepare window | C1 | TBD at design |
