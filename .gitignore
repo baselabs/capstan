@@ -1,0 +1,46 @@
+# Build artifacts
+_build/
+erl_crash.dump
+*.beam
+*.ez
+
+# Hex package build (mix hex.build output)
+*.tar
+
+# Dependencies
+deps/
+
+# Documentation
+/doc/
+
+# Coverage
+/cover/
+
+# Dialyzer PLTs
+priv/plts/
+
+# Temporary
+/tmp/
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+*.DS_Store
+
+# AI Tools
+/.serena/
+/.expert/
+/.gemini/
+/.cursor/
+/.opencode/
+/.antigravity/
+/.codex/
+/.claude/
+/.agent/
+/.aider/
+
+.forge/
+graphify-out/
