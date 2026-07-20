@@ -150,11 +150,13 @@ defmodule Capstan.Protocol.Command do
     skip_column_defs(socket, remaining - 1, timeout)
   end
 
-  # The resultset ends with a DEPRECATE_EOF OK packet: a `0xFE` header whose payload
-  # is shorter than 9 bytes, which a genuine row never is.
+  # Canonical DEPRECATE_EOF rule: a `0xFE`-led packet is the terminating OK packet iff
+  # its TOTAL length is < 9 bytes (`1 + byte_size(rest) < 9`, i.e. `rest < 8`). A row
+  # that legitimately starts with `0xFE` uses the 8-byte lenenc length form, so it is
+  # >= 9 bytes total (`rest >= 8`) and is never mistaken for the terminator.
   defp read_rows(socket, timeout, acc) do
     case Packet.read_packet(socket, timeout) do
-      {_seq, <<0xFE, rest::binary>>} when byte_size(rest) < 9 ->
+      {_seq, <<0xFE, rest::binary>>} when byte_size(rest) < 8 ->
         Enum.reverse(acc)
 
       {_seq, row} ->

@@ -163,6 +163,25 @@ defmodule Capstan.Protocol.CommandTest do
       assert {:ok, []} = Command.query(socket, "SELECT c FROM t WHERE false")
     end
 
+    test "a 0xFE-led row at the length boundary decodes as a row, not a terminator" do
+      # The canonical rule: a 0xFE-led packet is the DEPRECATE_EOF terminator iff its
+      # TOTAL length < 9 bytes. A column value whose lenenc length prefix is 0xFE (the
+      # 8-byte form) makes a row that STARTS with 0xFE and is exactly 9 bytes total
+      # (rest = 8) — a ROW, not a terminator. The empty 0xFE-form value decodes to "".
+      socket =
+        mock_client(fn srv, _test ->
+          {0, _request} = t_recv_pkt(srv)
+          t_send(srv, <<1>>, 1)
+          t_send(srv, column_def("c"), 2)
+          # 0xFE-form lenenc column of length 0 -> "": total 9 bytes, rest = 8.
+          t_send(srv, <<0xFE, 0::64-little>>, 3)
+          # The genuine terminator: total 7 bytes, rest = 6.
+          t_send(srv, <<0xFE, 0, 0, 2, 0, 0, 0>>, 4)
+        end)
+
+      assert {:ok, [[""]]} = Command.query(socket, "SELECT c FROM t")
+    end
+
     test "surfaces a server error as a value-free {:query_error, code}" do
       socket =
         mock_client(fn srv, _test ->
