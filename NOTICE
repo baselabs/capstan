@@ -1,0 +1,7 @@
+capstan
+Copyright 2026 rjpalermo / baselabs. Licensed under the MIT License (see LICENSE).
+
+capstan vendors no third-party source. The MySQL client and replication protocol is
+implemented in-library from the public protocol specification and verified against a
+live server (see probe/). Wire formats and authentication scrambles are protocol
+facts, not third-party code.
