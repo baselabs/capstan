@@ -144,6 +144,18 @@ defmodule Capstan.Gtid do
   @spec disjoint?(t(), t()) :: boolean()
   def disjoint?(a, b), do: intersection(a, b) == %{}
 
+  @doc """
+  Returns the set as a canonical, ordered list of per-source intervals: sources sorted
+  by UUID, and — within each source — intervals sorted ascending and coalesced.
+
+  Bounds stay **INCLUSIVE**, matching the rest of this module. This is the read-side
+  accessor the `COM_BINLOG_DUMP_GTID` resume encoder iterates; the exclusive-end wire
+  conversion (`high -> high + 1`) is that encoder's concern and is deliberately not
+  applied here. The empty set has no sources.
+  """
+  @spec sources(t()) :: [{uuid(), [{gno(), gno()}]}]
+  def sources(set), do: Enum.sort(set)
+
   ## parsing
 
   # Real MySQL `SELECT @@gtid_executed` returns a long set with `,\n` between UUID

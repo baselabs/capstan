@@ -413,6 +413,34 @@ defmodule Capstan.GtidTest do
     end
   end
 
+  describe "sources/1 — canonical per-source intervals for the resume encoder (Task 3)" do
+    # The COM_BINLOG_DUMP_GTID encoder iterates these. This accessor stays
+    # INCLUSIVE — the exclusive-end wire conversion (`high -> high + 1`) is Task 3's
+    # concern, never this module's. Ordering (sources by UUID, intervals ascending
+    # and coalesced) is a guarantee the encoder relies on for a deterministic wire
+    # payload.
+    test "the empty set has no sources" do
+      assert Gtid.sources(Gtid.parse("")) == []
+    end
+
+    test "a single interval keeps INCLUSIVE bounds (11 stays 11, not 12)" do
+      assert Gtid.sources(Gtid.parse("#{@u1}:1-11")) == [{@u1, [{1, 11}]}]
+    end
+
+    test "a single-element interval N is {N, N}" do
+      assert Gtid.sources(Gtid.parse("#{@u1}:7")) == [{@u1, [{7, 7}]}]
+    end
+
+    test "multiple intervals under one source stay sorted and separate" do
+      assert Gtid.sources(Gtid.parse("#{@u1}:1-3:7-9")) == [{@u1, [{1, 3}, {7, 9}]}]
+    end
+
+    test "sources are ordered by UUID and intervals are coalesced canonically" do
+      assert Gtid.sources(Gtid.parse("#{@u1}:1-3:2-8,#{@u2}:1-3")) ==
+               [{@u2, [{1, 3}]}, {@u1, [{1, 8}]}]
+    end
+  end
+
   # Builds a GTID set from individual members by unioning singletons — which also
   # exercises union's adjacent-range coalescing on the way in.
   defp to_gtid_set(members) do
