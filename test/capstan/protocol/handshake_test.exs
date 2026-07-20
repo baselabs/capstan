@@ -113,7 +113,7 @@ defmodule Capstan.Protocol.HandshakeTest do
     test "produces ciphertext that decrypts to the nonce-obfuscated password" do
       {pub_pem, priv} = generate_rsa()
 
-      ciphertext = Handshake.encrypt_password(@password, @salt, pub_pem)
+      assert {:ok, ciphertext} = Handshake.encrypt_password(@password, @salt, pub_pem)
 
       plaintext =
         :public_key.decrypt_private(ciphertext, priv, rsa_padding: :rsa_pkcs1_oaep_padding)
@@ -125,8 +125,13 @@ defmodule Capstan.Protocol.HandshakeTest do
 
     test "the ciphertext never contains the cleartext password" do
       {pub_pem, _priv} = generate_rsa()
-      ciphertext = Handshake.encrypt_password(@password, @salt, pub_pem)
-      refute :binary.match(ciphertext, @password) != :nomatch
+      assert {:ok, ciphertext} = Handshake.encrypt_password(@password, @salt, pub_pem)
+      assert :binary.match(ciphertext, @password) == :nomatch
+    end
+
+    test "fails closed :bad_public_key on a malformed public key (no raise)" do
+      assert {:error, :bad_public_key} =
+               Handshake.encrypt_password(@password, @salt, "this is not a pem key")
     end
   end
 
@@ -208,6 +213,22 @@ defmodule Capstan.Protocol.HandshakeTest do
         end)
 
       assert {:error, :insecure_auth_refused} =
+               Handshake.connect(socket, username: @username, password: @password, ssl: false)
+    end
+
+    test "fails closed :bad_public_key when the server answers with a malformed public key" do
+      socket =
+        mock_client(fn srv, _test ->
+          t_send(srv, build_handshake(salt: @salt), 0)
+          {1, _resp} = t_recv_pkt(srv)
+          t_send(srv, <<0x01, 0x04>>, 2)
+          {3, <<0x02>>} = t_recv_pkt(srv)
+          # Non-empty (clears the byte_size guard) but not a decodable PEM key —
+          # must fail closed, not raise, and the password must never be sent.
+          t_send(srv, <<0x01>> <> "this is not a public key", 4)
+        end)
+
+      assert {:error, :bad_public_key} =
                Handshake.connect(socket, username: @username, password: @password, ssl: false)
     end
   end
@@ -323,6 +344,45 @@ defmodule Capstan.Protocol.HandshakeTest do
       assert byte_size(tls_response.token) == 32
     end
 
+    test "takes the secure-channel cleartext path (never RSA) on full auth over the TLS socket" do
+      tls_opts = server_tls_opts()
+
+      socket =
+        mock_client(fn srv, test ->
+          t_send(srv, build_handshake(salt: @salt), 0)
+          {1, _ssl_request} = t_recv_pkt(srv)
+          {:ok, tls} = :ssl.handshake(srv, tls_opts, 5000)
+          tls_srv = {:ssl, tls}
+          {2, _resp} = t_recv_pkt(tls_srv)
+
+          # Full authentication required — but the channel is ALREADY encrypted, so
+          # the protocol permits (and the design mandates) the secure-channel path.
+          t_send(tls_srv, <<0x01, 0x04>>, 3)
+
+          # Capture the client's reply verbatim. It must be the NUL-terminated
+          # cleartext password at server_seq + 1 — NOT a 0x02 public-key request.
+          {seq, reply} = t_recv_pkt(tls_srv)
+          send(test, {:full_auth_reply, %{seq: seq, payload: reply}})
+          t_send(tls_srv, ok_packet(), seq + 1)
+          Process.sleep(50)
+        end)
+
+      assert {:ok, %{tls: true}} =
+               Handshake.connect(socket,
+                 username: @username,
+                 password: @password,
+                 ssl: true,
+                 ssl_opts: [verify: :verify_none]
+               )
+
+      assert_receive {:full_auth_reply, full_auth_reply}
+
+      assert full_auth_reply.payload == @password <> <<0>>,
+             "full auth over TLS must send the NUL-terminated password on the encrypted channel, not the RSA public-key path"
+
+      assert full_auth_reply.seq == 4, "the cleartext reply must be sequenced at server_seq + 1"
+    end
+
     test "fails closed :tls_verification_unspecified when ssl is on with neither cacertfile nor verify" do
       # A socket whose server never speaks: the fail-closed check must fire BEFORE
       # any I/O, so this must NOT hang and must NOT silently choose verify_none.
@@ -357,6 +417,51 @@ defmodule Capstan.Protocol.HandshakeTest do
 
       refute inspect(result) =~ "s3cr3t"
       refute inspect(result) =~ @password
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## connect/2 — CLIENT_CONNECT_WITH_DB
+  ## ---------------------------------------------------------------------------
+
+  describe "connect/2 — default database (CLIENT_CONNECT_WITH_DB)" do
+    test "advertises the flag and appends the NUL-terminated database when database: is set" do
+      socket =
+        mock_client(fn srv, test ->
+          t_send(srv, build_handshake(salt: @salt), 0)
+          {1, resp} = t_recv_pkt(srv)
+          send(test, {:resp, decode_response(resp)})
+          t_send(srv, ok_packet(), 2)
+        end)
+
+      assert {:ok, _result} =
+               Handshake.connect(socket,
+                 username: @username,
+                 password: @password,
+                 ssl: false,
+                 database: "capstan_db"
+               )
+
+      assert_receive {:resp, resp}
+      assert (resp.capabilities &&& @client_connect_with_db) != 0
+      assert resp.database == "capstan_db"
+    end
+
+    test "omits the flag and appends no database when database: is nil" do
+      socket =
+        mock_client(fn srv, test ->
+          t_send(srv, build_handshake(salt: @salt), 0)
+          {1, resp} = t_recv_pkt(srv)
+          send(test, {:resp, decode_response(resp)})
+          t_send(srv, ok_packet(), 2)
+        end)
+
+      assert {:ok, _result} =
+               Handshake.connect(socket, username: @username, password: @password, ssl: false)
+
+      assert_receive {:resp, resp}
+      assert (resp.capabilities &&& @client_connect_with_db) == 0
+      assert resp.database == nil
     end
   end
 
@@ -455,16 +560,16 @@ defmodule Capstan.Protocol.HandshakeTest do
     [username, rest] = :binary.split(rest, <<0>>)
     <<token_len::8, token::binary-size(token_len), rest::binary>> = rest
 
-    rest =
+    {database, rest} =
       if (caps &&& @client_connect_with_db) != 0 do
-        [_db, tail] = :binary.split(rest, <<0>>)
-        tail
+        [db, tail] = :binary.split(rest, <<0>>)
+        {db, tail}
       else
-        rest
+        {nil, rest}
       end
 
     [plugin, _] = :binary.split(rest, <<0>>)
-    %{capabilities: caps, username: username, token: token, plugin: plugin}
+    %{capabilities: caps, username: username, token: token, plugin: plugin, database: database}
   end
 
   defp ssl_request_has_ssl_flag?(<<caps::32-little, _::binary>>), do: (caps &&& @client_ssl) != 0

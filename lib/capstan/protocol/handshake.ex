@@ -31,7 +31,8 @@ defmodule Capstan.Protocol.Handshake do
   encrypted channel). Over a plaintext channel the password is **never** sent in
   the clear — it is XORed with the auth nonce and RSA-OAEP encrypted with the
   server's public key; if that key cannot be obtained, `connect/2` fails closed
-  with `:insecure_auth_refused`.
+  with `:insecure_auth_refused`, and a server-supplied key that does not decode
+  fails closed with `:bad_public_key` (never a raise).
 
   ## Rule 1
 
@@ -185,14 +186,25 @@ defmodule Capstan.Protocol.Handshake do
   Encrypts the password for the `caching_sha2_password` full-auth path.
 
   The NUL-terminated password is XORed with the auth nonce (cycled) and then
-  RSA-OAEP encrypted with the server's PEM-encoded public key.
+  RSA-OAEP encrypted with the server's PEM-encoded public key. A public key that
+  does not decode fails closed with `{:error, :bad_public_key}` — the password is
+  never sent when the key is unusable.
   """
-  @spec encrypt_password(binary(), binary(), binary()) :: binary()
+  @spec encrypt_password(binary(), binary(), binary()) ::
+          {:ok, binary()} | {:error, :bad_public_key}
   def encrypt_password(password, nonce, public_key_pem) do
     obfuscated = xor_nonce(password <> <<0>>, nonce)
-    [pem_entry] = :public_key.pem_decode(public_key_pem)
-    public_key = :public_key.pem_entry_decode(pem_entry)
-    :public_key.encrypt_public(obfuscated, public_key, rsa_padding: :rsa_pkcs1_oaep_padding)
+
+    case :public_key.pem_decode(public_key_pem) do
+      [pem_entry | _] ->
+        public_key = :public_key.pem_entry_decode(pem_entry)
+
+        {:ok,
+         :public_key.encrypt_public(obfuscated, public_key, rsa_padding: :rsa_pkcs1_oaep_padding)}
+
+      [] ->
+        {:error, :bad_public_key}
+    end
   end
 
   ## ---------------------------------------------------------------------------
@@ -318,8 +330,9 @@ defmodule Capstan.Protocol.Handshake do
   defp full_auth({:gen_tcp, _} = socket, ctx, nonce, seq) do
     with :ok <- reply(socket, <<@request_public_key>>, seq + 1),
          {key_seq, <<0x01, pem::binary>>} when byte_size(pem) > 0 <-
-           Packet.read_packet(socket, ctx.timeout) do
-      reply(socket, encrypt_password(ctx.password, nonce, pem), key_seq + 1)
+           Packet.read_packet(socket, ctx.timeout),
+         {:ok, cipher} <- encrypt_password(ctx.password, nonce, pem) do
+      reply(socket, cipher, key_seq + 1)
     else
       {:error, _reason} = error -> error
       _no_key -> {:error, :insecure_auth_refused}
