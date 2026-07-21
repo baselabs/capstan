@@ -45,10 +45,11 @@ defmodule Capstan.Connection do
 
   A dump refusal (error 1236) is discriminated on its message text: checksum-negotiation
   text -> `:checksum_negotiation_failed`; purged-logs text (with OR without a named
-  range) -> `:data_gap`; anything else -> `:unrecognized_dump_error`, **never**
-  `:data_gap` — mapping 1236 unconditionally to a gap would tell an operator to
-  reprovision past what is actually a config bug, manufacturing the silent loss the gate
-  exists to prevent.
+  range) -> `:data_gap`; a duplicate-replica message (`server_uuid`/`server_id`) ->
+  `:server_id_conflict` (Q8 — MySQL 8.0.x evicts a same-`server_id` replica via 1236, not
+  a socket drop); anything else -> `:unrecognized_dump_error`, **never** `:data_gap` —
+  mapping 1236 unconditionally to a gap would tell an operator to reprovision past what is
+  actually a config bug, manufacturing the silent loss the gate exists to prevent.
   """
 
   use GenServer
@@ -161,12 +162,18 @@ defmodule Capstan.Connection do
   @spec classify_dump_error(non_neg_integer(), binary()) ::
           :checksum_negotiation_failed
           | :data_gap
+          | :server_id_conflict
           | :unrecognized_dump_error
           | {:dump_failed, non_neg_integer()}
   def classify_dump_error(1236, message) when is_binary(message) do
     cond do
       bin_contains?(message, "checksum") -> :checksum_negotiation_failed
       bin_contains?(message, "purged") -> :data_gap
+      # MySQL 8.0.x evicts a duplicate replica with a 1236 whose message names
+      # `server_uuid`/`server_id` ("A replica with the same server_uuid/server_id …"),
+      # NOT a bare socket drop — so the `Connection` cycle counter never sees it. Map it
+      # to the design's `:server_id_conflict` (Q8) so the halt is actionable, not generic.
+      bin_contains?(message, "server_uuid") -> :server_id_conflict
       true -> :unrecognized_dump_error
     end
   end

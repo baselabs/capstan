@@ -280,6 +280,13 @@ defmodule Capstan.Assembler do
   defp on_query(state, event, schema, sql) do
     cond do
       keyword?(sql, "BEGIN") -> {:cont, [], %{state | txn: %{state.txn | begun?: true}}}
+      # An `XA START`/`XA END` opens/continues an XA transaction block — it is NOT a
+      # self-committing DDL. Treating it as one (the misclassification below) would emit a
+      # spurious `%SchemaChange{}` and ADVANCE the checkpoint past the XA GTID, then fail on
+      # the following rows — silently losing the transaction if the XA later commits. Open
+      # the block so rows accumulate; the `XA_PREPARE` event (type 38) is the terminator
+      # that halts `:unsupported_transaction_shape` fail-closed with the buffer discarded.
+      xa_statement?(sql) -> {:cont, [], %{state | txn: %{state.txn | begun?: true}}}
       keyword?(sql, "COMMIT") -> commit_dml(state, event)
       # A QUERY inside an open BEGIN that is not COMMIT is an in-transaction statement
       # marker, not a terminator (mirrors fixture_capture's `_other -> state`).
@@ -290,6 +297,11 @@ defmodule Capstan.Assembler do
   end
 
   defp keyword?(sql, word), do: sql |> String.trim() |> String.upcase() == word
+
+  # `XA START`/`XA END`/`XA PREPARE`/`XA COMMIT`/`XA ROLLBACK` — the XA transaction-control
+  # verbs. No DDL statement begins with `XA `, so a prefix match is unambiguous.
+  defp xa_statement?(sql),
+    do: sql |> String.trim() |> String.upcase() |> String.starts_with?("XA ")
 
   ## ---------------------------------------------------------------------------
   ## terminators — the ONLY place the in-flight buffer is released

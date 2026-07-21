@@ -133,6 +133,21 @@ defmodule Capstan.MysqlCase do
   @spec run_all!(Packet.socket(), [String.t()]) :: :ok
   def run_all!(socket, sqls), do: Enum.each(sqls, &run!(socket, &1))
 
+  @doc """
+  Runs `sql` best-effort, swallowing ANY failure (a `{:error, _}` result OR a raised
+  transport error). For idempotent cleanup like rolling back a maybe-absent prepared XA
+  transaction, where the statement legitimately errors when there is nothing to undo.
+  """
+  @spec run_tolerant(Packet.socket(), String.t()) :: :ok
+  def run_tolerant(socket, sql) do
+    _ = Command.query(socket, sql)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
   @doc "Runs `sql` on `socket` and returns its result rows (each a list of string cells)."
   @spec query_rows!(Packet.socket(), String.t()) :: [[String.t()]]
   def query_rows!(socket, sql) do

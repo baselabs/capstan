@@ -103,10 +103,12 @@ defmodule Capstan.Integration.FailClosedTest do
     sup_b = start_conflicting_pipeline!(watermark, shared_server_id)
     on_exit(fn -> MysqlCase.stop_pipeline(sup_b) end)
 
-    # The evicted replica halts fail-closed (no livelock). See the FINDING above for why 8.0.x
-    # surfaces this as :unrecognized_dump_error rather than the design's intended :server_id_conflict.
+    # The evicted replica halts fail-closed (no livelock) with the design's Q8 reason. On
+    # 8.0.x the eviction arrives as a 1236 naming server_uuid/server_id (not a socket drop),
+    # which `classify_dump_error/2` now maps to `:server_id_conflict` (the Task 18 finding,
+    # fixed) — so the halt is the actionable reason, not a generic one.
     assert_receive {:connection_halt, reason}, 20_000
-    assert reason in [:server_id_conflict, :unrecognized_dump_error]
+    assert reason == :server_id_conflict
   end
 
   ## ---------------------------------------------------------------------------
@@ -221,23 +223,35 @@ defmodule Capstan.Integration.FailClosedTest do
   end
 
   ## ---------------------------------------------------------------------------
-  ## XA START/END/PREPARE → :unsupported_transaction_shape (BLOCKED — see report)
+  ## XA START/END/PREPARE → :unsupported_transaction_shape
   ## ---------------------------------------------------------------------------
 
-  # BLOCKED (Task 18 report): against the REAL substrate an XA transaction logs
+  # This marquee EXPOSED a real silent-loss bug (Task 18 finding, now FIXED): against the
+  # REAL substrate an XA transaction logs
   #   GTID → QUERY("XA START …") → TABLE_MAP → WRITE_ROWS → QUERY("XA END …") → XA_PREPARE(38)
-  # `Capstan.Assembler.on_query/4` classifies QUERY("XA START …") — not BEGIN/COMMIT, with no open
-  # BEGIN — as a self-committing DDL, so it delivers a spurious %SchemaChange{kind: :other},
-  # ADVANCES the checkpoint past the XA GTID, then halts {:assembler_error, :rows_without_transaction}
-  # on the following WRITE_ROWS. The type-38 XA_PREPARE handler is never reached, so the design's
-  # :unsupported_transaction_shape contract does NOT hold on real bytes — and the checkpoint advances
-  # past an undelivered transaction (a silent-loss risk). Fixing the assembler is out of THIS task's
-  # scope (test files only). Un-skip when the assembler recognises XA statements as a non-DDL,
-  # unsupported shape. Proven with a live pipeline probe during Task 18 implementation.
-  @tag :skip
-  test "XA START/END/PREPARE halts :unsupported_transaction_shape with zero rows (INTENDED contract)" do
+  # and `Capstan.Assembler.on_query/4` had classified QUERY("XA START …") as a self-committing
+  # DDL — delivering a spurious %SchemaChange{}, ADVANCING the checkpoint past the XA GTID, then
+  # halting on the following rows (the type-38 handler unreachable, the checkpoint past an
+  # undelivered transaction). The assembler now recognises XA verbs as non-DDL transaction
+  # control, so the block stays open and XA_PREPARE halts :unsupported_transaction_shape with
+  # the buffer discarded and the checkpoint NOT advanced.
+  test "XA START/END/PREPARE halts :unsupported_transaction_shape with zero rows" do
     qconn = MysqlCase.socket!(MysqlCase.query_connection())
     on_exit(fn -> MysqlCase.close!(qconn) end)
+
+    # A prepared XA holds a lock on `fc_xa`. If a prior run (or a crash) left one dangling,
+    # it would block this run's DROP TABLE. Roll back best-effort BEFORE setup, and again on
+    # exit, so the marquee is self-cleaning and never wedges the shared substrate. A fresh
+    # cleanup connection is used because a prepared XA cannot be rolled back from a session
+    # that is itself inside an XA transaction.
+    cleanup_xa = fn ->
+      cconn = MysqlCase.socket!(MysqlCase.query_connection())
+      MysqlCase.run_tolerant(cconn, "XA ROLLBACK 'capstan_fc_xa'")
+      MysqlCase.close!(cconn)
+    end
+
+    cleanup_xa.()
+    on_exit(cleanup_xa)
 
     sup =
       start_shared_pipeline!(qconn, [
@@ -246,7 +260,6 @@ defmodule Capstan.Integration.FailClosedTest do
       ])
 
     on_exit(fn -> MysqlCase.stop_pipeline(sup) end)
-    on_exit(fn -> MysqlCase.run!(qconn, "XA ROLLBACK 'capstan_fc_xa'") end)
 
     ref = Process.monitor(MysqlCase.assembler_pid(sup))
 

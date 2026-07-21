@@ -111,6 +111,24 @@ defmodule Capstan.AssemblerTest do
       assert {:halt, :unsupported_transaction_shape, [], %Position{}} =
                Assembler.run(seq, empty_start())
     end
+
+    test "the REAL XA shape (GTID/XA START/rows/XA END/XA_PREPARE) halts with zero rows, no advance" do
+      # The live substrate logs an XA transaction as GTID -> QUERY(\"XA START …\") ->
+      # TABLE_MAP -> WRITE_ROWS -> QUERY(\"XA END …\") -> XA_PREPARE(38). `XA START`/`XA END`
+      # are NOT self-committing DDL: misclassifying `XA START` as DDL emits a spurious
+      # %SchemaChange{} AND advances the checkpoint past the XA GTID (silent loss). The XA
+      # verbs must open the block so the rows accumulate and XA_PREPARE halts fail-closed.
+      seq =
+        [event!("simple_dml", "05-gtid.bin"), query_event("probe_db", "XA START 'x1'")] ++
+          events("simple_dml", ["07-table_map.bin", "08-write_rows.bin"]) ++
+          [query_event("probe_db", "XA END 'x1'"), xa_prepare_event()]
+
+      # No committed output, the watermark never advances past the XA GTID, and the halt is
+      # the transaction-shape refusal — not the pre-fix {:error, :rows_without_transaction}
+      # after a spurious SchemaChange delivery.
+      assert {:halt, :unsupported_transaction_shape, [], %Position{gtid_set: ""}} =
+               Assembler.run(seq, empty_start())
+    end
   end
 
   describe "SAFETY — mid-transaction failures abort fail-closed (no phantom txn)" do

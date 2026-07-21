@@ -92,6 +92,18 @@ defmodule Capstan.ConnectionTest do
       assert :data_gap = Connection.classify_dump_error(1236, msg)
     end
 
+    test "a duplicate-replica 1236 (server_uuid/server_id) -> :server_id_conflict, not :data_gap" do
+      # MySQL 8.0.x evicts a same-server_id replica with this 1236 (Task 18 marquee found
+      # the socket-drop cycle-counter path never fires on 8.0.x). It must NOT read as a gap.
+      msg =
+        "A replica with the same server_uuid/server_id as this replica has connected " <>
+          "to the source; the first event ... could not be found"
+
+      reason = Connection.classify_dump_error(1236, msg)
+      assert reason == :server_id_conflict
+      refute reason == :data_gap
+    end
+
     test "an unrecognized 1236 gets its own reason and is NEVER :data_gap" do
       msg = "Client requested master to start replication from position > file size"
       reason = Connection.classify_dump_error(1236, msg)
