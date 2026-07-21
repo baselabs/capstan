@@ -155,7 +155,8 @@ defmodule Capstan.Connection do
   Discriminates a dump-refusal error into a halt reason (design A2 / F5).
 
   Error 1236 is overloaded: a checksum-negotiation message -> `:checksum_negotiation_failed`;
-  a purged-logs message (with or without a named range) -> `:data_gap`; any other 1236 ->
+  a purged-logs message (with or without a named range) -> `:data_gap`; a duplicate-replica
+  message (`server_uuid`/`server_id`) -> `:server_id_conflict` (Q8); any other 1236 ->
   `:unrecognized_dump_error` (never `:data_gap`). A non-1236 code is surfaced as
   `{:dump_failed, code}`.
   """

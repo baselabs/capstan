@@ -73,15 +73,13 @@ defmodule Capstan.Integration.FailClosedTest do
   # PROVES the safety-critical property: a duplicate server_id makes the evicted replica halt
   # FAIL-CLOSED (a `{:connection_halt, _}` arrives) — it does NOT livelock (design Q8/C8).
   #
-  # FINDING (Task 18 report): the plan and `Connection`'s cycle counter both assume MySQL DROPS the
-  # evicted replica (a socket close → `handle_drop` → `:server_id_conflict`). On MySQL 8.0.x the
-  # eviction instead arrives as a 1236 error frame — "A replica with the same server_uuid/server_id
-  # as this replica has connected to the source …" — which `classify_dump_error/2` does not
-  # recognise (it matches only "checksum"/"purged"), so it halts `:unrecognized_dump_error`. That is
-  # still fail-closed and non-livelocking (the property this marquee guards), just less actionable
-  # than `:server_id_conflict`. Recommended fix: add a "server_uuid/server_id" branch to
-  # `classify_dump_error/2`. Both reasons are accepted so this stays green before AND after that fix;
-  # the point proven live is the fail-closed halt, per plan ("assert … not a livelock").
+  # This marquee found (and drove the fix for) a real reachability gap: the plan and
+  # `Connection`'s cycle counter assumed MySQL DROPS the evicted replica (socket close →
+  # `handle_drop` → `:server_id_conflict`), but MySQL 8.0.x evicts it via a 1236 error frame
+  # ("A replica with the same server_uuid/server_id as this replica has connected to the
+  # source …"). `classify_dump_error/2` now has a `server_uuid` branch mapping that 1236 to
+  # `:server_id_conflict` (commit 3fe5e5a), so the halt is the design's actionable Q8 reason —
+  # which this marquee asserts exactly.
   test "a second pipeline with the same server_id halts fail-closed, never a livelock" do
     qconn = MysqlCase.socket!(MysqlCase.query_connection())
     on_exit(fn -> MysqlCase.close!(qconn) end)
