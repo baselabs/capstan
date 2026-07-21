@@ -193,6 +193,14 @@ defmodule Capstan.AssemblerServer do
 
   # A fully-filtered / empty transaction advances the watermark with NO sink call (Q14),
   # so a long filtered quiet period never stalls the position.
+  #
+  # COUPLING (C1-correct, guard for C3): this matches `changes` as a concrete `[]`. The
+  # `Transaction` contract types `changes` as `Enumerable.t()`, and C3 will make it a
+  # lazy single-pass enumerable — an empty `Stream` would NOT match `[]` and would fall
+  # through to the delivered clause, calling the sink with zero changes (a Q14
+  # regression). `Enum.empty?/1` is NOT the fix: it consumes the first element of a
+  # single-pass enumerable. When C3 lands, the Assembler must emit an explicit
+  # filtered/empty signal rather than have this site infer it from the representation.
   defp dispatch(%Transaction{changes: []} = txn, state) do
     with {:ok, state} <- checkpoint(state, txn.position) do
       emit_filtered(txn.gtid)
@@ -217,7 +225,16 @@ defmodule Capstan.AssemblerServer do
 
   # A self-committing DDL schema change (Q13): deliver, then checkpoint the advanced
   # watermark. The `%SchemaChange{}` carries no position, so the watermark comes from the
-  # assembler's post-step position (this step emitted exactly this one output).
+  # assembler's post-step position.
+  #
+  # COUPLING (C1-correct, guard for a future multi-output step): reading the assembler's
+  # POST-step position is exact only because `Assembler.step/2` emits at most ONE output
+  # per event in C1 (every `apply_decoded` clause returns `[]` or a single element). If a
+  # step ever emitted multiple outputs with a `%SchemaChange{}` not last, that position
+  # would already include a later, not-yet-delivered output's GTID — silently advancing
+  # the watermark past undelivered work (an effect-once violation). A future multi-output
+  # Assembler must carry a per-output position (as `%Transaction{}` already does) rather
+  # than have this site read the shared post-step position.
   defp dispatch(%SchemaChange{} = schema_change, state) do
     position = Assembler.position(state.assembler)
 
