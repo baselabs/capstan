@@ -4,7 +4,7 @@ All notable changes to capstan are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-07-21
 
 ### Added — C1 streaming spine
 
@@ -38,6 +38,12 @@ corrupt data silently.
   password never reach a log line or telemetry payload; proven red-capable on all four vectors.
 - **Telemetry** — connection, transaction, schema-change, and gap events with a value-free
   metadata allowlist.
+- **Streaming liveness** — a replication heartbeat requested from the server
+  (`:heartbeat_period_ms`, default 15 000) plus a parent-side liveness window
+  (`:stream_timeout_ms`, default 60 000; must exceed the heartbeat period or start-up fails
+  closed), so a silent half-open partition can no longer hang the pipeline: the timeout emits
+  `[:capstan, :connection, :stream_timeout]`, kills the blocked reader, and reconnects; a
+  persistent partition halts as `:stream_stalled`. TCP `keepalive` is the OS-level backstop.
 
 ### Scope (ADR-0004)
 

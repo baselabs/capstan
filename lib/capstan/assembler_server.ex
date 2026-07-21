@@ -7,15 +7,15 @@ defmodule Capstan.AssemblerServer do
 
   `Connection` owns ONLY the socket and forwards `{:binlog_event, raw}` (the raw 19-byte
   header + body + CRC — exactly `Capstan.Binlog.Event.parse/1`'s input) and
-  `{:capstan_halt, reason}`. This server owns everything downstream of the wire (design
-  Q7): the assembly fold, the sink delivery, the checkpoint, and every fail-closed halt.
+  `{:capstan_halt, reason}`. This server owns everything downstream of the wire:
+  the assembly fold, the sink delivery, the checkpoint, and every fail-closed halt.
   It never touches the socket. That split makes the reconnect path auditable — the
   recurring OTP-async-lifetime bug family lives exactly at a process owning both.
 
   ## Flow per binlog event
 
       Event.parse/1                       # header + CRC verify; a failure HALTS fail-closed
-        -> Assembler.step/2               # the pure three-terminator fold (Q13/Q14)
+        -> Assembler.step/2               # the pure three-terminator fold (ADR-0003)
              {:cont, [output], next}      # for each output, the delivery + checkpoint below
              {:halt, reason}              # XA_PREPARE -> HALT, do not advance
              {:error, reason}            # any refused/desynced event -> HALT, do not advance
@@ -25,7 +25,7 @@ defmodule Capstan.AssemblerServer do
     1. **Dedup** — if its GTID is already in the processed set (`Capstan.Gtid.member?/2`,
        never hand-rolled), the output is SKIPPED: the sink is not called and the
        checkpoint is not touched, emitting `:already_processed` (effect-once).
-    2. **Filtered / empty transaction** (`changes: []`, Q14) — advances the checkpoint
+    2. **Filtered / empty transaction** (`changes: []`, ADR-0003) — advances the checkpoint
        with NO sink call. A long run of filtered transactions therefore never stalls the
        watermark.
     3. **Delivered transaction** — `Sink.handle_transaction/1` FIRST; the checkpoint is

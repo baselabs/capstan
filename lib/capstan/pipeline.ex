@@ -5,7 +5,7 @@ defmodule Capstan.Pipeline do
   and a `Capstan.Connection`).
 
   `Capstan.Supervisor` starts these children in order and threads the pids, because the
-  `Connection`'s `:receiver` must be the `AssemblerServer`'s PID (design Q7). The
+  `Connection`'s `:receiver` must be the `AssemblerServer`'s PID. The
   `Connection` forwards frames with a plain `send/2`, so the receiver is a **PID**: a
   send to a terminated `AssemblerServer` is a silent no-op, never a raise that could
   restart a fail-closed pipeline into a livelock. The `Connection` also **monitors** that
@@ -14,7 +14,7 @@ defmodule Capstan.Pipeline do
   into the dead pid. Monitoring detects the death without linking, so neither `:temporary`
   child restarts into the livelock the plain-`send` avoids.
 
-  ## Per-mode `Sink` callback required-ness (routed from the Task 13 review)
+  ## Per-mode `Sink` callback required-ness
 
   `Capstan.Sink` declares every callback `@optional_callbacks`; which are REQUIRED
   depends on the checkpoint mode, enforced here at start-up via `function_exported?/3` so
@@ -23,10 +23,10 @@ defmodule Capstan.Pipeline do
     * **lib-owned** (`:checkpoint_store` configured): `handle_transaction/1`.
     * **sink-owned** (no `:checkpoint_store`): `checkpoint/0` and `handle_transaction/1`.
     * `handle_schema_change/2` whenever DDL delivery is enabled — in C1 the pipeline
-      ALWAYS delivers self-committing DDL (design Q13), so it is required in both modes.
+      ALWAYS delivers self-committing DDL (ADR-0003), so it is required in both modes.
 
   Note: C1's `AssemblerServer` implements only lib-owned checkpoint mode. Sink-owned
-  required-ness is still validated here (the routed-from-Task-13 contract) so a bad
+  required-ness is still validated here so a bad
   sink-owned sink is refused; `Capstan.start_link/1` refuses to *run* a sink-owned
   pipeline in C1 (`:sink_owned_mode_unsupported`).
   """

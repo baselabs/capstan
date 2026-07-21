@@ -27,6 +27,88 @@ sink callback.
 
 capstan is a **library in your supervision tree**, not a daemon.
 
+## Installation
+
+Add `capstan` to your dependencies:
+
+```elixir
+def deps do
+  [
+    {:capstan, "~> 0.1.0"}
+  ]
+end
+```
+
+## Quickstart
+
+A sink receives each committed transaction as a `Capstan.Transaction` — `gtid`, `position`,
+`commit_ts`, and `changes`, an enumerable of `Capstan.Change` (`op`, `schema`, `table`,
+`record`, `old_record`):
+
+```elixir
+defmodule MyApp.OrdersSink do
+  @behaviour Capstan.Sink
+
+  @impl true
+  def handle_transaction(%Capstan.Transaction{changes: changes} = txn) do
+    # `changes` is a single-pass enumerable — enumerate exactly once, never length/1.
+    Enum.each(changes, fn %Capstan.Change{} = change ->
+      # change.op         — :insert | :update | :delete
+      # change.record     — the row AFTER the change  (nil on :delete)
+      # change.old_record — the row BEFORE the change (nil on :insert)
+      MyApp.Projections.apply(change)
+    end)
+
+    {:ok, txn.position}
+  end
+
+  @impl true
+  def handle_schema_change(%Capstan.SchemaChange{}, _position), do: :ok
+end
+```
+
+Then embed a pipeline in your supervision tree:
+
+```elixir
+children = [
+  {Capstan,
+   connection: [
+     host: "replica.internal",
+     port: 3306,
+     username: "capstan",
+     password: System.fetch_env!("CAPSTAN_MYSQL_PASSWORD"),
+     database: "orders",
+     ssl: true,
+     ssl_opts: [cacertfile: "/etc/ssl/mysql-ca.pem", server_name_indication: :disable]
+   ],
+   server_id: 1001,                    # replica identity — MUST be unique in the topology
+   sink: MyApp.OrdersSink,
+   checkpoint_store: [module: Capstan.CheckpointStore.InMemory],
+   tables: [{"orders", "line_items"}]  # or :all (default)
+  }
+]
+```
+
+Two things to change before production:
+
+1. **The checkpoint store.** `Capstan.CheckpointStore.InMemory` loses the checkpoint on
+   restart. Implement the two-callback `Capstan.CheckpointStore` behaviour over storage you
+   already trust (your database, a file) to get resume-across-restart — see
+   [usage-rules.md](usage-rules.md).
+2. **The TLS choice.** `ssl:` defaults to `true` and start-up fails closed until you make an
+   explicit peer-verification choice — `cacertfile:`/`cacerts:`, `verify: :verify_none`, or
+   `ssl: false`. The options above verify the chain (`VERIFY_CA`).
+
+One behavior to know before the first start: an **empty checkpoint store requests the
+server's full retained binlog history**, and a server that has already purged its earliest
+logs refuses that dump (the pipeline halts fail-closed with `:data_gap`). To start "from
+now", seed the checkpoint store with the server's current `@@global.gtid_executed` before
+first start — the recipe is in [usage-rules.md](usage-rules.md). An initial table snapshot
+(backfill of pre-existing rows) is not shipped yet; see `docs/ROADMAP.md`.
+
+[usage-rules.md](usage-rules.md) is the full consumer contract — delivery guarantees, dedup
+rules, checkpoint semantics, telemetry, and the fail-closed error surface.
+
 ## The contract, shared with replicant
 
 capstan deliberately aligns with replicant's consumer-facing contracts so that porting a sink
@@ -71,6 +153,10 @@ capstan verifies the first five at connect and refuses to start if any is wrong.
 replication (a server aggregating several upstreams) is supported — a GTID set expresses multiple
 source UUIDs natively.
 
+To assess a prospective source before any of that — preconditions, GTID posture, retention, XA
+usage, and a schema census of the types capstan halts on — have a DBA run the read-only
+`scripts/capstan-preflight.sql` and send back the report.
+
 `binlog_row_metadata = FULL` is **required**, not advisory: it is what puts column names and
 types in-band on every `TABLE_MAP` event, giving capstan near-parity with pgoutput's `Relation`
 messages. The default (`MINIMAL`) does not, and capstan fails closed at connect rather than
@@ -85,6 +171,11 @@ decoding rows into positional tuples of unknown provenance.
 | `docs/adr/` | Architecture decision records ([0001](docs/adr/0001-position-and-dedup-model.md)–[0004](docs/adr/0004-c1-scope-lib-owned-checkpoint-only.md)) |
 | `usage-rules.md` | Consumer-facing usage contract |
 
+## Support & maintenance
+
+capstan is maintained as the MySQL side of the baselabs CDC stack (replicant's sibling).
+Issues and pull requests are welcome; there is no support SLA.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/baselabs/capstan/blob/main/LICENSE).

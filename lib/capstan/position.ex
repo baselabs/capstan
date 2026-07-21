@@ -2,10 +2,10 @@ defmodule Capstan.Position do
   @moduledoc """
   A replication position: the processed GTID set plus diagnostic binlog coordinates.
 
-  `gtid_set` is AUTHORITATIVE and the ONLY persisted field (design Q1/Q12). `file`
+  `gtid_set` is AUTHORITATIVE and the ONLY persisted field (ADR-0001). `file`
   and `pos` are DIAGNOSTIC ONLY — **never an ordering key**. A scalar ordinal built
   from `file`/`pos` moves backward after failover or `RESET BINARY LOGS AND GTIDS`
-  while the GTID set moves forward, so no `ordinal` field is exported (Q12).
+  while the GTID set moves forward, so no `ordinal` field is exported.
 
   `to_persisted/1` and `from_persisted/1` round-trip only `gtid_set`: persisting a
   `Position` and restoring it always yields `file: nil, pos: nil`, even when the

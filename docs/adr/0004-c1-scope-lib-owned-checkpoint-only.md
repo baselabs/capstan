@@ -6,7 +6,7 @@ start-position scope (design § Scope item 7)
 ## Context
 
 The C1 streaming-spine design scoped **two** checkpoint modes — sink-owned (the sink persists the
-position atomically with its own data write, read back through `Capstan.Sink.checkpoint/0`) and
+position atomically with its own data write, read back through `c:Capstan.Sink.checkpoint/0`) and
 lib-owned (the position persisted by a `Capstan.CheckpointStore`) — and three start positions
 (`:checkpoint`, an explicit `%Capstan.Position{}` override, and `:current`). During C1
 implementation the `AssemblerServer` was wired for lib-owned mode only, and the spine threads a

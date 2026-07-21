@@ -23,7 +23,7 @@ defmodule Capstan.Sink do
   Splitting required-ness out of the behaviour keeps a sink from being forced to stub
   a callback its mode never calls.
 
-  ## Three load-bearing contracts (design lines 186-194)
+  ## Three load-bearing contracts
 
   These are not style notes; each guards a silent-loss class the type signature alone
   does not catch.
@@ -42,7 +42,7 @@ defmodule Capstan.Sink do
       effect-once path; `member?/2` is the one correct membership check.
     * **The checkpoint is a PROCESSED watermark, not a delivery log.** It records
       every committed GTID the pipeline has processed — delivered *and* filtered
-      (design Q14). It does not mean "delivered". Recording only delivered GTIDs would
+      (ADR-0003). It does not mean "delivered". Recording only delivered GTIDs would
       fragment the set unboundedly and stall progress forever during a fully-filtered
       quiet period; recording processed keeps the set a compact contiguous interval and
       gives `member?/2` one unambiguous meaning ("already processed").
@@ -73,7 +73,7 @@ defmodule Capstan.Sink do
   Deliver one DDL schema change and the processed position that includes it.
 
   The `Capstan.SchemaChange` carries only structured `schema`/`table`/`kind` — the raw
-  DDL statement text is redacted before it reaches the sink (Rule 1, design Q15).
+  DDL statement text is redacted before it reaches the sink (Rule 1).
   Returns `:ok`, or a value-free `{:error, term()}` to halt fail-closed.
   """
   @callback handle_schema_change(Capstan.SchemaChange.t(), Capstan.Position.t()) ::

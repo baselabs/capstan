@@ -7,7 +7,7 @@ defmodule Capstan.Casting.Types do
   *never emitting a plausible-but-wrong value*. Three failure modes get first-class
   defence:
 
-    * **Signedness (F3).** Integer width comes from the wire type byte, but *signedness
+    * **Signedness.** Integer width comes from the wire type byte, but *signedness
       does not* — it rides `TABLE_MAP` optional-metadata TLV type 1. `cast/4` takes the
       resolved signedness bit as an explicit argument; a `BIGINT UNSIGNED` of
       `18446744073709551615` must never decode to `-1`.
@@ -15,7 +15,7 @@ defmodule Capstan.Casting.Types do
       and are distinguishable only by the STRING metadata pair (byte 0 real-type:
       `247` = `ENUM`, `248` = `SET`). `SET`'s row image is packed as a bitfield, not an
       index, so an enum-style decode would be silently wrong. C1 defers `SET`
-      (design C4): `parse_col_meta/2` unpacks the pair to *detect* it and `cast/4`
+      (roadmap row C4): `parse_col_meta/2` unpacks the pair to *detect* it and `cast/4`
       **fails closed** with `:unsupported_column_type`.
     * **Meta-driven widths.** Fractional-second width, decimal precision/scale, blob
       length-prefix width and string length all come from the metadata, not the type
@@ -28,7 +28,7 @@ defmodule Capstan.Casting.Types do
 
   Both entry points return `{:error, {:unsupported_column_type, detail}}` rather than a
   value whenever the type, its metadata, or a decoded temporal component is one C1 does
-  not faithfully support. The owner (Task 12) turns that into a stream halt, exactly as
+  not faithfully support. The owner (`Capstan.Assembler`) turns that into a stream halt, exactly as
   it does for the registry's `{:error, :unmapped_table_id}` — a column C1 cannot decode
   is never silently dropped or passed through raw. `detail` carries only schema-level
   facts (wire type byte, column position); never a column value (Rule 1).
@@ -177,7 +177,7 @@ defmodule Capstan.Casting.Types do
 
     * `col_meta` — the column's `t:col_meta/0` from `parse_col_meta/2`.
     * `signed?` — the resolved signedness bit (`true` = signed). Consumed only by
-      integer casts; supplied by the caller from TLV type 1 (F3).
+      integer casts; supplied by the caller from TLV type 1.
     * `str_values` — the allowed member strings for an `ENUM` column, `[]` otherwise.
     * `bytes` — the remaining row-image bytes, positioned at this column's value.
 

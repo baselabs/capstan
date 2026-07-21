@@ -69,7 +69,7 @@ defmodule Capstan.Protocol.Command do
   empty binlog name (length 0), the start position (4), then the `data_size`-prefixed
   GTID-set block: `n_sids`, and per source the 16 raw UUID bytes, its interval count,
   and each `{start, end}` pair. **Each INCLUSIVE `high` is encoded as the EXCLUSIVE
-  wire `high + 1`** (F2). An empty set encodes as `n_sids = 0` and streams everything
+  wire `high + 1`**. An empty set encodes as `n_sids = 0` and streams everything
   the server still retains.
   """
   @spec com_binlog_dump_gtid(non_neg_integer(), Gtid.t()) :: binary()

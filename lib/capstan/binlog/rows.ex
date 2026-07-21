@@ -4,7 +4,7 @@ defmodule Capstan.Binlog.Rows do
   resolved `%Capstan.Binlog.TableMap{}`.
 
   The decoder splits a `ROWS` event into `{op, table_id, present_bitmap(s), raw}` but
-  leaves every value byte untouched (F12). This module turns `raw` into decoded rows:
+  leaves every value byte untouched. This module turns `raw` into decoded rows:
 
     * `WRITE`/`DELETE` carry one image per row; `UPDATE` carries a before/after image
       **pair** per row. A single event carries **many** rows (e.g. a multi-row `INSERT`
@@ -22,11 +22,11 @@ defmodule Capstan.Binlog.Rows do
   The single biggest failure mode here is a *plausible-but-wrong* value, so the decode
   is built to fail closed at every point one could arise:
 
-    * **Wrong schema (Q3).** A `table_id` is resolved to a `%TableMap{}` by the owner;
+    * **Wrong schema (ADR-0002).** A `table_id` is resolved to a `%TableMap{}` by the owner;
       this module additionally asserts the event's `table_id` equals the map's, so a
       caller that pairs `ta`'s rows with `tb`'s map is refused rather than casting
       against the wrong columns.
-    * **Signedness (F3).** The per-column signedness bit is resolved from TLV type 1 and
+    * **Signedness.** The per-column signedness bit is resolved from TLV type 1 and
       passed to the caster. A numeric column with no signedness bitmap fails closed
       rather than defaulting to signed.
     * **Unsupported column (`SET`, JSON opaque, unknown type/meta).** Any caster error

@@ -1,7 +1,7 @@
 defmodule Capstan.MixProject do
   use Mix.Project
 
-  @version "0.0.0-dev"
+  @version "0.1.0"
   @source_url "https://github.com/baselabs/capstan"
 
   def project do
@@ -19,7 +19,8 @@ defmodule Capstan.MixProject do
       name: "Capstan",
       description:
         "Framework-agnostic Elixir CDC consumer for MySQL binary-log replication (row-based " <>
-          "binlog) with sink-owned, transaction-granularity exactly-once delivery.",
+          "binlog) — streams committed transactions to a pluggable sink, fail-closed, " <>
+          "at-least-once (sink-owned effect-once mode planned).",
       source_url: @source_url,
       homepage_url: @source_url,
       dialyzer: [
@@ -61,7 +62,7 @@ defmodule Capstan.MixProject do
   defp package do
     [
       maintainers: ["rjpalermo"],
-      files: ~w(lib .formatter.exs mix.exs README* LICENSE* CHANGELOG* usage-rules.md),
+      files: ~w(lib .formatter.exs mix.exs README* LICENSE* NOTICE CHANGELOG* usage-rules.md),
       licenses: ["MIT"],
       links: %{
         "GitHub" => @source_url,
@@ -76,7 +77,47 @@ defmodule Capstan.MixProject do
       main: "readme",
       source_ref: "v#{@version}",
       source_url: @source_url,
-      extras: ["README.md", "CHANGELOG.md"]
+      extras: [
+        "README.md",
+        "usage-rules.md",
+        "CHANGELOG.md",
+        "docs/adr/0001-position-and-dedup-model.md",
+        "docs/adr/0002-fail-closed-server-preconditions.md",
+        "docs/adr/0003-transaction-shape-and-checkpoint-semantics.md",
+        "docs/adr/0004-c1-scope-lib-owned-checkpoint-only.md"
+      ],
+      groups_for_modules: [
+        "Consumer API": [
+          Capstan,
+          Capstan.Sink,
+          Capstan.CheckpointStore,
+          Capstan.CheckpointStore.InMemory,
+          Capstan.Transaction,
+          Capstan.Change,
+          Capstan.SchemaChange,
+          Capstan.Position,
+          Capstan.Gtid,
+          Capstan.Error
+        ],
+        Internals: [
+          Capstan.Assembler,
+          Capstan.AssemblerServer,
+          Capstan.Config,
+          Capstan.Connection,
+          Capstan.Pipeline,
+          Capstan.Supervisor,
+          Capstan.Telemetry,
+          Capstan.Binlog.Decoder,
+          Capstan.Binlog.Event,
+          Capstan.Binlog.Rows,
+          Capstan.Binlog.TableMap,
+          Capstan.Binlog.TableRegistry,
+          Capstan.Casting.Types,
+          Capstan.Protocol.Command,
+          Capstan.Protocol.Handshake,
+          Capstan.Protocol.Packet
+        ]
+      ]
     ]
   end
 

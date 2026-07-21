@@ -1,7 +1,6 @@
 defmodule Capstan.SchemaChange do
   @moduledoc """
-  A DDL change: the self-committing DDL transaction's structured effect (design
-  Q13/Q15).
+  A DDL change: the self-committing DDL transaction's structured effect (ADR-0003).
 
   There is deliberately **no statement-text field**. Raw DDL SQL routinely embeds
   literal values (`DEFAULT 'secret'`, partition bounds) — a Rule 1 leak — so the
@@ -11,7 +10,7 @@ defmodule Capstan.SchemaChange do
   `schema`/`table` name the affected object; `table` is `nil` for schema-level DDL.
   `kind` is the DDL kind as an atom (e.g. `:alter_table`, `:create_table`,
   `:drop_table`, `:truncate`, `:other`). `gtid` is the self-committing DDL
-  transaction's own identity (Q13).
+  transaction's own identity.
   """
 
   @type t :: %__MODULE__{

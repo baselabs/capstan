@@ -1,7 +1,7 @@
 defmodule Capstan.Assembler do
   @moduledoc """
   The three-terminator fold — a **pure** assembler over a `%Capstan.Binlog.Event{}`
-  stream (design Q13/Q14; the owning GenServer is Task 15).
+  stream (ADR-0003; the owning GenServer is `Capstan.AssemblerServer`).
 
   The fold turns raw binlog events into the committed units a `Sink` consumes:
   `%Capstan.Transaction{}` for DML, `%Capstan.SchemaChange{}` for self-committing
@@ -24,7 +24,7 @@ defmodule Capstan.Assembler do
 
     * An `XA_PREPARE` (`Decoder` `{:halt, :unsupported_transaction_shape}`): its row
       images may later be `XA ROLLBACK`-ed, so the rows accumulated so far in that
-      transaction must be **discarded**, not delivered (design F9). The halt is keyed
+      transaction must be **discarded**, not delivered (ADR-0003). The halt is keyed
       on the `Decoder`'s type-byte signal, never re-derived here.
     * Any mid-transaction failure — an unmapped `table_id`, a `Rows.decode/2` error,
       or a `Decoder` `{:error, _}` — aborts **fail-closed**. A partial transaction
@@ -42,7 +42,7 @@ defmodule Capstan.Assembler do
   — each aborts rather than dropping or overwriting an open buffer, since a silently
   absorbed desync can mask exactly the loss this fold exists to prevent.
 
-  ## The three terminators (Q13) — anchored on the proven `fixture_capture`
+  ## The three terminators (ADR-0003) — anchored on the proven `fixture_capture`
   `classify`/`apply_event` precedent so a terminator is never misclassified (itself a
   silent-loss risk: a `COMMIT` read as DDL would drop the transaction's rows):
 
@@ -51,13 +51,14 @@ defmodule Capstan.Assembler do
       terminator, not a change.
     * a self-committing DDL `QUERY` — a `QUERY` that is **not** `BEGIN`/`COMMIT` and
       arrives with **no open `BEGIN`**. Yields a `%SchemaChange{}` and advances the
-      position (Q13). `BEGIN` opens a DML block; `COMMIT` closes it.
+      position. `BEGIN` opens a DML block; `COMMIT` closes it.
 
-  ## Fully-filtered transactions keep the watermark moving (Q14)
+  ## Fully-filtered transactions keep the watermark moving (ADR-0003)
 
   The checkpoint is a **processed-GTID watermark**, so a committed transaction whose
   changes are all filtered (or which has none) still advances the position and is
-  delivered as a `%Transaction{}` with **empty** `changes`. Task 15 checkpoints it
+  delivered as a `%Transaction{}` with **empty** `changes`. `Capstan.AssemblerServer`
+  checkpoints it
   without calling the sink. A long run of filtered transactions therefore never
   stalls the position.
 
@@ -74,7 +75,7 @@ defmodule Capstan.Assembler do
   ## Interface
 
     * `new/2` + `step/2` + `position/1` — the incremental primitive the owning
-      GenServer (Task 15) drives to checkpoint per transaction.
+      GenServer (`Capstan.AssemblerServer`) drives to checkpoint per transaction.
     * `run/3` — folds a whole event sequence, returning every output plus the final
       watermark; the batch entry the tests drive.
   """
@@ -131,7 +132,7 @@ defmodule Capstan.Assembler do
 
   `opts` accepts `tables: :all` (default) or `tables: [{schema, table}, ...]` — the
   allowlist of tables whose rows are delivered; everything else is filtered before
-  row decode (Q14).
+  row decode.
   """
   @spec new(Position.t(), keyword()) :: t()
   def new(%Position{} = start_position, opts \\ []) do
@@ -148,7 +149,7 @@ defmodule Capstan.Assembler do
   @doc """
   The running processed-GTID watermark as a `Capstan.Position`.
 
-  Task 15 reads this after a `step/2` to checkpoint a transaction — including a
+  `Capstan.AssemblerServer` reads this after a `step/2` to checkpoint a transaction — including a
   self-committing DDL or a fully-filtered transaction, whose position advances even
   though the emitted output carries none (or an empty `changes`).
   """

@@ -2,10 +2,10 @@ defmodule Capstan.Gtid do
   @moduledoc """
   MySQL GTID-set algebra — the dedup correctness core.
 
-  A GTID set is the sole authority for replication position (design Q12): dedup is
+  A GTID set is the sole authority for replication position (ADR-0001): dedup is
   set **membership**, never an ordinal comparison. This module is the one place
-  GTID-set membership and interval math live, so consumers (Tasks 3, 6, 12, 13, 14,
-  15) never hand-roll them.
+  GTID-set membership and interval math live, so no consumer — the connection's gap
+  gate, the assembler, or a sink — ever hand-rolls them.
 
   ## String format (MySQL canonical, INCLUSIVE bounds)
 
@@ -139,7 +139,7 @@ defmodule Capstan.Gtid do
   def subset?(a, b), do: subtract(a, b) == %{}
 
   @doc """
-  Are `a` and `b` disjoint? True iff `a ∩ b` is empty (F1).
+  Are `a` and `b` disjoint? True iff `a ∩ b` is empty.
   """
   @spec disjoint?(t(), t()) :: boolean()
   def disjoint?(a, b), do: intersection(a, b) == %{}

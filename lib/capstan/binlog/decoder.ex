@@ -2,30 +2,32 @@ defmodule Capstan.Binlog.TableMap do
   @moduledoc """
   A fully-decoded MySQL `TABLE_MAP_EVENT` body.
 
-  Design F12 pins ownership: `Capstan.Binlog.Decoder` parses the **entire**
-  `TABLE_MAP` body — including the optional-metadata TLVs — into this struct. Task
-  10's registry stores and resolves these; Task 11 casts row values against them.
-  Neither re-parses the body, so this struct must carry everything a later
-  value-decode needs.
+  Ownership is deliberate: `Capstan.Binlog.Decoder` parses the **entire**
+  `TABLE_MAP` body — including the optional-metadata TLVs — into this struct.
+  `Capstan.Binlog.TableRegistry` stores and resolves these; `Capstan.Casting.Types`
+  casts row values against them. Neither re-parses the body, so this struct must
+  carry everything a later value-decode needs.
 
   ## Fields
 
     * `table_id` — the numeric table identity a row event references. Unstable across
       DDL and reused, so resolution is by this id via the registry, never by "most
-      recent map" (design Q3).
+      recent map" (ADR-0002).
     * `schema`, `table` — the qualified table name.
     * `column_types` — the raw MySQL type byte per column, in order (e.g. `3` = LONG,
       `254` = STRING/ENUM/SET). ENUM and SET both arrive as `254` and are told apart
-      only via the metadata/TLVs (F3).
+      only via the metadata/TLVs.
     * `column_metadata` — the type-specific metadata blob, stored **RAW**. It is
       length-prefixed in the body and consumed here as a single unit; the per-column
-      split needs type-aware widths and belongs to Task 11's `parse_col_meta`, **not**
-      here. Splitting it per-column in this module would cross the Task 9/11 boundary.
+      split needs type-aware widths and belongs to the casting layer
+      (`Capstan.Casting.Types`), **not** here. Splitting it per-column in this module
+      would cross that ownership boundary.
     * `null_bitmap` — the nullability bitmap over the columns.
     * `signedness` — optional-metadata TLV type 1: a bitmap over the NUMERIC columns,
-      `1` = UNSIGNED (F3). Signedness is **not** in the type byte; without this a
+      `1` = UNSIGNED. Signedness is **not** in the type byte; without this a
       `BIGINT UNSIGNED` of `18446744073709551615` would decode as `-1`. Retained raw
-      because interpreting the bitmap requires the numeric-column ordering Task 11 owns.
+      because interpreting the bitmap requires the numeric-column ordering the casting
+      layer owns.
     * `default_charset` — optional-metadata TLV type 2, retained raw.
     * `column_names` — optional-metadata TLV type 4, in column order (present under
       `binlog_row_metadata=FULL`).
@@ -36,7 +38,7 @@ defmodule Capstan.Binlog.TableMap do
       `ENUM` column, in order.
 
   Unknown optional-metadata TLV types (e.g. type 12 `COLUMN_VISIBILITY`, emitted by
-  8.0.46) are scanned past by their length and never cause a failure (F3).
+  8.0.46) are scanned past by their length and never cause a failure.
   """
 
   @typedoc "A decoded `TABLE_MAP_EVENT` body."
@@ -87,7 +89,7 @@ defmodule Capstan.Binlog.Decoder do
     * `{:halt, :unsupported_transaction_shape}` — an `XA_PREPARE_LOG_EVENT` (type 38).
       This is a **fail-closed control signal**, distinct from both success and a
       decode error, so a consumer that omits a `{:halt, _}` clause crashes loudly
-      rather than silently treating XA rows as a normal event (design Q13, F9).
+      rather than silently treating XA rows as a normal event (ADR-0003).
     * `{:error, reason}` — an event C1 refuses: a compressed transaction payload, or
       an unknown type byte. An unknown type **fails closed** and is never silently
       skipped — a dropped event of an unrecognised shape could hide a condition
@@ -98,20 +100,19 @@ defmodule Capstan.Binlog.Decoder do
     * **`ROWS_QUERY_LOG_EVENT` (29)** carries the complete original SQL of the row
       change with every literal value — a total Rule-1 leak if surfaced. The header
       is recognised and the body is **discarded**: `decode/1` returns
-      `{:rows_query, :discarded}` and the SQL text never enters the returned term
-      (design Q16).
+      `{:rows_query, :discarded}` and the SQL text never enters the returned term.
     * **`XA_PREPARE_LOG_EVENT` (38)** halts fail-closed. Its row images ride the
       *prepare* event and are committed later by a separate `XID` — or discarded by
       `XA ROLLBACK` — so treating them as committed delivers rolled-back rows
-      effect-once. The halt is keyed purely on the type byte (design Q13).
+      effect-once. The halt is keyed purely on the type byte (ADR-0003).
 
   ## Rule-1 note on QUERY text
 
-  For `QUERY` (2) the SQL text **is** returned — Task 12 inspects it to detect
-  `BEGIN`/`COMMIT` and self-committing DDL terminators. That raw text is
+  For `QUERY` (2) the SQL text **is** returned — `Capstan.Assembler` inspects it to
+  detect `BEGIN`/`COMMIT` and self-committing DDL terminators. That raw text is
   Rule-1-sensitive (DDL routinely embeds literals like `DEFAULT 'secret'`) and must
   never be logged. DDL redaction happens later, at the `%Capstan.SchemaChange{}`
-  boundary (design Q15), not in this module.
+  boundary (Rule 1), not in this module.
   """
 
   alias Capstan.Binlog.{Event, TableMap}

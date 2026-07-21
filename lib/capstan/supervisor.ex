@@ -1,6 +1,6 @@
 defmodule Capstan.Supervisor do
   @moduledoc """
-  The pipeline supervisor (design § Architecture overview): it owns one pipeline's
+  The pipeline supervisor: it owns one pipeline's
   checkpoint store, `Capstan.AssemblerServer`, and `Capstan.Connection`, wired so the
   `Connection`'s `:receiver` is the `AssemblerServer` PID.
 

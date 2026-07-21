@@ -3,7 +3,7 @@ defmodule Capstan do
   Framework-agnostic Elixir CDC consumer for MySQL row-based binary-log replication,
   delivering committed transactions to a pluggable **sink** with fail-closed,
   transaction-granularity delivery: the checkpoint advances only after the sink has
-  durably applied a transaction (design § Scope). In C1's lib-owned checkpoint mode this
+  durably applied a transaction (ADR-0003). In C1's lib-owned checkpoint mode this
   is **at-least-once** — a crash between the sink write and the checkpoint re-delivers the
   transaction on restart (a bounded duplicate window). Effect-once delivery is the
   sink-owned atomic path (the sink persisting its write and the position together), which
@@ -17,7 +17,7 @@ defmodule Capstan do
         connection: [
           host: "replica.internal", port: 3306, username: "capstan",
           password: "…", database: "orders",
-          ssl: true, ssl_opts: [cacertfile: "/etc/ssl/mysql-ca.pem"]  # TLS on by default (Q6/Q17)
+          ssl: true, ssl_opts: [cacertfile: "/etc/ssl/mysql-ca.pem"]  # TLS on by default (ADR-0002)
         ],
         server_id: 1001,                       # replica identity; MUST be unique in the topology
         sink: MyApp.OrdersSink,                # implements Capstan.Sink
@@ -46,8 +46,12 @@ defmodule Capstan do
   ## Start position
 
   C1 resumes **only from the durable checkpoint** (`start_position: :checkpoint`, the
-  default): a fresh store starts from the server's currently-available log, and a
-  populated store resumes from the persisted watermark. An explicit `%Capstan.Position{}`
+  default). A populated store resumes from the persisted watermark. A fresh
+  (never-written) store sends the dump an **empty GTID set**, which requests the
+  server's full retained history — and a server that has already purged its earliest
+  logs refuses that dump, halting `:data_gap`. To start "from now" today, seed the
+  checkpoint store with the server's current `@@global.gtid_executed` before first
+  start (see usage-rules.md). An explicit `%Capstan.Position{}`
   override and `:current` are **refused fail-closed** (`:start_position_override_unsupported`
   / `:start_position_current_unsupported`) — honoring an explicit resume position
   end-to-end (the `AssemblerServer` seeds its watermark from the store alone today) is a

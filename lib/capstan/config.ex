@@ -10,7 +10,7 @@ defmodule Capstan.Config do
       socket and refuses to start unless the source's binlog is configured for
       lossless row-based CDC.
 
-  ## Server preconditions (design Q5)
+  ## Server preconditions (ADR-0002)
 
   `check_preconditions/1` reads five global variables in a single query and refuses
   with a DISTINCT reason per violation — degraded row decoding silently guesses
@@ -27,7 +27,7 @@ defmodule Capstan.Config do
   text against the expected literal and never coerced to a typed term — an empty
   `binlog_row_value_options` arrives as `""`, not `nil` or `0`.
 
-  ## TLS verification posture (design Q6/Q17, plan F6)
+  ## TLS verification posture (ADR-0002)
 
   `ssl` defaults **true**. Peer verification is an explicit operator choice, never a
   silent default: with TLS on, `ssl_opts` must carry EITHER a `cacertfile`/`cacerts`
@@ -68,7 +68,7 @@ defmodule Capstan.Config do
   @type validation_error ::
           :config_invalid | :server_id_required | :tls_verification_unspecified
 
-  @typedoc "A value-free precondition-gate refusal (design Q5)."
+  @typedoc "A value-free precondition-gate refusal (ADR-0002)."
   @type precondition_error ::
           :binlog_format_not_row
           | :binlog_row_image_not_full
@@ -82,7 +82,7 @@ defmodule Capstan.Config do
   value-free error.
 
   Refuses: `:server_id_required` (missing or non-positive `server_id`),
-  `:tls_verification_unspecified` (F6 — `ssl: true` with no CA source and no explicit
+  `:tls_verification_unspecified` (`ssl: true` with no CA source and no explicit
   `verify:`), and `:config_invalid` (any other missing or mis-shaped option). Defaults
   applied: `ssl` true, `ssl_opts` `[]`, `auth_plugins` `[:caching_sha2_password]`,
   `password` `""`, `database` `nil`, `max_command_retries` `5`.
@@ -107,7 +107,7 @@ defmodule Capstan.Config do
   Reads the five server preconditions over `socket` and returns `:ok` iff all pass.
 
   Issues ONE `COM_QUERY` on the already-authenticated socket and compares each value
-  as text (design Q5). A wrong variable refuses with its distinct reason; a server or
+  as text (ADR-0002). A wrong variable refuses with its distinct reason; a server or
   transport error is surfaced fail-closed, never swallowed into a spurious `:ok`.
   """
   @spec check_preconditions(Packet.socket()) ::

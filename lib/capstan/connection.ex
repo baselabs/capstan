@@ -5,14 +5,14 @@ defmodule Capstan.Connection do
 
   `Connection` owns ONLY the TCP/TLS socket. It never delivers to a sink and never
   **writes** the checkpoint — `Capstan.AssemblerServer` is the sole checkpoint writer, so
-  there is no split-brain over the durable position (design Q7). It does **read** the
+  there is no split-brain over the durable position. It does **read** the
   durable resume position at each (re)establish (see "Resume position" below); reading is
   not writing, and it is what makes a reconnect resume from the current watermark. That
   split keeps the reconnect seam auditable: every socket-lifetime primitive (the reconnect
   timer, the streaming reader) lives in this one module and is torn down with the
   connection it serves.
 
-  ## Resume position (design Q7 / F1)
+  ## Resume position
 
   The dump resumes from the durable checkpoint, RE-READ from the checkpoint store on every
   establish — the initial connect AND every reconnect. Freezing the resume position at
@@ -32,10 +32,10 @@ defmodule Capstan.Connection do
   ## Lifecycle
 
       connect + auth  (via the injected connect_fun; default: gen_tcp + Handshake)
-        -> Config.check_preconditions/1        (fail-closed server gate, Q5)
+        -> Config.check_preconditions/1        (fail-closed server gate, ADR-0002)
         -> read @@gtid_executed / @@gtid_purged
-        -> gap_check/3                          (proactive retention gap, F1 / Q4)
-        -> SET @master_binlog_checksum          (F4 — required BEFORE the dump)
+        -> gap_check/3                          (proactive retention gap)
+        -> SET @master_binlog_checksum          (required BEFORE the dump)
         -> SET @master_heartbeat_period         (liveness — required BEFORE the dump)
         -> COM_BINLOG_DUMP_GTID                 (resume from the start position)
         -> stream frames -> receiver
@@ -71,26 +71,26 @@ defmodule Capstan.Connection do
   restarts, so this closes the silent stall without the restart livelock the plain-`send`
   wiring exists to avoid.
 
-  ## Two independent counters (design Q8)
+  ## Two independent counters
 
     * **Command budget** (`max_command_retries`, default 5): counts failures that occur
       **before** the connection establishes (connect/auth/query/dump-send errors). It
-      is RESET when a frame arrives — replicant's A6 policy, correct for transient
-      pre-establish faults. Halts `:command_retries_exhausted` on the `max + 1`-th
+      is RESET when a frame arrives — replicant's reset-on-frame policy, correct for
+      transient pre-establish faults. Halts `:command_retries_exhausted` on the `max + 1`-th
       failure.
     * **Cycle counter**: counts **established-then-dropped** cycles. It is **NOT** reset
       by frame arrival, and is reset only by clean shutdown. A duplicate `server_id`
       makes MySQL evict this replica after each establish — authenticating and receiving
-      frames before dying — so a frame-reset counter (A6 verbatim) would livelock
+      frames before dying — so a frame-reset counter would livelock
       forever while emitting healthy `:established` telemetry. Halts `:server_id_conflict`
       on the `max + 1`-th cycle.
 
-  ## Error 1236 is OVERLOADED (design A2 / F5)
+  ## Error 1236 is OVERLOADED (ADR-0003)
 
   A dump refusal (error 1236) is discriminated on its message text: checksum-negotiation
   text -> `:checksum_negotiation_failed`; purged-logs text (with OR without a named
   range) -> `:data_gap`; a duplicate-replica message (`server_uuid`/`server_id`) ->
-  `:server_id_conflict` (Q8 — MySQL 8.0.x evicts a same-`server_id` replica via 1236, not
+  `:server_id_conflict` (MySQL 8.0.x evicts a same-`server_id` replica via 1236, not
   a socket drop); anything else -> `:unrecognized_dump_error`, **never** `:data_gap` —
   mapping 1236 unconditionally to a gap would tell an operator to reprovision past what is
   actually a config bug, manufacturing the silent loss the gate exists to prevent.
@@ -181,7 +181,7 @@ defmodule Capstan.Connection do
   end
 
   @doc """
-  The proactive retention-gap predicate (design Q4 / F1).
+  The proactive retention-gap predicate.
 
   Given the server's `gtid_executed` and `gtid_purged` and the resume `checkpoint`
   (all canonical GTID-set strings), returns `:ok` when the pipeline is healthy, or a
@@ -193,7 +193,7 @@ defmodule Capstan.Connection do
 
   An **empty** checkpoint is a fresh start with no durable position to lose, so it never
   halts — otherwise every fresh start against a server that has ever purged (i.e. every
-  real server) would falsely halt `:data_gap`, the over-rejection Q4 forbids.
+  real server) would falsely halt `:data_gap`, an over-rejection this gate must not commit.
   """
   @spec gap_check(String.t(), String.t(), String.t()) ::
           :ok | {:halt, :data_gap | :source_identity_mismatch}
@@ -217,11 +217,11 @@ defmodule Capstan.Connection do
   end
 
   @doc """
-  Discriminates a dump-refusal error into a halt reason (design A2 / F5).
+  Discriminates a dump-refusal error into a halt reason (ADR-0003).
 
   Error 1236 is overloaded: a checksum-negotiation message -> `:checksum_negotiation_failed`;
   a purged-logs message (with or without a named range) -> `:data_gap`; a duplicate-replica
-  message (`server_uuid`/`server_id`) -> `:server_id_conflict` (Q8); any other 1236 ->
+  message (`server_uuid`/`server_id`) -> `:server_id_conflict`; any other 1236 ->
   `:unrecognized_dump_error` (never `:data_gap`). A non-1236 code is surfaced as
   `{:dump_failed, code}`.
   """

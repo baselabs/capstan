@@ -1,0 +1,16 @@
+# Architecture decision records
+
+The permanent, public record of capstan's load-bearing design decisions. Each ADR states the
+context, the decision, and the consequences — including what was deliberately refused.
+
+| ADR | Decision |
+| --- | --- |
+| [0001](0001-position-and-dedup-model.md) | Position and dedup model — GTID set as the sole position; dedup by set membership, never ordinal comparison |
+| [0002](0002-fail-closed-server-preconditions.md) | Fail-closed server preconditions — the connect-time gate on binlog/GTID configuration |
+| [0003](0003-transaction-shape-and-checkpoint-semantics.md) | Transaction shape and checkpoint semantics — terminators, XA refusal, the processed watermark |
+| [0004](0004-c1-scope-lib-owned-checkpoint-only.md) | C1 scope — lib-owned checkpoint mode only; sink-owned mode and explicit start positions deferred |
+
+A note on provenance markers: "Design refs" (`Q1`, `Q5`, `F6`, …) cite the numbered questions
+and findings of the pre-implementation design review, and "Task n" cites rows of the
+implementation plan. Those records are machine-local working artifacts and are not shipped in
+this repository; the ADRs are self-contained without them.

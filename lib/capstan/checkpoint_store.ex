@@ -1,6 +1,6 @@
 defmodule Capstan.CheckpointStore do
   @moduledoc """
-  The lib-owned checkpoint persistence contract (design § Data model, line 198).
+  The lib-owned checkpoint persistence contract.
 
   A checkpoint store persists **exactly one value** per pipeline identity: the
   processed `gtid_set` STRING. `file`/`pos` are never persisted — they are diagnostic
@@ -9,7 +9,7 @@ defmodule Capstan.CheckpointStore do
   implementation *cannot* accidentally persist `file`/`pos`; there is exactly one
   durable value and no two-representation divergence to occur on.
 
-  The checkpoint is a **processed** watermark (design Q14): it records every committed
+  The checkpoint is a **processed** watermark (ADR-0003): it records every committed
   GTID the pipeline has processed, delivered or filtered — see `Capstan.Sink`.
 
   ## Behaviour

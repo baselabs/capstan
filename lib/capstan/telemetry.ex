@@ -1,17 +1,17 @@
 defmodule Capstan.Telemetry do
   @moduledoc """
   Value-free telemetry emission. Provides the metadata **allowlist** for "no row values
-  and no passwords in telemetry" (Rule 1, design § Events / telemetry): `event/3` routes
+  and no passwords in telemetry" (Rule 1): `event/3` routes
   through `validate!/1`, which **raises** on any key outside the allowlist, so a stray row
   value or password cannot ride a payload emitted through this module.
 
-  Only the structural metadata the design's event table lists — GTIDs, schema / table
+  Only structural metadata — GTIDs, schema / table
   names, DDL kinds, atom reasons, server identity, TLS posture, and server-reported
   missing GTIDs — is permitted.
 
   **Scope (C1):** this is the pipeline's sole telemetry emit path. Every emitter in
   `Capstan.Connection` and `Capstan.AssemblerServer` routes through `event/3` (Rule-1
-  completion, F11), so the allowlist gates them at runtime — a future emitter attaching a
+  completion), so the allowlist gates them at runtime — a future emitter attaching a
   row value or password raises rather than shipping it. The complementary test-time
   guarantee is the `Capstan.ValueFree` helper, which scans the log and telemetry channels
   (and, for the live vectors, the delivered sink outputs) for a planted sentinel across
