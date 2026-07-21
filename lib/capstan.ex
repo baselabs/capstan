@@ -18,7 +18,7 @@ defmodule Capstan do
         server_id: 1001,                       # replica identity; MUST be unique in the topology
         sink: MyApp.OrdersSink,                # implements Capstan.Sink
         checkpoint_store: [module: MyApp.Store],   # lib-owned mode; see below
-        start_position: :checkpoint,           # :checkpoint (default) | %Capstan.Position{}
+        start_position: :checkpoint,           # C1: :checkpoint (default) only — see below
         max_command_retries: 5
       )
 
@@ -39,6 +39,16 @@ defmodule Capstan do
   `AssemblerServer`; a sink-owned configuration is refused with
   `:sink_owned_mode_unsupported`.
 
+  ## Start position
+
+  C1 resumes **only from the durable checkpoint** (`start_position: :checkpoint`, the
+  default): a fresh store starts from the server's currently-available log, and a
+  populated store resumes from the persisted watermark. An explicit `%Capstan.Position{}`
+  override and `:current` are **refused fail-closed** (`:start_position_override_unsupported`
+  / `:start_position_current_unsupported`) — honoring an explicit resume position
+  end-to-end (the `AssemblerServer` seeds its watermark from the store alone today) is a
+  C1-completeness follow-up. Refusing avoids a silent checkpoint hole.
+
   ## Return values
 
   `{:ok, supervisor_pid}` on success, or `{:error, reason}` — a value-free atom from
@@ -46,11 +56,13 @@ defmodule Capstan do
   `:tls_verification_unspecified`), from `Capstan.Pipeline` (`:invalid_sink`,
   `:sink_missing_handle_transaction`, `:sink_missing_checkpoint`,
   `:sink_missing_handle_schema_change`), or from this module
-  (`:sink_owned_mode_unsupported`, `:start_position_current_unsupported`).
+  (`:sink_owned_mode_unsupported`, `:checkpoint_store_required`,
+  `:start_position_override_unsupported`, `:start_position_current_unsupported`).
   """
 
   alias Capstan.Config
   alias Capstan.Pipeline
+  alias Capstan.Position
 
   @doc """
   Validate `opts` and start a supervised pipeline. See the moduledoc for the option shape
@@ -60,7 +72,9 @@ defmodule Capstan do
   def start_link(opts) when is_list(opts) do
     with {:ok, config} <- Config.validate(opts),
          :ok <- Pipeline.validate_sink(opts),
-         :ok <- require_lib_mode(opts) do
+         :ok <- require_lib_mode(opts),
+         :ok <- validate_checkpoint_store(opts),
+         :ok <- validate_start_position(opts) do
       Capstan.Supervisor.start_link(wiring(config, opts))
     end
   end
@@ -88,6 +102,37 @@ defmodule Capstan do
   # configuration is refused honestly rather than crashing at AssemblerServer init.
   defp require_lib_mode(opts) do
     if Pipeline.lib_mode?(opts), do: :ok, else: {:error, :sink_owned_mode_unsupported}
+  end
+
+  # Fail closed on a malformed lib-owned checkpoint store BEFORE any child starts, so a
+  # missing `:module` surfaces as a clean `{:error, :checkpoint_store_required}` from
+  # `start_link/1` rather than a `KeyError` crash deep in `AssemblerServer` init.
+  defp validate_checkpoint_store(opts) do
+    case Keyword.get(opts, :checkpoint_store) do
+      config when is_list(config) ->
+        if Keyword.keyword?(config) and is_atom(Keyword.get(config, :module)) and
+             Keyword.get(config, :module) != nil,
+           do: :ok,
+           else: {:error, :checkpoint_store_required}
+
+      _ ->
+        {:error, :checkpoint_store_required}
+    end
+  end
+
+  # C1 resumes ONLY from the durable checkpoint (`:start_position` default `:checkpoint`).
+  # An explicit `%Position{}` override and `:current` are refused fail-closed: the spine
+  # threads a resume position to the `Connection`'s dump but the `AssemblerServer` seeds
+  # its watermark from the checkpoint store alone, so honoring an override end-to-end is a
+  # C1-completeness follow-up. Refusing here converts what would be a silent checkpoint
+  # hole (dump resumes from the override, the watermark from empty) into a clean refusal.
+  defp validate_start_position(opts) do
+    case Keyword.get(opts, :start_position, :checkpoint) do
+      :checkpoint -> :ok
+      %Position{} -> {:error, :start_position_override_unsupported}
+      :current -> {:error, :start_position_current_unsupported}
+      _other -> {:error, :config_invalid}
+    end
   end
 
   defp wiring(config, opts) do

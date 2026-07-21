@@ -27,6 +27,7 @@ defmodule Capstan.Error do
           | :checkpoint_store_required
           | :sink_owned_mode_unsupported
           | :start_position_current_unsupported
+          | :start_position_override_unsupported
           | :unknown
           | atom()
 

@@ -92,7 +92,10 @@ defmodule Capstan.Pipeline do
   checkpoint store resumed with.
 
     * `:checkpoint` — the resumed position (a `%Position{}` or `nil` for a fresh start);
-    * a `%Capstan.Position{}` — used verbatim (an explicit override);
+    * a `%Capstan.Position{}` — `{:error, :start_position_override_unsupported}` in C1
+      (an explicit override would resume the `Connection`'s dump but NOT the
+      `AssemblerServer`'s watermark, which seeds from the store alone — a silent hole; so
+      it is refused fail-closed, matching `Capstan.start_link/1`'s pre-flight check);
     * `:current` — `{:error, :start_position_current_unsupported}` (C1 does not implement
       "start from the server's current position"; it needs a live pre-connect query the
       spine does not yet wire);
@@ -100,11 +103,14 @@ defmodule Capstan.Pipeline do
   """
   @spec resolve_start_position(keyword(), Position.t() | nil) ::
           {:ok, Position.t() | nil}
-          | {:error, :start_position_current_unsupported | :config_invalid}
+          | {:error,
+             :start_position_override_unsupported
+             | :start_position_current_unsupported
+             | :config_invalid}
   def resolve_start_position(opts, resumed) when is_list(opts) do
     case Keyword.get(opts, :start_position, :checkpoint) do
       :checkpoint -> {:ok, resumed}
-      %Position{} = position -> {:ok, position}
+      %Position{} -> {:error, :start_position_override_unsupported}
       :current -> {:error, :start_position_current_unsupported}
       _other -> {:error, :config_invalid}
     end

@@ -1,15 +1,21 @@
 defmodule Capstan.Telemetry do
   @moduledoc """
-  Value-free telemetry emission. Owns the metadata **allowlist** — the single
-  enforcement point for "no row values and no passwords in telemetry" (Rule 1, design
-  § Events / telemetry).
+  Value-free telemetry emission. Provides the metadata **allowlist** for "no row values
+  and no passwords in telemetry" (Rule 1, design § Events / telemetry): `event/3` routes
+  through `validate!/1`, which **raises** on any key outside the allowlist, so a stray row
+  value or password cannot ride a payload emitted through this module.
 
-  Column values and the connection password are never permitted; only the structural
-  metadata the design's event table lists — GTIDs, schema / table names, DDL kinds, atom
-  reasons, server identity, TLS posture, and server-reported missing GTIDs — may ride a
-  payload. An off-allowlist key **raises** rather than shipping a value downstream, so a
-  stray row value or password can never leave through a telemetry payload even if a
-  future emitter tries to attach one.
+  Only the structural metadata the design's event table lists — GTIDs, schema / table
+  names, DDL kinds, atom reasons, server identity, TLS posture, and server-reported
+  missing GTIDs — is permitted.
+
+  **Scope (C1):** this is the value-free emit helper, NOT yet the pipeline's sole emit
+  path. `Capstan.Connection` and `Capstan.AssemblerServer` currently call
+  `:telemetry.execute/3` directly (their metadata already falls within this allowlist,
+  verified by inspection). Routing every emitter through `event/3` so the allowlist gates
+  them at runtime is Rule-1-completion work (Task 17); the test-time guarantee today is
+  the `Capstan.ValueFree` helper, which scans BOTH the log and telemetry channels for a
+  planted sentinel across every error/halt path.
 
   Mirrors `replicant/lib/replicant/telemetry.ex`.
   """

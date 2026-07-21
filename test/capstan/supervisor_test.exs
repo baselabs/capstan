@@ -201,6 +201,41 @@ defmodule Capstan.SupervisorTest do
                Capstan.start_link(lib_opts(sink: NoTransactionSink))
     end
 
+    test "a valid SINK-OWNED config is refused fail-closed (C1 is lib-owned only)" do
+      # SinkOwnedSink is a VALID sink-owned sink (checkpoint/0 + handle_transaction/1 +
+      # handle_schema_change/2); dropping checkpoint_store makes it sink-owned mode, which
+      # the C1 AssemblerServer does not run — refused honestly, not crashed at init.
+      sink_owned =
+        [
+          connection: [host: "127.0.0.1", port: 1, username: "u", password: "p", ssl: false],
+          server_id: 42,
+          sink: SinkOwnedSink
+        ]
+
+      assert {:error, :sink_owned_mode_unsupported} = Capstan.start_link(sink_owned)
+    end
+
+    test "a lib-mode checkpoint_store missing :module is refused cleanly, not a KeyError" do
+      assert {:error, :checkpoint_store_required} =
+               Capstan.start_link(lib_opts(checkpoint_store: [options: []]))
+
+      assert {:error, :checkpoint_store_required} =
+               Capstan.start_link(lib_opts(checkpoint_store: "not-a-keyword"))
+    end
+
+    test "an explicit %Position{} start_position override is refused fail-closed (C1)" do
+      # C1 resumes only from the durable checkpoint; honoring an explicit override
+      # end-to-end is a follow-up, so it is refused rather than silently creating a
+      # checkpoint hole (dump resumes from the override, watermark from the empty store).
+      assert {:error, :start_position_override_unsupported} =
+               Capstan.start_link(lib_opts(start_position: %Capstan.Position{gtid_set: "x:1-5"}))
+    end
+
+    test "start_position: :current is refused fail-closed (C1 does not wire it)" do
+      assert {:error, :start_position_current_unsupported} =
+               Capstan.start_link(lib_opts(start_position: :current))
+    end
+
     test "a valid lib-mode config starts a supervised pipeline" do
       assert {:ok, sup} = Capstan.start_link(lib_opts())
       on_exit(fn -> stop_supervisor(sup) end)

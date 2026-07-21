@@ -54,14 +54,25 @@ defmodule Capstan.Supervisor do
   defp wire(sup, opts) do
     {impl, store_options} = Pipeline.checkpoint_store(opts)
 
-    with {:ok, store} <- Supervisor.start_child(sup, Pipeline.store_spec(impl, store_options)),
+    with {:ok, store} <- add_child(sup, Pipeline.store_spec(impl, store_options)),
          {:ok, resumed} <- CheckpointStore.read_position(impl, store),
          {:ok, start_position} <- Pipeline.resolve_start_position(opts, resumed),
-         {:ok, assembler} <-
-           Supervisor.start_child(sup, Pipeline.assembler_spec(opts, {impl, store})),
+         {:ok, assembler} <- add_child(sup, Pipeline.assembler_spec(opts, {impl, store})),
          {:ok, _connection} <-
-           Supervisor.start_child(sup, Pipeline.connection_spec(opts, assembler, start_position)) do
+           add_child(sup, Pipeline.connection_spec(opts, assembler, start_position)) do
       :ok
+    end
+  end
+
+  # Normalize `Supervisor.start_child/2`: a child whose start returns `{:ok, pid, info}`
+  # would otherwise not match the `with` chain's `{:ok, pid}` and crash `start_link/1`
+  # with a `CaseClauseError`. Every current child returns `{:ok, pid}`, so the 3-tuple
+  # arm is defensive against a future child spec.
+  defp add_child(sup, spec) do
+    case Supervisor.start_child(sup, spec) do
+      {:ok, pid} -> {:ok, pid}
+      {:ok, pid, _info} -> {:ok, pid}
+      {:error, _reason} = error -> error
     end
   end
 end
