@@ -12,8 +12,9 @@ defmodule Capstan.Integration.FailClosedTest do
       `:compressed_payload_unsupported` halt, no delivery.
     * **no `ssl:` option** → the connection is ACTUALLY encrypted (asserted on the SOCKET —
       `:ssl.connection_information` — not on the config).
-    * **XA START/END/PREPARE** → `:unsupported_transaction_shape`, zero rows — see the SKIPPED
-      test; a real assembler defect blocks it (documented inline + in the Task 18 report).
+    * **XA START/END/PREPARE** → `:unsupported_transaction_shape`, zero rows. This marquee
+      exposed a real assembler silent-loss defect (`XA START` misclassified as DDL,
+      advancing the checkpoint past the XA GTID), now fixed in commit `3fe5e5a`.
 
   Plus the Q5 precondition shape (a throwaway substrate, not one of the F14 five):
 
