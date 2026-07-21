@@ -154,3 +154,39 @@ CREATE TABLE json_widgets (id INT PRIMARY KEY, doc JSON) ENGINE=InnoDB;
 
 INSERT INTO json_widgets (id, doc) VALUES (1, '{"a":1,"b":[true,false,null],"c":"text"}');
 ```
+
+### (h) `set_type` — a `SET` column (F3: `SET` and `ENUM` both wire as type 254)
+
+`all_types` carries an `ENUM` but no `SET`. Both are `MYSQL_TYPE_STRING` (254) on the
+wire, distinguishable only by the STRING meta pair — captured here, byte 0 of the meta
+is `0xF8` (real type 248 = `SET`) and the `SET_STR_VALUE` optional-metadata TLV lists
+the members. C1 must unpack this to DETECT `SET` and halt `:unsupported_column_type`
+(the row image is packed differently); a synthetic meta would prove roundtrip, not
+conformance, so real captured bytes are required.
+
+```sql
+DROP TABLE IF EXISTS set_probe;
+CREATE TABLE set_probe (id INT PRIMARY KEY, flags SET('a', 'b', 'c')) ENGINE=InnoDB;
+
+INSERT INTO set_probe (id, flags) VALUES (1, 'a,c');
+```
+
+### (i) `frac_temporal` — `DATETIME2`/`TIME2`/`TIMESTAMP2` with non-zero fractional precision
+
+`all_types` uses fsp 0 (zero fractional bytes), which cannot catch a decoder that
+ignores the meta and assumes a fixed width. These columns carry fsp 3/6/6 in the meta
+(`03 06 06`), so the fractional-second bytes that follow are meta-driven — the only way
+the temporal decode is proven non-vacuous.
+
+```sql
+DROP TABLE IF EXISTS frac_probe;
+CREATE TABLE frac_probe (
+  id INT PRIMARY KEY,
+  dt DATETIME(3),
+  tm TIME(6),
+  ts TIMESTAMP(6) NULL
+) ENGINE=InnoDB;
+
+INSERT INTO frac_probe (id, dt, tm, ts)
+VALUES (1, '2024-01-15 10:30:00.123', '10:30:00.123456', '2024-01-15 10:30:00.654321');
+```

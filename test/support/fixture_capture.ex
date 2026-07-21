@@ -256,8 +256,74 @@ defmodule Capstan.FixtureCapture do
           "INSERT INTO json_widgets (id, doc) VALUES " <>
             "(1, '{\"a\":1,\"b\":[true,false,null],\"c\":\"text\"}')"
         ]
+      },
+      # SET and ENUM both wire as MYSQL_TYPE_STRING (254); C1 must unpack the STRING
+      # meta pair to DETECT a SET column and halt `:unsupported_column_type` (Task 11 /
+      # design F3) — the `all_types` scenario has an ENUM but no SET, so this scenario
+      # supplies the real captured SET bytes the SET-detection tripwire must go RED
+      # against (self-signed/synthetic meta would only prove roundtrip, not conformance).
+      %{
+        name: "set_type",
+        server_id: 4008,
+        setup: [
+          "DROP TABLE IF EXISTS set_probe",
+          "CREATE TABLE set_probe (id INT PRIMARY KEY, flags SET('a', 'b', 'c')) ENGINE=InnoDB"
+        ],
+        statements: [
+          "INSERT INTO set_probe (id, flags) VALUES (1, 'a,c')"
+        ]
+      },
+      # Temporal widths (DATETIME2/TIME2/TIMESTAMP2) carry fractional-second precision
+      # in the column meta, not the type byte. `all_types` uses fsp 0 (zero fractional
+      # bytes), which cannot catch a decoder that ignores the meta and assumes a fixed
+      # width. Non-zero fsp columns make Task 11's meta-driven temporal decode
+      # non-vacuous.
+      %{
+        name: "frac_temporal",
+        server_id: 4009,
+        setup: [
+          "DROP TABLE IF EXISTS frac_probe",
+          """
+          CREATE TABLE frac_probe (
+            id INT PRIMARY KEY,
+            dt DATETIME(3),
+            tm TIME(6),
+            ts TIMESTAMP(6) NULL
+          ) ENGINE=InnoDB
+          """
+        ],
+        statements: [
+          "INSERT INTO frac_probe (id, dt, tm, ts) VALUES " <>
+            "(1, '2024-01-15 10:30:00.123', '10:30:00.123456', '2024-01-15 10:30:00.654321')"
+        ]
       }
     ]
+  end
+
+  @doc """
+  Regenerates only the named scenarios, leaving every other fixture directory
+  untouched. Use this when a scenario is added or changed and re-running the whole
+  `capture_all/0` would needlessly churn the GTID bytes of unrelated fixtures (which
+  breaks the tests that assert against their exact captured values).
+
+      MIX_ENV=test mix run -e 'Capstan.FixtureCapture.capture_only!(["set_type"])'
+  """
+  @spec capture_only!([String.t()]) :: :ok
+  def capture_only!(names) do
+    wanted = MapSet.new(names)
+
+    known = MapSet.new(scenarios(), & &1.name)
+    unknown = MapSet.difference(wanted, known)
+
+    unless MapSet.size(unknown) == 0 do
+      raise "capstan fixture_capture: unknown scenario(s) #{inspect(MapSet.to_list(unknown))}"
+    end
+
+    scenarios()
+    |> Enum.filter(&MapSet.member?(wanted, &1.name))
+    |> Enum.each(&capture_scenario!/1)
+
+    :ok
   end
 
   ## ---------------------------------------------------------------------------
