@@ -6,11 +6,16 @@ MySQL sibling: replicant consumes Postgres logical replication (pgoutput) over a
 slot; capstan consumes MySQL row-based binary-log replication over a registered replica
 connection.
 
-> **Status: pre-implementation. The protocol viability probe is executed and GREEN
-> (2026-07-20); the design pass is in progress.** No library code exists yet. The committed
-> evidence is `probe/` — a ~400-line zero-dependency Elixir client that spoke the full MySQL
-> replication protocol against live MySQL 8.0.46 and decoded both a replayed and a live-tailed
-> row byte-correct. See `probe/FINDINGS.md`.
+> **Status: C1 (streaming spine) implemented.** capstan connects to MySQL as a replica, tails
+> the row-based binlog from a GTID position, assembles committed transactions, delivers them to a
+> sink, and durably advances a processed-GTID checkpoint — fail-closed on every silent-loss
+> condition. C1 ships **lib-owned checkpoint mode** and resume-from-durable-checkpoint
+> (`start_position: :checkpoint`) only; sink-owned checkpoint mode and explicit start positions are
+> deferred and refused fail-closed today (see
+> [ADR-0004](docs/adr/0004-c1-scope-lib-owned-checkpoint-only.md)). The protocol viability probe
+> that preceded implementation — a ~400-line zero-dependency Elixir client that spoke the full
+> MySQL replication protocol against live MySQL 8.0.46 and decoded both a replayed and a
+> live-tailed row byte-correct — remains committed under `probe/` (see `probe/FINDINGS.md`).
 
 ## Why it exists
 
@@ -30,7 +35,8 @@ between them is a small, *explicit* change rather than a rewrite:
   `handle_schema_change/2` (batch and snapshot callbacks are later rows, not shipped yet),
 - the same lib-owned `CheckpointStore` alternative for non-transactional sinks,
 - the same delivery-guarantee taxonomy — effect-once on the sink-owned atomic path,
-  at-least-once with a bounded duplicate window in lib-checkpoint mode,
+  at-least-once with a bounded duplicate window in lib-checkpoint mode (C1 ships the
+  lib-checkpoint path; the sink-owned atomic path is deferred — [ADR-0004](docs/adr/0004-c1-scope-lib-owned-checkpoint-only.md)),
 - the same value-free error and telemetry conventions (row values never reach a log line).
 
 **The contracts are aligned, not identical, and a sink is not source-blind by default.** Two
@@ -73,9 +79,10 @@ decoding rows into positional tuples of unknown provenance.
 
 | Directory | Contents |
 | --- | --- |
-| `lib/` | The Elixir library (hex package `capstan`) — not yet implemented |
+| `lib/` | The Elixir library (hex package `capstan`) — the C1 streaming spine |
 | `probe/` | The executed protocol viability probe + committed evidence |
-| `docs/adr/` | Architecture decision records |
+| `docs/adr/` | Architecture decision records ([0001](docs/adr/0001-position-and-dedup-model.md)–[0004](docs/adr/0004-c1-scope-lib-owned-checkpoint-only.md)) |
+| `usage-rules.md` | Consumer-facing usage contract |
 
 ## License
 

@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: MySQL ${{ matrix.mysql }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 8.0 keeps mysql_native_password (root planting account); capstan_sha2 is caching_sha2.
+          - mysql: "8.0"
+            image: "mysql:8.0"
+            native_flag: "--default-authentication-plugin=mysql_native_password"
+          # 8.4 disables built-in mysql_native_password by default (removed outright in 9.x), so the
+          # pipeline account exercises the caching_sha2 default posture (design Q6). The plugin is
+          # re-enabled only for the root PLANTING account the test harness authenticates as.
+          - mysql: "8.4"
+            image: "mysql:8.4"
+            native_flag: "--mysql-native-password=ON"
+    env:
+      MIX_ENV: test
+      # Throwaway credentials for a disposable CI container — never a real secret (mirrors
+      # scripts/dev-substrate.sh). The shared substrate lives at 127.0.0.1:5633, the port the
+      # live/integration marquees hardcode (test/support/mysql_case.ex).
+      ROOT_PW: probe
+      SHA2_USER: capstan_sha2
+      SHA2_PW: capstan_sha2_pw
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # DOCKER MANDATE (routed from Task 18). The :integration marquees stream from this shared
+      # substrate AND four of them spin their own THROWAWAY mysql:8.0 containers; without a working
+      # Docker daemon those four print "[SKIP]" and pass green, so CI would go green having tested
+      # nothing. Fail loudly here if Docker is absent, and assert below that no marquee skipped.
+      - name: Require Docker
+        run: |
+          docker info >/dev/null 2>&1 || { echo "::error::Docker daemon unavailable — the integration marquees cannot run."; exit 1; }
+          docker --version
+
+      # Start MySQL now (non-blocking) so it initialises while BEAM/deps set up. The five Q5
+      # precondition variables + enforce-gtid-consistency mirror scripts/dev-substrate.sh COMMON_FLAGS.
+      - name: Start MySQL ${{ matrix.mysql }} substrate
+        run: |
+          docker run -d --name mysql-cdc-probe \
+            -p 127.0.0.1:5633:3306 \
+            -e "MYSQL_ROOT_PASSWORD=${ROOT_PW}" \
+            -e MYSQL_DATABASE=probe_db \
+            "${{ matrix.image }}" \
+            --binlog-format=ROW \
+            --binlog-row-image=FULL \
+            --binlog-row-metadata=FULL \
+            --binlog-row-value-options= \
+            --gtid-mode=ON \
+            --enforce-gtid-consistency=ON \
+            --server-id=1 \
+            ${{ matrix.native_flag }}
+
+      - name: Set up BEAM (Erlang/OTP + Elixir)
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+
+      - name: Cache deps and _build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ matrix.mysql }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-${{ matrix.mysql }}-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Format check
+        run: mix format --check-formatted
+
+      - name: Credo (strict)
+        run: mix credo --strict
+
+      # Wait for the REAL networked server (the official image runs a socket-only init server first;
+      # a TCP probe forced via -h127.0.0.1 answers only on the network-bound server), then bootstrap
+      # the two accounts the harness authenticates as: root over mysql_native_password (planting) and
+      # capstan_sha2 over caching_sha2 (the pipeline, default posture). --get-server-public-key lets a
+      # caching_sha2 root (8.4's default) complete auth over the plaintext local probe.
+      - name: Wait for MySQL and provision accounts
+        run: |
+          for _ in $(seq 1 60); do
+            if docker exec mysql-cdc-probe mysql -h127.0.0.1 -P3306 --get-server-public-key \
+                 -uroot -p"${ROOT_PW}" -N -e 'SELECT 1' >/dev/null 2>&1; then
+              ready=1; break
+            fi
+            sleep 2
+          done
+          [ "${ready:-0}" = "1" ] || { echo "::error::MySQL never became ready"; docker logs mysql-cdc-probe; exit 1; }
+          # On 8.4 root defaults to caching_sha2; the harness plants DDL/DML as native-password root,
+          # so re-point root to the (re-enabled) native plugin. Harmless on 8.0 (already native).
+          docker exec mysql-cdc-probe mysql -h127.0.0.1 --get-server-public-key -uroot -p"${ROOT_PW}" -e "
+            ALTER USER 'root'@'%' IDENTIFIED WITH mysql_native_password BY '${ROOT_PW}';
+            CREATE USER IF NOT EXISTS '${SHA2_USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${SHA2_PW}';
+            ALTER USER '${SHA2_USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${SHA2_PW}';
+            GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO '${SHA2_USER}'@'%';
+            FLUSH PRIVILEGES;"
+
+      - name: Unit tests
+        run: mix test
+
+      - name: Live-substrate tests
+        run: mix test --only live
+
+      # The 14 :integration marquees MUST all run. The four Docker-gated ones (two gap-purge, the
+      # compression marquee, the PARTIAL_JSON marquee) print "[SKIP]" and pass green when a throwaway
+      # container cannot be created; treat any "[SKIP]" as a hard failure so a silently-untested run
+      # can never go green.
+      - name: Integration marquees (all 14 must run, 0 skipped)
+        run: |
+          set -o pipefail
+          mix test --only integration 2>&1 | tee integration.log
+          if grep -q '\[SKIP\]' integration.log; then
+            echo "::error::An integration marquee printed [SKIP] — a Docker-gated container did not run. All 14 marquees must execute."
+            exit 1
+          fi
+
+      - name: Dialyzer
+        run: mix dialyzer
+
+      - name: Stop MySQL substrate
+        if: always()
+        run: docker rm -f mysql-cdc-probe || true
