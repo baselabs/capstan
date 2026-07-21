@@ -69,7 +69,12 @@ defmodule Capstan.Binlog.Rows do
   Decodes a `Capstan.Binlog.Decoder` row tuple against its resolved `%TableMap{}`.
 
   Returns `{:ok, {:insert | :delete, [row]}}`, `{:ok, {:update, [{before, after}]}}`, or
-  `{:error, reason}` (fail closed — see the module doc).
+  `{:error, reason}` — an unsupported column, a schema mismatch, missing metadata, or a
+  NULL-bitmap-truncated image all fail closed to an `{:error, _}` tuple (see the module
+  doc). A value-image so short that a *value* runs off the end raises rather than
+  returning a tuple: `Capstan.Binlog.Event.parse/1` CRC-verifies the whole event before
+  the decoder runs, so that is a decode-desync assertion on already-validated bytes, not
+  an input-validation path.
   """
   @spec decode(Decoder.rows(), TableMap.t()) :: {:ok, decoded()} | {:error, error()}
   def decode({:write_rows, table_id, present, raw}, %TableMap{} = table_map),

@@ -272,5 +272,41 @@ defmodule Capstan.Binlog.RowsTest do
 
       assert detail.have < detail.need_null_bytes
     end
+
+    test "the per-row NULL bitmap is sized by the PRESENT count, across a byte boundary" do
+      # Over the real 21-column all_types %TableMap{}, present ONLY the first 9 columns
+      # (id + the 8 sub-INT-width integers). 9 present → a 2-byte NULL bitmap; the full
+      # 21-column count would be 3 bytes. A decoder that sized the bitmap by the TOTAL
+      # column count would consume one value byte as bitmap and desync `id`. The all-
+      # present fixtures round 21→3 and cannot distinguish the two; this crosses the 8→9
+      # boundary where present-count (2) and total-count (3) diverge.
+      tm = table_map("all_types", "07-table_map.bin")
+
+      present = <<0xFF, 0x01, 0x00>>
+      null_bitmap = <<0, 0>>
+
+      values =
+        <<1, 0, 0, 0>> <>
+          <<5>> <>
+          <<6>> <>
+          <<7, 0>> <>
+          <<8, 0>> <>
+          <<9, 0, 0>> <> <<10, 0, 0>> <> <<11, 0, 0, 0>> <> <<12, 0, 0, 0>>
+
+      assert {:ok, {:insert, [row]}} =
+               Rows.decode({:write_rows, tm.table_id, present, null_bitmap <> values}, tm)
+
+      assert row == %{
+               "id" => 1,
+               "tiny_s" => 5,
+               "tiny_u" => 6,
+               "small_s" => 7,
+               "small_u" => 8,
+               "medium_s" => 9,
+               "medium_u" => 10,
+               "int_s" => 11,
+               "int_u" => 12
+             }
+    end
   end
 end
