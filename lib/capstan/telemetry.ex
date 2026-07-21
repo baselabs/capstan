@@ -9,13 +9,13 @@ defmodule Capstan.Telemetry do
   names, DDL kinds, atom reasons, server identity, TLS posture, and server-reported
   missing GTIDs — is permitted.
 
-  **Scope (C1):** this is the value-free emit helper, NOT yet the pipeline's sole emit
-  path. `Capstan.Connection` and `Capstan.AssemblerServer` currently call
-  `:telemetry.execute/3` directly (their metadata already falls within this allowlist,
-  verified by inspection). Routing every emitter through `event/3` so the allowlist gates
-  them at runtime is Rule-1-completion work (Task 17); the test-time guarantee today is
-  the `Capstan.ValueFree` helper, which scans BOTH the log and telemetry channels for a
-  planted sentinel across every error/halt path.
+  **Scope (C1):** this is the pipeline's sole telemetry emit path. Every emitter in
+  `Capstan.Connection` and `Capstan.AssemblerServer` routes through `event/3` (Rule-1
+  completion, F11), so the allowlist gates them at runtime — a future emitter attaching a
+  row value or password raises rather than shipping it. The complementary test-time
+  guarantee is the `Capstan.ValueFree` helper, which scans the log and telemetry channels
+  (and, for the live vectors, the delivered sink outputs) for a planted sentinel across
+  every delivered and error/halt path.
 
   Mirrors `replicant/lib/replicant/telemetry.ex`.
   """

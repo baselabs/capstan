@@ -59,6 +59,7 @@ defmodule Capstan.Connection do
   alias Capstan.Protocol.Command
   alias Capstan.Protocol.Handshake
   alias Capstan.Protocol.Packet
+  alias Capstan.Telemetry
 
   @default_max_command_retries 5
   @default_reconnect_backoff 1_000
@@ -471,8 +472,11 @@ defmodule Capstan.Connection do
   defp notify_receiver(%__MODULE__{receiver: nil}, _message), do: :ok
   defp notify_receiver(%__MODULE__{receiver: receiver}, message), do: send(receiver, message)
 
+  # Routed through `Capstan.Telemetry.event/3` so the value-free metadata allowlist gates
+  # every payload at runtime (Rule 1 completion, F11): a future emitter attaching a row
+  # value or password raises rather than shipping it.
   defp emit_established(state) do
-    :telemetry.execute(
+    Telemetry.event(
       [:capstan, :connection, :established],
       %{},
       %{
@@ -483,7 +487,7 @@ defmodule Capstan.Connection do
   end
 
   defp emit_halt(reason) do
-    :telemetry.execute([:capstan, :connection, :halt], %{}, %{reason: reason})
+    Telemetry.event([:capstan, :connection, :halt], %{}, %{reason: reason})
   end
 
   defp server_info(%__MODULE__{server_info: info}, key) when is_map(info),

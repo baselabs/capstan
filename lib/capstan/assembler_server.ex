@@ -66,6 +66,7 @@ defmodule Capstan.AssemblerServer do
   alias Capstan.Gtid
   alias Capstan.Position
   alias Capstan.SchemaChange
+  alias Capstan.Telemetry
   alias Capstan.Transaction
 
   @type checkpoint_store :: {module(), CheckpointStore.store()}
@@ -300,19 +301,21 @@ defmodule Capstan.AssemblerServer do
   end
 
   ## ---------------------------------------------------------------------------
-  ## telemetry — value-free (Task 16 owns telemetry.ex; plain atoms/ints here)
+  ## telemetry — routed through Capstan.Telemetry.event/3 so the value-free metadata
+  ## allowlist gates every payload at runtime (Rule 1 completion, F11): a stray row value
+  ## or password attached to a payload raises rather than shipping.
   ## ---------------------------------------------------------------------------
 
   defp emit_committed(gtid) do
-    :telemetry.execute([:capstan, :transaction, :committed], %{}, %{gtid: gtid})
+    Telemetry.event([:capstan, :transaction, :committed], %{}, %{gtid: gtid})
   end
 
   defp emit_filtered(gtid) do
-    :telemetry.execute([:capstan, :transaction, :filtered], %{}, %{gtid: gtid})
+    Telemetry.event([:capstan, :transaction, :filtered], %{}, %{gtid: gtid})
   end
 
   defp emit_skipped(gtid) do
-    :telemetry.execute(
+    Telemetry.event(
       [:capstan, :transaction, :skipped],
       %{},
       %{gtid: gtid, reason: :already_processed}
@@ -320,7 +323,7 @@ defmodule Capstan.AssemblerServer do
   end
 
   defp emit_schema_change(%SchemaChange{schema: schema, table: table, kind: kind}) do
-    :telemetry.execute(
+    Telemetry.event(
       [:capstan, :schema_change, :received],
       %{},
       %{schema: schema, table: table, kind: kind}
