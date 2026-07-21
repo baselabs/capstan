@@ -135,17 +135,29 @@ defmodule Capstan.Pipeline do
   end
 
   @doc """
-  The `Connection` child spec, wired so its `:receiver` is the `AssemblerServer` PID and
-  its dump resumes from `start_position`.
+  The `Connection` child spec, wired so its `:receiver` is the `AssemblerServer` PID, its
+  dump resumes from `start_position`, and — given the started checkpoint store
+  `{impl, handle}` — it re-reads the durable resume position on every establish (so a
+  reconnect resumes from the current watermark, not the frozen start-up position; design
+  Q7 / F1). `checkpoint_store` defaults to `nil` so a `Connection` wired without a store
+  (a unit test) keeps the injected `start_position`.
   """
-  @spec connection_spec(keyword(), pid(), Position.t() | nil) :: Supervisor.child_spec()
-  def connection_spec(opts, receiver, start_position) when is_list(opts) and is_pid(receiver) do
+  @spec connection_spec(
+          keyword(),
+          pid(),
+          Position.t() | nil,
+          AssemblerServer.checkpoint_store() | nil
+        ) ::
+          Supervisor.child_spec()
+  def connection_spec(opts, receiver, start_position, checkpoint_store \\ nil)
+      when is_list(opts) and is_pid(receiver) do
     connection_opts =
       [
         server_id: Keyword.fetch!(opts, :server_id),
         connection: Keyword.get(opts, :connection, []),
         receiver: receiver,
         start_position: start_position,
+        checkpoint_store: checkpoint_store,
         max_command_retries: Keyword.get(opts, :max_command_retries, 5)
       ] ++ Keyword.take(opts, [:connect_fun, :reconnect_backoff])
 

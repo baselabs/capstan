@@ -1,6 +1,7 @@
 defmodule Capstan.ConnectionTest do
   use ExUnit.Case, async: false
 
+  alias Capstan.CheckpointStore
   alias Capstan.Connection
   alias Capstan.Position
   alias Capstan.Protocol.Command
@@ -320,6 +321,78 @@ defmodule Capstan.ConnectionTest do
       send(pid, {:frame, stale_reader, <<0x00, "STALE-EVENT">>})
 
       refute_receive {:binlog_event, "STALE-EVENT"}, 300
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## Lifecycle — reconnect re-reads the durable checkpoint, not the frozen start (B2 / F1)
+  ## ---------------------------------------------------------------------------
+
+  describe "reconnect resumes from the CURRENT durable checkpoint, not the frozen start (B2)" do
+    test "a reconnect re-reads the store — an advance since start changes the gap-check outcome" do
+      # The AssemblerServer advances the durable watermark while the Connection is up; on a
+      # drop→reconnect the Connection must resume from the ADVANCED position, not the frozen
+      # start-up one (else, once retention purged past the stale start, it would raise a FALSE
+      # :data_gap on a healthy pipeline — the C3 vector re-opened). Proven observably: seed the
+      # store to a HEALTHY position (connect 1 passes gap_check and reaches the dump), then
+      # advance it to a source-identity mismatch. A reconnect that re-reads the store halts
+      # :source_identity_mismatch; a frozen-start Connection would keep passing gap_check with
+      # the healthy start position and never emit this halt (it would instead livelock the
+      # established-then-dropped cycle to :server_id_conflict). This distinguishes the fix.
+      {:ok, store} = CheckpointStore.InMemory.start_link()
+
+      :ok =
+        CheckpointStore.write_position(
+          CheckpointStore.InMemory,
+          store,
+          %Position{gtid_set: @checkpoint}
+        )
+
+      # The connect_fun runs INSIDE the Connection process, so `self()` there is not the
+      # test — capture the real test pid so the mock server's `{:server_recv, _}` reports
+      # reach the assertions below.
+      test_pid = self()
+
+      connect_fun = fn _connection ->
+        {port, _srv} =
+          start_mock_server(fn sock, _inner ->
+            # Serve a full establish (precond → gtid → SET → dump), then return — closing the
+            # socket, so the reader sees EOF and the Connection schedules a reconnect. On the
+            # reconnect the client halts at gap_check (before SET), so the next recv fails and
+            # the mock-server rescue closes.
+            serve_full_establish(sock, @executed, @purged, test_pid)
+          end)
+
+        {:ok, raw} = :gen_tcp.connect(@loopback, port, [:binary, active: false], 5000)
+        {:ok, {:gen_tcp, raw}, %{server_version: "mock", tls: false}}
+      end
+
+      start_conn(
+        server_id: 48,
+        connection: [],
+        max_command_retries: 5,
+        receiver: self(),
+        start_position: %Position{gtid_set: @checkpoint},
+        checkpoint_store: {CheckpointStore.InMemory, store},
+        connect_fun: connect_fun,
+        reconnect_backoff: 150
+      )
+
+      # Connect 1 reached the dump — gap_check passed with the healthy start position.
+      assert_receive {:server_recv, :dump}, 2000
+
+      # The AssemblerServer advances the durable watermark to a source-identity mismatch,
+      # BEFORE the reconnect's refresh (the 150ms backoff gives ample margin over this
+      # synchronous write).
+      :ok =
+        CheckpointStore.write_position(
+          CheckpointStore.InMemory,
+          store,
+          %Position{gtid_set: @foreign_checkpoint}
+        )
+
+      # Connect 2 (reconnect) re-read the store → the advanced position → halts on it.
+      assert_receive {:capstan_halt, :source_identity_mismatch}, 3000
     end
   end
 

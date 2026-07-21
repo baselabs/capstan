@@ -1,7 +1,9 @@
 defmodule Capstan.AssemblerServer do
   @moduledoc """
   The composition point: the GenServer that turns a `Capstan.Connection`'s frame stream
-  into durable, effect-once delivery.
+  into durable, fail-closed, at-least-once delivery (lib-owned checkpoint mode — the
+  checkpoint advances only after the sink's `{:ok, _}`, so a crash in between re-delivers;
+  see `Capstan` and ADR-0004. Effect-once is the deferred sink-owned atomic path).
 
   `Connection` owns ONLY the socket and forwards `{:binlog_event, raw}` (the raw 19-byte
   header + body + CRC — exactly `Capstan.Binlog.Event.parse/1`'s input) and
@@ -63,6 +65,7 @@ defmodule Capstan.AssemblerServer do
   alias Capstan.Assembler
   alias Capstan.Binlog.Event
   alias Capstan.CheckpointStore
+  alias Capstan.Error
   alias Capstan.Gtid
   alias Capstan.Position
   alias Capstan.SchemaChange
@@ -142,12 +145,23 @@ defmodule Capstan.AssemblerServer do
       # A CRC mismatch / truncation is an integrity failure, never silently skipped.
       {:error, reason} -> halt(state, {:event_parse_failed, reason})
     end
+  rescue
+    # A raise from the DELIVERY path — a sink or store that raises instead of returning
+    # `{:error, _}`. Fail closed value-free rather than crash: a crash here would put the
+    # in-flight `{:binlog_event, raw}` message (the raw event bytes — row values / DDL SQL)
+    # into the OTP crash report's "Last message", a Rule-1 breach of the same class the
+    # decode guard closes. (The decode path itself is caught earlier by `step_guarded/2`
+    # with the more specific `:event_decode_crashed` reason, so this is the delivery arm.)
+    exception -> halt(state, {:event_processing_crashed, Error.from(exception)})
+  catch
+    _kind, _reason -> halt(state, {:event_processing_crashed, Error.from(:unknown)})
   end
 
   # A fail-closed halt propagated from the Connection (design Q7): stop the pipeline
-  # WITHOUT advancing the checkpoint. The Connection already emitted its halt telemetry;
-  # here the fail-closed action is to stop.
-  def handle_info({:capstan_halt, reason}, state), do: halt(state, reason)
+  # WITHOUT advancing the checkpoint. The Connection already emitted its own
+  # `connection.halt` telemetry, so this uses the non-emitting `stop_halt/2` — re-emitting
+  # here would double-report the same halt.
+  def handle_info({:capstan_halt, reason}, state), do: stop_halt(state, reason)
 
   def handle_info(_message, state), do: {:noreply, state}
 
@@ -156,7 +170,7 @@ defmodule Capstan.AssemblerServer do
   ## ---------------------------------------------------------------------------
 
   defp apply_event(event, state) do
-    case Assembler.step(state.assembler, event) do
+    case step_guarded(state.assembler, event) do
       {:cont, outputs, next} ->
         deliver_outputs(outputs, %{state | assembler: next})
 
@@ -167,7 +181,34 @@ defmodule Capstan.AssemblerServer do
       # Any refused/desynced event — fail closed rather than checkpoint past the failure.
       {:error, reason} ->
         halt(state, {:assembler_error, reason})
+
+      # A CRC-valid but structurally-malformed event whose per-type decode/cast RAISED — a
+      # latent decoder/layout mismatch (an unsupported column/temporal/charset variant) or a
+      # stream desync. Rule 1: the raw exception embeds row/DDL bytes (a
+      # `%MatchError{term: <row bytes>}`, a negative binary-size `ArgumentError`); letting it
+      # propagate would echo them into the OTP crash report. `step_guarded/2` has already
+      # scrubbed it to a value-free `Capstan.Error`, and the fail-closed
+      # `{:shutdown, {:halt, _}}` exit is never reported abnormally — so a decode crash halts
+      # value-free rather than leaking.
+      {:decode_crashed, error} ->
+        halt(state, {:event_decode_crashed, error})
     end
+  end
+
+  # Guard the pure decode/assembly fold. A structurally-malformed event can RAISE inside
+  # `Assembler.step/2` (the per-type binlog decoders hard-match on body layout; column
+  # casting can raise on an unexpected shape). Convert any raise/throw/exit to a value-free
+  # sentinel so this boundary honours the fail-closed `{:error, _}` / `{:halt, _}` contract
+  # instead of crashing — a crash would both leak row bytes (via the OTP crash report) and,
+  # under the pipeline's `:temporary` / plain-`send` wiring, strand the Connection. The
+  # exception's message/`term` (the bytes) is dropped by `Capstan.Error.from/1`; the `catch`
+  # arm discards its raw reason for the same Rule-1 reason.
+  defp step_guarded(assembler, event) do
+    Assembler.step(assembler, event)
+  rescue
+    exception -> {:decode_crashed, Error.from(exception)}
+  catch
+    _kind, _reason -> {:decode_crashed, Error.from(:unknown)}
   end
 
   defp deliver_outputs([], state), do: {:noreply, state}
@@ -284,7 +325,17 @@ defmodule Capstan.AssemblerServer do
   ## halt — fail closed, never checkpoint past this point
   ## ---------------------------------------------------------------------------
 
-  defp halt(state, reason), do: {:stop, {:shutdown, {:halt, reason}}, state}
+  # An AssemblerServer-DETECTED fail-closed halt: emit halt telemetry (so the stop is
+  # visible to an operator's monitoring, not only the Connection-side halts), then stop.
+  defp halt(state, reason) do
+    emit_halt(reason)
+    stop_halt(state, reason)
+  end
+
+  # Stop the pipeline fail-closed WITHOUT advancing the checkpoint and WITHOUT emitting halt
+  # telemetry — used for a halt the Connection already surfaced via its own
+  # `connection.halt` payload (the propagated `{:capstan_halt, _}` path).
+  defp stop_halt(state, reason), do: {:stop, {:shutdown, {:halt, reason}}, state}
 
   ## ---------------------------------------------------------------------------
   ## GTID helpers
@@ -328,5 +379,15 @@ defmodule Capstan.AssemblerServer do
       %{},
       %{schema: schema, table: table, kind: kind}
     )
+  end
+
+  # Every AssemblerServer-side fail-closed halt (sink error, checkpoint-write budget, event
+  # parse/decode failure, assembler desync, XA_PREPARE, unmapped table_id) emits here so the
+  # most important data-integrity stops are visible to monitoring — not only the
+  # Connection-side halts. The reason is scrubbed to its value-free OUTER atom via
+  # `Capstan.Error.from/1`: a compound reason like `{:sink_error, <raw sink reason>}` could
+  # otherwise carry user data past the metadata allowlist, which gates KEYS, not values.
+  defp emit_halt(reason) do
+    Telemetry.event([:capstan, :assembler, :halt], %{}, %{reason: Error.from(reason).reason})
   end
 end

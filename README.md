@@ -1,7 +1,8 @@
 # capstan
 
 **capstan is MySQL CDC on the BEAM — it streams committed MySQL row changes from the binary
-log, effect-once, to a sink.** It is [replicant](https://github.com/baselabs/replicant)'s
+log to a sink, fail-closed and at-least-once (effect-once is the sink-owned atomic path,
+deferred in C1 — see below).** It is [replicant](https://github.com/baselabs/replicant)'s
 MySQL sibling: replicant consumes Postgres logical replication (pgoutput) over a replication
 slot; capstan consumes MySQL row-based binary-log replication over a registered replica
 connection.

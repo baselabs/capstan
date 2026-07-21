@@ -19,5 +19,10 @@ defmodule Capstan.Change do
           old_record: map() | nil
         }
 
+  # Rule 1: `record`/`old_record` are row VALUES (user data). Deriving `Inspect` with `only`
+  # renders just the structural identity (`op`/`schema`/`table` — the same fields telemetry
+  # is allowed to carry) and elides the value maps, so an incidental `inspect/1` of a Change
+  # (a logger, a crash dump, a test helper) can never surface a row value.
+  @derive {Inspect, only: [:op, :schema, :table]}
   defstruct [:op, :schema, :table, :record, :old_record]
 end

@@ -4,10 +4,30 @@ defmodule Capstan.Connection do
   and frame forwarding.
 
   `Connection` owns ONLY the TCP/TLS socket. It never delivers to a sink and never
-  touches the checkpoint — `Capstan.AssemblerServer` owns those. That split keeps the
-  reconnect seam auditable: every socket-lifetime primitive (the reconnect timer, the
-  streaming reader) lives in this one module and is torn down with the connection it
-  serves (design Q7).
+  **writes** the checkpoint — `Capstan.AssemblerServer` is the sole checkpoint writer, so
+  there is no split-brain over the durable position (design Q7). It does **read** the
+  durable resume position at each (re)establish (see "Resume position" below); reading is
+  not writing, and it is what makes a reconnect resume from the current watermark. That
+  split keeps the reconnect seam auditable: every socket-lifetime primitive (the reconnect
+  timer, the streaming reader) lives in this one module and is torn down with the
+  connection it serves.
+
+  ## Resume position (design Q7 / F1)
+
+  The dump resumes from the durable checkpoint, RE-READ from the checkpoint store on every
+  establish — the initial connect AND every reconnect. Freezing the resume position at
+  start-up would be a correctness bug: after a transient drop the `AssemblerServer` has
+  advanced the durable watermark, so a reconnect that replayed from the frozen start-up
+  position would (a) needlessly re-stream everything since start-up (the `AssemblerServer`
+  dedups it, but at O(run-length) cost) and, worse, (b) once source retention purged past
+  that stale position, feed `gap_check/3` a checkpoint whose unapplied remainder intersects
+  `gtid_purged` — a **false** `:data_gap` halt on a perfectly healthy pipeline, re-opening
+  the very silent-loss vector the gate exists to close. Re-reading makes the resume correct
+  by construction. The `Connection` is given the store as a `{impl, handle}` and calls
+  `Capstan.CheckpointStore.read_position/2` (read-only — the single-writer invariant holds).
+  A store read fault on refresh keeps the last-known position and proceeds (never worse than
+  the frozen behaviour; the next reconnect refreshes); a store is optional (its absence — in
+  a unit test wired only with `:start_position` — keeps the injected position).
 
   ## Lifecycle
 
@@ -54,6 +74,7 @@ defmodule Capstan.Connection do
 
   use GenServer
 
+  alias Capstan.CheckpointStore
   alias Capstan.Config
   alias Capstan.Gtid
   alias Capstan.Position
@@ -86,6 +107,7 @@ defmodule Capstan.Connection do
     :max_command_retries,
     :receiver,
     :checkpoint_str,
+    :checkpoint_store,
     :connect_fun,
     :reconnect_backoff,
     :socket,
@@ -105,9 +127,12 @@ defmodule Capstan.Connection do
 
   Options: `:server_id` (required), `:connection` (keyword passed to the connect
   function), `:receiver` (pid/name that frames and halts are sent to), `:start_position`
-  (`%Capstan.Position{}` or `nil` for a fresh start), `:max_command_retries`
-  (default 5), `:connect_fun` (a 1-arg override for the connect+auth step, default the
-  real `gen_tcp` + `Handshake` path), `:reconnect_backoff` ms, and `:name`.
+  (`%Capstan.Position{}` or `nil` for a fresh start — the resume position used until the
+  first store refresh, and the only source when no store is given), `:checkpoint_store`
+  (an optional `{impl_module, handle}` re-read for the current resume position on every
+  establish; see "Resume position"), `:max_command_retries` (default 5), `:connect_fun` (a
+  1-arg override for the connect+auth step, default the real `gen_tcp` + `Handshake` path),
+  `:reconnect_backoff` ms, and `:name`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -197,6 +222,7 @@ defmodule Capstan.Connection do
       max_command_retries: Keyword.get(opts, :max_command_retries, @default_max_command_retries),
       receiver: Keyword.get(opts, :receiver),
       checkpoint_str: checkpoint_string(Keyword.get(opts, :start_position)),
+      checkpoint_store: Keyword.get(opts, :checkpoint_store),
       connect_fun: Keyword.get(opts, :connect_fun, &default_connect/1),
       reconnect_backoff: Keyword.get(opts, :reconnect_backoff, @default_reconnect_backoff)
     }
@@ -251,6 +277,11 @@ defmodule Capstan.Connection do
   end
 
   defp establish(state) do
+    # Re-read the durable resume position BEFORE the gap check and the dump, so a reconnect
+    # resumes from the current watermark, not the frozen start-up position (see the
+    # "Resume position" moduledoc — the false-`:data_gap`-after-purge correctness bug).
+    state = refresh_checkpoint(state)
+
     with :ok <- preconditions(state.socket),
          {:ok, executed, purged} <- gtid_sets(state.socket),
          :ok <- gap_check(executed, purged, state.checkpoint_str),
@@ -260,6 +291,20 @@ defmodule Capstan.Connection do
     else
       {:halt, reason} -> halt(state, reason)
       {:command_error, _reason} -> note_command_failure(state)
+    end
+  end
+
+  # Read-only refresh of the resume position from the checkpoint store (design Q7): the
+  # store is the single source of truth for "where to resume", written only by the
+  # `AssemblerServer`. No store configured (a unit test wired with `:start_position` alone)
+  # keeps the injected position; a read fault keeps the last-known position and proceeds
+  # (never worse than the frozen behaviour — the next reconnect refreshes).
+  defp refresh_checkpoint(%__MODULE__{checkpoint_store: nil} = state), do: state
+
+  defp refresh_checkpoint(%__MODULE__{checkpoint_store: {impl, store}} = state) do
+    case CheckpointStore.read_position(impl, store) do
+      {:ok, position} -> %{state | checkpoint_str: checkpoint_string(position)}
+      {:error, _reason} -> state
     end
   end
 

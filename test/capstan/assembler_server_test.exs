@@ -62,10 +62,13 @@ end
 defmodule Capstan.AssemblerServerTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Capstan.{
     AssemblerServer,
     Change,
     CheckpointStore,
+    Error,
     Gtid,
     Position,
     SchemaChange,
@@ -301,6 +304,135 @@ defmodule Capstan.AssemblerServerTest do
   end
 
   ## ---------------------------------------------------------------------------
+  ## decode crash — a malformed event halts value-free, never leaks bytes (B1 / Rule 1)
+  ## ---------------------------------------------------------------------------
+
+  describe "decode crash — a CRC-valid but malformed event halts value-free (B1)" do
+    test "halts {:event_decode_crashed, %Error{}} with NO byte leak, no checkpoint advance" do
+      # A CRC-valid TABLE_MAP whose schema-length byte far exceeds the bytes that follow, so
+      # the decoder's hard-match RAISES a FunctionClauseError (no matching `read_str8_z/1`
+      # clause) whose args carry the raw body — including `sentinel`. WITHOUT the step_guarded
+      # rescue this raise is uncaught: the exit reason is the exception (not a clean shutdown)
+      # and the OTP crash report logs the embedded bytes (a Rule-1 breach). WITH the rescue the
+      # halt is a value-free {:event_decode_crashed, %Capstan.Error{}} and the bytes reach no
+      # channel.
+      sentinel = "capstan_b1_decode_leak_sentinel_5d2f9a4c"
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+      attach_telemetry([[:capstan, :assembler, :halt]])
+      server = start_server(store: store)
+      ref = Process.monitor(server)
+
+      log =
+        capture_log(fn ->
+          send(server, {:binlog_event, malformed_table_map_raw(sentinel)})
+
+          assert_receive {:DOWN, ^ref, :process, ^server,
+                          {:shutdown, {:halt, {:event_decode_crashed, %Error{}}}}},
+                         2000
+        end)
+
+      # Rule 1 — the LEAK CHANNEL is decimal, not ASCII: if the raw bytes reached an OTP
+      # crash report they render as a decimal byte list (`<<255, 99, 97, ...>>`), NEVER the
+      # ASCII sentinel — so `String.contains?(log, sentinel)` alone is VACUOUS (it can never
+      # match). Scan for the decimal encoding of a distinctive sentinel slice (the actual
+      # channel), which IS present in the unguarded crash report and absent once the rescue
+      # turns the crash into a clean shutdown-halt with no report.
+      decimal_leak =
+        sentinel |> binary_part(0, 16) |> :binary.bin_to_list() |> Enum.join(", ")
+
+      refute String.contains?(log, decimal_leak),
+             "Rule 1 violation: decode-crash bytes leaked (decimal-encoded) into a log line:\n#{log}"
+
+      refute String.contains?(log, sentinel),
+             "Rule 1 violation: decode-crash sentinel leaked (ASCII) into a log line:\n#{log}"
+
+      # The halt telemetry is value-free — a bare reason atom, the compound reason's payload
+      # (which held the bytes) scrubbed away.
+      assert_received {:telemetry, [:capstan, :assembler, :halt], %{},
+                       %{reason: :event_decode_crashed} = meta}
+
+      refute String.contains?(inspect(meta), sentinel)
+
+      # Fail-closed: the checkpoint never advanced past the crash.
+      assert {:ok, nil} = read_checkpoint(store)
+    end
+
+    test "a sink that RAISES on delivery halts value-free, no crash-report leak (F2)" do
+      # A sink that raises (instead of returning `{:error, _}`) must NOT crash the server: a
+      # crash would put BOTH the raise message AND the in-flight `{:binlog_event, raw}`
+      # message (the raw event bytes) into the OTP crash report (Rule 1). The handle_info
+      # rescue turns it into a value-free {:event_processing_crashed, %Error{}} halt with no
+      # report at all. Non-vacuity: without the rescue the exit reason is the RuntimeError
+      # (not a shutdown-halt) and the crash report carries the sentinel + "Last message".
+      sentinel = "capstan_f2_sink_raise_sentinel_8e1b3d"
+      {:ok, store} = @in_memory.start_link()
+      configure_sink(on_transaction: fn _txn -> raise "sink exploded: #{sentinel}" end)
+      server = start_server(store: store)
+      ref = Process.monitor(server)
+
+      log =
+        capture_log(fn ->
+          feed(server, raws("simple_dml", @dml_txn))
+
+          assert_receive {:DOWN, ^ref, :process, ^server,
+                          {:shutdown, {:halt, {:event_processing_crashed, %Error{}}}}},
+                         2000
+        end)
+
+      # No crash report fired (a clean shutdown-halt), so neither the raise message nor the
+      # in-flight raw event bytes reached the log.
+      refute String.contains?(log, sentinel),
+             "Rule 1 violation: sink-raise message leaked into a log line:\n#{log}"
+
+      refute String.contains?(log, "Last message"),
+             "a GenServer crash report fired (leaking the in-flight raw event bytes):\n#{log}"
+
+      assert {:ok, nil} = read_checkpoint(store)
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## assembler halt telemetry — every AssemblerServer-detected halt is observable (S3)
+  ## ---------------------------------------------------------------------------
+
+  describe "assembler halt telemetry — detected halts emit [:capstan, :assembler, :halt] (S3)" do
+    test "a sink {:error, _} halt emits assembler-halt telemetry with a value-free reason" do
+      # Non-vacuity: the reason is scrubbed to the OUTER atom (`:sink_error`), NOT the raw
+      # compound `{:sink_error, :sink_boom}` — a leak-past-the-allowlist would carry the
+      # payload through here.
+      {:ok, store} = @in_memory.start_link()
+      configure_sink(on_transaction: fn _txn -> {:error, :sink_boom} end)
+      attach_telemetry([[:capstan, :assembler, :halt]])
+      server = start_server(store: store)
+      ref = Process.monitor(server)
+
+      feed(server, raws("simple_dml", @dml_txn))
+
+      assert_receive {:DOWN, ^ref, :process, ^server,
+                      {:shutdown, {:halt, {:sink_error, :sink_boom}}}},
+                     2000
+
+      assert_received {:telemetry, [:capstan, :assembler, :halt], %{}, %{reason: :sink_error}}
+    end
+
+    test "a propagated {:capstan_halt, _} does NOT double-emit assembler-halt telemetry" do
+      # The Connection already surfaced this halt via its own connection.halt payload; the
+      # AssemblerServer stops via stop_halt/2 (no emit) so the same halt is not double-reported.
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+      attach_telemetry([[:capstan, :assembler, :halt]])
+      server = start_server(store: store)
+      ref = Process.monitor(server)
+
+      send(server, {:capstan_halt, :data_gap})
+
+      assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, {:halt, :data_gap}}}, 2000
+      refute_received {:telemetry, [:capstan, :assembler, :halt], _measurements, _meta}
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
   ## schema change — self-committing DDL advances the checkpoint (Q13)
   ## ---------------------------------------------------------------------------
 
@@ -484,6 +616,17 @@ defmodule Capstan.AssemblerServerTest do
 
   # An XID event body: the 8-byte transaction id.
   defp xid_raw(xid), do: raw_event(16, <<xid::64-little>>, xid)
+
+  # A CRC-VALID TABLE_MAP (type 19) whose body is structurally malformed: after the
+  # table_id(6) + flags(2) header, the schema length byte claims 255 bytes but far fewer
+  # follow, so decode_table_map's `read_str8_z` hard-match RAISES a FunctionClauseError (no
+  # matching clause) whose args carry the raw remainder — including `sentinel`. Event.parse
+  # succeeds (the CRC is valid), so the raise happens inside the decode, exactly the B1
+  # decode-crash path.
+  defp malformed_table_map_raw(sentinel) do
+    body = <<1::48-little, 0::16-little, 255::8, sentinel::binary>>
+    raw_event(19, body, 0)
+  end
 
   # An XA_PREPARE (type 38): the Decoder halts on the type byte alone.
   defp xa_prepare_raw, do: raw_event(38, <<>>, 0)

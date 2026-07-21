@@ -24,5 +24,10 @@ defmodule Capstan.Transaction do
           commit_ts: DateTime.t()
         }
 
+  # Rule 1: `changes` carries row VALUES (user data). Deriving `Inspect` with `only` renders
+  # just the structural identity (`gtid`/`position`/`commit_ts`) and elides `changes`, so an
+  # incidental `inspect/1` cannot surface a value — and, since `changes` is a possibly
+  # single-pass `Enumerable.t()` (see above), never accidentally consumes it either.
+  @derive {Inspect, only: [:gtid, :position, :commit_ts]}
   defstruct [:gtid, :position, :changes, :commit_ts]
 end

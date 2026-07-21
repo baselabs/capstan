@@ -59,7 +59,10 @@ defmodule Capstan.Supervisor do
          {:ok, start_position} <- Pipeline.resolve_start_position(opts, resumed),
          {:ok, assembler} <- add_child(sup, Pipeline.assembler_spec(opts, {impl, store})),
          {:ok, _connection} <-
-           add_child(sup, Pipeline.connection_spec(opts, assembler, start_position)) do
+           add_child(
+             sup,
+             Pipeline.connection_spec(opts, assembler, start_position, {impl, store})
+           ) do
       :ok
     end
   end
