@@ -1,0 +1,288 @@
+defmodule Capstan.SupervisorTest.LibSink do
+  @moduledoc false
+  # A valid LIB-owned sink: handle_transaction/1 + handle_schema_change/2 (C1 always
+  # delivers DDL, so handle_schema_change/2 is required). No checkpoint/0 — lib mode does
+  # not consult it.
+  @behaviour Capstan.Sink
+  @impl true
+  def handle_transaction(_txn), do: {:ok, %Capstan.Position{gtid_set: "", file: nil, pos: nil}}
+  @impl true
+  def handle_schema_change(_change, _position), do: :ok
+end
+
+defmodule Capstan.SupervisorTest.SinkOwnedSink do
+  @moduledoc false
+  # A valid SINK-owned sink: checkpoint/0 + handle_transaction/1 + handle_schema_change/2.
+  @behaviour Capstan.Sink
+  @impl true
+  def checkpoint, do: {:ok, nil}
+  @impl true
+  def handle_transaction(_txn), do: {:ok, %Capstan.Position{gtid_set: "", file: nil, pos: nil}}
+  @impl true
+  def handle_schema_change(_change, _position), do: :ok
+end
+
+defmodule Capstan.SupervisorTest.NoTransactionSink do
+  @moduledoc false
+  # Missing the mandatory handle_transaction/1 (has the others).
+  def checkpoint, do: {:ok, nil}
+  def handle_schema_change(_change, _position), do: :ok
+end
+
+defmodule Capstan.SupervisorTest.NoCheckpointSink do
+  @moduledoc false
+  # Has handle_transaction/1 + handle_schema_change/2 but NO checkpoint/0 — invalid in
+  # sink-owned mode, valid in lib mode.
+  def handle_transaction(_txn), do: {:ok, %Capstan.Position{gtid_set: "", file: nil, pos: nil}}
+  def handle_schema_change(_change, _position), do: :ok
+end
+
+defmodule Capstan.SupervisorTest.NoSchemaChangeSink do
+  @moduledoc false
+  # Has checkpoint/0 + handle_transaction/1 but NO handle_schema_change/2 — invalid
+  # whenever DDL delivery is enabled (C1: always).
+  def checkpoint, do: {:ok, nil}
+  def handle_transaction(_txn), do: {:ok, %Capstan.Position{gtid_set: "", file: nil, pos: nil}}
+end
+
+defmodule Capstan.SupervisorTest do
+  use ExUnit.Case, async: false
+
+  alias Capstan.Error
+  alias Capstan.Pipeline
+  alias Capstan.Telemetry
+  alias Capstan.ValueFree
+
+  alias Capstan.SupervisorTest.{
+    LibSink,
+    NoCheckpointSink,
+    NoSchemaChangeSink,
+    NoTransactionSink,
+    SinkOwnedSink
+  }
+
+  # A config that validates (pure) but points the connection at a closed port, so a real
+  # pipeline starts (store + AssemblerServer + Connection) WITHOUT a live MySQL: the
+  # Connection just retries the refused connect while the AssemblerServer runs.
+  defp lib_opts(overrides \\ []) do
+    Keyword.merge(
+      [
+        connection: [
+          host: "127.0.0.1",
+          port: 1,
+          username: "capstan",
+          password: "secret",
+          ssl: false
+        ],
+        server_id: 42,
+        sink: LibSink,
+        checkpoint_store: [module: Capstan.CheckpointStore.InMemory]
+      ],
+      overrides
+    )
+  end
+
+  describe "Capstan.Telemetry — the value-free metadata allowlist" do
+    test "allowed_meta_keys/0 covers exactly the design's value-free metadata keys" do
+      assert Enum.sort(Telemetry.allowed_meta_keys()) ==
+               Enum.sort(
+                 ~w(server_version server_uuid tls reason gtid schema table kind missing_gtids)a
+               )
+    end
+
+    test "event/3 with only allowlisted keys fires" do
+      attach([[:capstan, :connection, :halt]])
+      assert :ok = Telemetry.event([:capstan, :connection, :halt], %{}, %{reason: :data_gap})
+      assert_receive {:telemetry, [:capstan, :connection, :halt], %{}, %{reason: :data_gap}}
+    end
+
+    test "event/3 REFUSES a non-allowlisted metadata key (a stray value can never ride)" do
+      assert_raise ArgumentError, ~r/not in the value-free allowlist/, fn ->
+        Telemetry.event([:capstan, :transaction, :committed], %{}, %{row_value: "secret_pii"})
+      end
+    end
+
+    test "validate!/1 returns allowlisted metadata unchanged and raises on any off-list key" do
+      assert %{gtid: "u:1"} = Telemetry.validate!(%{gtid: "u:1"})
+
+      assert_raise ArgumentError, ~r/password/, fn ->
+        Telemetry.validate!(%{gtid: "u:1", password: "hunter2"})
+      end
+    end
+  end
+
+  describe "Capstan.Error — the value-free boundary normaliser" do
+    test "from/1 keeps a value-free atom reason" do
+      assert %Error{reason: :data_gap, shape: nil} = Error.from(:data_gap)
+    end
+
+    test "from/1 DISCARDS an exception message (which may embed a value), keeping only the module" do
+      err = Error.from(%RuntimeError{message: "duplicate entry 'topsecret' for key 'PRIMARY'"})
+      assert %Error{reason: :unknown, shape: "RuntimeError"} = err
+      refute Error.message(err) =~ "topsecret"
+      refute inspect(err) =~ "topsecret"
+    end
+
+    test "from/1 keeps only the atom tag of a {tag, payload} tuple, discarding the payload" do
+      err = Error.from({:connect_failed, [password: "hunter2"]})
+      assert %Error{reason: :connect_failed, shape: nil} = err
+      refute Error.message(err) =~ "hunter2"
+      refute inspect(err) =~ "hunter2"
+    end
+
+    test "from/1 maps an unrecognised term to :unknown with no retained payload" do
+      assert %Error{reason: :unknown, shape: nil} =
+               Error.from("a raw string that could be a value")
+    end
+
+    test "message/1 and inspect render only structural fields" do
+      err = %Error{reason: :sink_missing_checkpoint, shape: nil}
+      assert Error.message(err) == "capstan error reason=sink_missing_checkpoint"
+      assert inspect(err) =~ "#Capstan.Error<"
+    end
+  end
+
+  describe "Capstan.Pipeline.validate_sink/1 — per-mode callback required-ness (routed from Task 13)" do
+    test "lib-owned: a sink exporting handle_transaction/1 (+ handle_schema_change/2) is accepted" do
+      assert :ok = Pipeline.validate_sink(sink: LibSink, checkpoint_store: [module: X])
+    end
+
+    test "lib-owned: a sink missing handle_transaction/1 is REFUSED at start-up" do
+      assert {:error, :sink_missing_handle_transaction} =
+               Pipeline.validate_sink(sink: NoTransactionSink, checkpoint_store: [module: X])
+    end
+
+    test "sink-owned: a sink exporting checkpoint/0 + handle_transaction/1 (+ schema) is accepted" do
+      assert :ok = Pipeline.validate_sink(sink: SinkOwnedSink)
+    end
+
+    test "sink-owned: a sink missing checkpoint/0 is REFUSED at start-up" do
+      assert {:error, :sink_missing_checkpoint} =
+               Pipeline.validate_sink(sink: NoCheckpointSink)
+    end
+
+    test "sink-owned: a sink missing handle_transaction/1 is REFUSED at start-up" do
+      assert {:error, :sink_missing_handle_transaction} =
+               Pipeline.validate_sink(sink: NoTransactionSink)
+    end
+
+    test "DDL enabled: a sink missing handle_schema_change/2 is REFUSED at start-up" do
+      assert {:error, :sink_missing_handle_schema_change} =
+               Pipeline.validate_sink(sink: NoSchemaChangeSink)
+    end
+
+    test "a sink that is not a loaded module is REFUSED" do
+      assert {:error, :invalid_sink} = Pipeline.validate_sink(sink: NotARealModule)
+      assert {:error, :invalid_sink} = Pipeline.validate_sink(sink: nil)
+      assert {:error, :invalid_sink} = Pipeline.validate_sink(sink: "notamodule")
+    end
+  end
+
+  describe "Capstan.start_link/1 — refuses a bad substrate before starting" do
+    test "a missing server_id is refused (Config validation)" do
+      assert {:error, :server_id_required} = Capstan.start_link(lib_opts(server_id: nil))
+    end
+
+    test "a mis-shaped connection is refused (Config validation)" do
+      assert {:error, :config_invalid} = Capstan.start_link(lib_opts(connection: :not_a_keyword))
+    end
+
+    test "TLS on with no verification choice is refused fail-closed (Config F6/Q17)" do
+      opts =
+        lib_opts(
+          connection: [host: "127.0.0.1", port: 1, username: "u", password: "p", ssl: true]
+        )
+
+      assert {:error, :tls_verification_unspecified} = Capstan.start_link(opts)
+    end
+
+    test "a lib-mode sink missing handle_transaction/1 is refused (per-mode sink check)" do
+      assert {:error, :sink_missing_handle_transaction} =
+               Capstan.start_link(lib_opts(sink: NoTransactionSink))
+    end
+
+    test "a valid lib-mode config starts a supervised pipeline" do
+      assert {:ok, sup} = Capstan.start_link(lib_opts())
+      on_exit(fn -> stop_supervisor(sup) end)
+      assert is_pid(sup)
+      assert Process.alive?(sup)
+      # The pipeline is wired: an AssemblerServer child and a Connection child are running.
+      ids = sup |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
+      assert :assembler in ids
+      assert :connection in ids
+    end
+  end
+
+  describe "supervision — a fail-closed halt does not take down the host supervisor" do
+    test "an AssemblerServer halt stops the pipeline without restarting it or killing the host" do
+      # A connect that hangs keeps the Connection alive-but-idle, so the ONLY halt in the
+      # window is the one we drive into the AssemblerServer (no race with a Connection
+      # halt). The seam fails closed in prod — Capstan.start_link/1 never injects it.
+      {:ok, sup} =
+        Capstan.Supervisor.start_link(
+          sink: LibSink,
+          checkpoint_store: [module: Capstan.CheckpointStore.InMemory],
+          connection: [],
+          server_id: 42,
+          connect_fun: fn _connection -> Process.sleep(:infinity) end
+        )
+
+      on_exit(fn -> stop_supervisor(sup) end)
+
+      assembler = child_pid(sup, :assembler)
+      assert is_pid(assembler)
+      ref = Process.monitor(assembler)
+
+      # Drive the exact fail-closed halt the AssemblerServer performs: {:shutdown,
+      # {:halt, reason}} — NOT a crash, so a :temporary child is not restarted.
+      send(assembler, {:capstan_halt, :sink_error_probe})
+
+      assert_receive {:DOWN, ^ref, :process, ^assembler, {:shutdown, {:halt, :sink_error_probe}}},
+                     2000
+
+      # The host supervisor survives, and the halted child is NOT restarted into a livelock.
+      Process.sleep(100)
+      assert Process.alive?(sup)
+      assert child_pid(sup, :assembler) in [nil, :undefined]
+    end
+  end
+
+  describe "Rule 1 — value-free error/halt paths (row-value + password vectors, F11)" do
+    test "a row value never reaches a log line or a telemetry metadata payload" do
+      assert :ok = ValueFree.assert_row_value_free()
+    end
+
+    test "the connection password never reaches a log line or a telemetry metadata payload" do
+      assert :ok = ValueFree.assert_password_free()
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## helpers
+  ## ---------------------------------------------------------------------------
+
+  def forward_telemetry(event, measurements, metadata, %{test: test}) do
+    send(test, {:telemetry, event, measurements, metadata})
+  end
+
+  defp attach(events) do
+    handler_id = {__MODULE__, make_ref()}
+
+    :ok =
+      :telemetry.attach_many(handler_id, events, &__MODULE__.forward_telemetry/4, %{test: self()})
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  defp child_pid(sup, id) do
+    sup
+    |> Supervisor.which_children()
+    |> Enum.find_value(nil, fn {child_id, pid, _type, _mods} -> child_id == id && pid end)
+  end
+
+  defp stop_supervisor(sup) do
+    if Process.alive?(sup), do: Supervisor.stop(sup)
+  catch
+    :exit, _ -> :ok
+  end
+end
