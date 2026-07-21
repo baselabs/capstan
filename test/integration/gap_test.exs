@@ -13,14 +13,16 @@ defmodule Capstan.Integration.GapTest do
   These two are exact duals: each direction's non-vacuity mutation is the OTHER direction's purge.
   Each spins its own container so its binlog state is clean and independent.
 
-  `:integration`-tagged; skipped with a NAMED reason when Docker is unavailable (never silently).
+  `:requires_docker`-tagged (every marquee here spins a throwaway container), so an absent-Docker
+  run EXCLUDES them through ExUnit — a genuine skip in the summary, never a spurious pass. Run
+  them with `mix test --only requires_docker` (Docker required).
   """
   use ExUnit.Case, async: false
 
   alias Capstan.MysqlCase
   alias Capstan.MysqlCase.{SeededStore, Sink}
 
-  @moduletag :integration
+  @moduletag :requires_docker
 
   test "purge BELOW the checkpoint: the pipeline continues past the gap" do
     with_gap_substrate(fn ctx ->
@@ -58,26 +60,22 @@ defmodule Capstan.Integration.GapTest do
   ## each isolated in its own binlog file so PURGE can target the boundary.
   ## ---------------------------------------------------------------------------
 
+  # `@moduletag :requires_docker` gates Docker availability at the ExUnit level (excluded when
+  # not selected), so this helper always runs the throwaway container; `with_throwaway_mysql`
+  # raises a clear error if Docker is somehow absent under an explicit `--only requires_docker`.
   defp with_gap_substrate(body) do
-    if MysqlCase.docker_available?() do
-      Sink.configure(%{pid: self()})
-      on_exit(&Sink.clear/0)
+    Sink.configure(%{pid: self()})
+    on_exit(&Sink.clear/0)
 
-      MysqlCase.with_throwaway_mysql([], fn port ->
-        qconn = MysqlCase.socket!(MysqlCase.query_connection(port))
+    MysqlCase.with_throwaway_mysql([], fn port ->
+      qconn = MysqlCase.socket!(MysqlCase.query_connection(port))
 
-        try do
-          body.(build_gap_state(qconn, port))
-        after
-          MysqlCase.close!(qconn)
-        end
-      end)
-    else
-      IO.puts(
-        "\n[SKIP] gap marquee: Docker unavailable — a throwaway container is required " <>
-          "(PURGE BINARY LOGS is server-wide and must not run on the shared substrate)."
-      )
-    end
+      try do
+        body.(build_gap_state(qconn, port))
+      after
+        MysqlCase.close!(qconn)
+      end
+    end)
   end
 
   # Lay the binlog out so each batch sits in its own file:

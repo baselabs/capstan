@@ -45,10 +45,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # DOCKER MANDATE (routed from Task 18). The :integration marquees stream from this shared
-      # substrate AND four of them spin their own THROWAWAY mysql:8.0 containers; without a working
-      # Docker daemon those four print "[SKIP]" and pass green, so CI would go green having tested
-      # nothing. Fail loudly here if Docker is absent, and assert below that no marquee skipped.
+      # DOCKER MANDATE (routed from Task 18). The :integration marquees stream from the shared
+      # substrate started below, and the :requires_docker marquees spin their own THROWAWAY
+      # mysql:8.0 containers — both need a working daemon. Absent Docker they'd surface later and
+      # noisier (`with_throwaway_mysql` raises; the substrate never comes up); fail loudly here
+      # first with the clearest message.
       - name: Require Docker
         run: |
           docker info >/dev/null 2>&1 || { echo "::error::Docker daemon unavailable — the integration marquees cannot run."; exit 1; }
@@ -130,18 +131,19 @@ jobs:
       - name: Live-substrate tests
         run: mix test --only live
 
-      # The 14 :integration marquees MUST all run. The four Docker-gated ones (two gap-purge, the
-      # compression marquee, the PARTIAL_JSON marquee) print "[SKIP]" and pass green when a throwaway
-      # container cannot be created; treat any "[SKIP]" as a hard failure so a silently-untested run
+      # Shared-substrate integration marquees. `mix test --only <tag>` EXITS NON-ZERO when the tag
+      # matches zero tests, so a mis-tag that would silently drop a marquee fails CI on its own —
+      # no stdout `[SKIP]` grep needed. The docker-gated marquees are a separate tag (next step).
+      - name: Integration marquees (shared substrate)
+        run: mix test --only integration
+
+      # Docker-gated marquees (the two gap-purge, compression, PARTIAL_JSON), tagged
+      # `:requires_docker`. An absent-Docker run EXCLUDES them through ExUnit (a genuine skip in the
+      # summary, never a spurious pass); CI HAS Docker, so they must RUN here. If Docker were
+      # unavailable, `with_throwaway_mysql/2` raises and this step fails — a silently-untested run
       # can never go green.
-      - name: Integration marquees (all 14 must run, 0 skipped)
-        run: |
-          set -o pipefail
-          mix test --only integration 2>&1 | tee integration.log
-          if grep -q '\[SKIP\]' integration.log; then
-            echo "::error::An integration marquee printed [SKIP] — a Docker-gated container did not run. All 14 marquees must execute."
-            exit 1
-          fi
+      - name: Docker-gated marquees (throwaway containers)
+        run: mix test --only requires_docker
 
       - name: Dialyzer
         run: mix dialyzer

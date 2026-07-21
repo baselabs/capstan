@@ -1,6 +1,6 @@
 defmodule Capstan.Integration.FailClosedTest do
   @moduledoc """
-  Live-substrate fail-closed marquees (plan Task 18, design F14) — the five transaction-shape /
+  Live-substrate fail-closed marquees (plan Task 18, design F14) — the transaction-shape /
   transport properties the design specifies as LIVE shapes, previously unit-only. Proving them on
   real substrate bytes is the whole point: a unit fixture can assert the intended halt while the
   REAL event sequence never reaches it.
@@ -8,19 +8,16 @@ defmodule Capstan.Integration.FailClosedTest do
     * **MyISAM write** → the non-transactional `QUERY("COMMIT")` terminator delivers the row.
     * **a second pipeline with the SAME `server_id`** → `:server_id_conflict` (a REAL pair — MySQL
       evicts the duplicate replica; the cycle counter must halt, never livelock).
-    * **`binlog_transaction_compression=ON`** (throwaway container) → a LOUD
-      `:compressed_payload_unsupported` halt, no delivery.
     * **no `ssl:` option** → the connection is ACTUALLY encrypted (asserted on the SOCKET —
       `:ssl.connection_information` — not on the config).
     * **XA START/END/PREPARE** → `:unsupported_transaction_shape`, zero rows. This marquee
       exposed a real assembler silent-loss defect (`XA START` misclassified as DDL,
       advancing the checkpoint past the XA GTID), now fixed in commit `3fe5e5a`.
 
-  Plus the Q5 precondition shape (a throwaway substrate, not one of the F14 five):
-
-    * **`binlog_row_value_options=PARTIAL_JSON`** → refused at the precondition gate
-      (`:binlog_row_value_options_not_empty`) before any dump, so a partial-JSON row image is
-      never decoded.
+  The two THROWAWAY-container fail-closed shapes (`binlog_transaction_compression=ON` and the Q5
+  `binlog_row_value_options=PARTIAL_JSON` precondition) live in
+  `Capstan.Integration.FailClosedDockerTest` (`:requires_docker`) so they are a genuine ExUnit
+  skip when Docker is absent — never a spurious pass.
 
   `:integration`-tagged. Never restarts or reconfigures the shared `mysql-cdc-probe`.
   """
@@ -108,96 +105,6 @@ defmodule Capstan.Integration.FailClosedTest do
     # fixed) — so the halt is the actionable reason, not a generic one.
     assert_receive {:connection_halt, reason}, 20_000
     assert reason == :server_id_conflict
-  end
-
-  ## ---------------------------------------------------------------------------
-  ## binlog_transaction_compression=ON → loud halt (throwaway container)
-  ## ---------------------------------------------------------------------------
-
-  test "a compressed transaction payload halts :compressed_payload_unsupported" do
-    if MysqlCase.docker_available?() do
-      MysqlCase.with_throwaway_mysql(["--binlog-transaction-compression=ON"], fn port ->
-        qconn = MysqlCase.socket!(MysqlCase.query_connection(port))
-
-        try do
-          MysqlCase.run_all!(qconn, [
-            "DROP TABLE IF EXISTS fc_compressed",
-            "CREATE TABLE fc_compressed (id INT PRIMARY KEY, name VARCHAR(50)) ENGINE=InnoDB"
-          ])
-
-          watermark = MysqlCase.read_gtid_executed!(qconn)
-
-          {:ok, sup} =
-            Capstan.start_link(
-              connection: MysqlCase.pipeline_connection(port),
-              server_id: MysqlCase.unique_server_id(),
-              sink: Sink,
-              checkpoint_store: [module: SeededStore, options: [gtid_set: watermark]],
-              max_command_retries: 5
-            )
-
-          on_exit(fn -> MysqlCase.stop_pipeline(sup) end)
-
-          # The AssemblerServer-side halt emits no telemetry, so observe the process exit directly.
-          ref = Process.monitor(MysqlCase.assembler_pid(sup))
-
-          MysqlCase.run!(
-            qconn,
-            "INSERT INTO fc_compressed (id, name) VALUES (1, 'compressed-row')"
-          )
-
-          assert_receive {:DOWN, ^ref, :process, _pid,
-                          {:shutdown,
-                           {:halt, {:assembler_error, :compressed_payload_unsupported}}}},
-                         20_000
-
-          # No row is delivered — the compressed payload halts fail-closed, never guessed at.
-          refute_receive {:txn, _g, _c, _p}, 200
-        after
-          MysqlCase.close!(qconn)
-        end
-      end)
-    else
-      IO.puts(
-        "\n[SKIP] compression marquee: Docker unavailable — a throwaway container " <>
-          "configured with binlog_transaction_compression=ON is required."
-      )
-    end
-  end
-
-  ## ---------------------------------------------------------------------------
-  ## binlog_row_value_options=PARTIAL_JSON → precondition refusal (Q5, throwaway)
-  ## ---------------------------------------------------------------------------
-
-  test "a PARTIAL_JSON substrate is refused at the precondition gate" do
-    if MysqlCase.docker_available?() do
-      MysqlCase.with_throwaway_mysql(["--binlog-row-value-options=PARTIAL_JSON"], fn port ->
-        halts = MysqlCase.attach_halt_telemetry(self())
-        on_exit(fn -> :telemetry.detach(halts) end)
-
-        {:ok, sup} =
-          Capstan.start_link(
-            connection: MysqlCase.pipeline_connection(port),
-            server_id: MysqlCase.unique_server_id(),
-            sink: Sink,
-            checkpoint_store: [module: SeededStore, options: [gtid_set: ""]],
-            max_command_retries: 5
-          )
-
-        on_exit(fn -> MysqlCase.stop_pipeline(sup) end)
-
-        # Config.check_preconditions reads @@global.binlog_row_value_options; PARTIAL_JSON (not "")
-        # refuses fail-closed at the FIRST establish step — before the dump — so no partial-JSON
-        # row image is ever decoded (design Q5, Rule 2). A precondition violation cannot be cured by
-        # reconnecting, so it halts rather than spending the command budget.
-        assert_receive {:connection_halt, :binlog_row_value_options_not_empty}, 20_000
-      end)
-    else
-      IO.puts(
-        "\n[SKIP] PARTIAL_JSON marquee: Docker unavailable — a throwaway container configured " <>
-          "with binlog_row_value_options=PARTIAL_JSON is required."
-      )
-    end
   end
 
   ## ---------------------------------------------------------------------------
@@ -309,5 +216,110 @@ defmodule Capstan.Integration.FailClosedTest do
       )
 
     sup
+  end
+end
+
+defmodule Capstan.Integration.FailClosedDockerTest do
+  @moduledoc """
+  The THROWAWAY-container fail-closed marquees (plan Task 18) — split from
+  `Capstan.Integration.FailClosedTest` because they require a purpose-configured `mysql:8.0`
+  container the shared substrate cannot provide:
+
+    * **`binlog_transaction_compression=ON`** → a LOUD `:compressed_payload_unsupported` halt,
+      no delivery.
+    * **`binlog_row_value_options=PARTIAL_JSON`** (the Q5 precondition shape) → refused at the
+      precondition gate (`:binlog_row_value_options_not_empty`) before any dump, so a partial-JSON
+      row image is never decoded.
+
+  `@moduletag :requires_docker`, so ExUnit EXCLUDES these (a genuine skip in the summary, never a
+  spurious pass) unless the run selects the tag. Run them with `mix test --only requires_docker`
+  (Docker required); `with_throwaway_mysql/2` raises a clear error if Docker is absent there.
+  """
+  use ExUnit.Case, async: false
+
+  alias Capstan.MysqlCase
+  alias Capstan.MysqlCase.{SeededStore, Sink}
+
+  @moduletag :requires_docker
+
+  setup do
+    Sink.configure(%{pid: self()})
+    on_exit(&Sink.clear/0)
+    :ok
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## binlog_transaction_compression=ON → loud halt (throwaway container)
+  ## ---------------------------------------------------------------------------
+
+  test "a compressed transaction payload halts :compressed_payload_unsupported" do
+    MysqlCase.with_throwaway_mysql(["--binlog-transaction-compression=ON"], fn port ->
+      qconn = MysqlCase.socket!(MysqlCase.query_connection(port))
+
+      try do
+        MysqlCase.run_all!(qconn, [
+          "DROP TABLE IF EXISTS fc_compressed",
+          "CREATE TABLE fc_compressed (id INT PRIMARY KEY, name VARCHAR(50)) ENGINE=InnoDB"
+        ])
+
+        watermark = MysqlCase.read_gtid_executed!(qconn)
+
+        {:ok, sup} =
+          Capstan.start_link(
+            connection: MysqlCase.pipeline_connection(port),
+            server_id: MysqlCase.unique_server_id(),
+            sink: Sink,
+            checkpoint_store: [module: SeededStore, options: [gtid_set: watermark]],
+            max_command_retries: 5
+          )
+
+        on_exit(fn -> MysqlCase.stop_pipeline(sup) end)
+
+        # The AssemblerServer-side halt emits no telemetry, so observe the process exit directly.
+        ref = Process.monitor(MysqlCase.assembler_pid(sup))
+
+        MysqlCase.run!(
+          qconn,
+          "INSERT INTO fc_compressed (id, name) VALUES (1, 'compressed-row')"
+        )
+
+        assert_receive {:DOWN, ^ref, :process, _pid,
+                        {:shutdown, {:halt, {:assembler_error, :compressed_payload_unsupported}}}},
+                       20_000
+
+        # No row is delivered — the compressed payload halts fail-closed, never guessed at.
+        refute_receive {:txn, _g, _c, _p}, 200
+      after
+        MysqlCase.close!(qconn)
+      end
+    end)
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## binlog_row_value_options=PARTIAL_JSON → precondition refusal (Q5, throwaway)
+  ## ---------------------------------------------------------------------------
+
+  test "a PARTIAL_JSON substrate is refused at the precondition gate" do
+    MysqlCase.with_throwaway_mysql(["--binlog-row-value-options=PARTIAL_JSON"], fn port ->
+      halts = MysqlCase.attach_halt_telemetry(self())
+      on_exit(fn -> :telemetry.detach(halts) end)
+
+      {:ok, sup} =
+        Capstan.start_link(
+          connection: MysqlCase.pipeline_connection(port),
+          server_id: MysqlCase.unique_server_id(),
+          sink: Sink,
+          checkpoint_store: [module: SeededStore, options: [gtid_set: ""]],
+          max_command_retries: 5
+        )
+
+      on_exit(fn -> MysqlCase.stop_pipeline(sup) end)
+
+      # Config.check_preconditions reads @@global.binlog_row_value_options; PARTIAL_JSON (not "")
+      # refuses fail-closed at the FIRST establish step — before the dump — so no partial-JSON
+      # row image is ever decoded (design Q5, Rule 2). A precondition violation cannot be cured by
+      # reconnecting, so it halts rather than spending the command budget.
+      assert_receive {:connection_halt, :binlog_row_value_options_not_empty}, 20_000
+    end)
   end
 end

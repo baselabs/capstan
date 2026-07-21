@@ -12,9 +12,11 @@ defmodule Capstan.MysqlCase do
       duplicated (forge substrate rule).
     * **A throwaway `mysql:8.0` container** on a fresh ephemeral port — every DESTRUCTIVE
       marquee (`PURGE BINARY LOGS`, a server configured with
-      `binlog_transaction_compression=ON`) spins one via `with_throwaway_mysql/3`, provisions
-      it, runs, and tears it down with a guaranteed `after`. `docker_available?/0` gates it so
-      a missing Docker skips with a NAMED reason rather than a spurious pass.
+      `binlog_transaction_compression=ON`) spins one via `with_throwaway_mysql/2`, provisions
+      it, runs, and tears it down with a guaranteed `after`. Those marquees are
+      `@moduletag :requires_docker`, so ExUnit EXCLUDES them (a genuine skip, never a spurious
+      pass) unless the run selects that tag; `with_throwaway_mysql/2` also raises a clear error
+      if Docker is somehow absent under an explicit `--only requires_docker`.
 
   ## Two connection identities
 
@@ -275,7 +277,11 @@ defmodule Capstan.MysqlCase do
   ## docker / throwaway container lifecycle
   ## ---------------------------------------------------------------------------
 
-  @doc "True iff the local Docker daemon answers `docker info` (the throwaway-marquee gate)."
+  @doc """
+  True iff the local Docker daemon answers `docker info`. The throwaway marquees gate on the
+  `:requires_docker` tag (excluded by ExUnit when not selected), so this is the last-resort clear
+  error inside `with_throwaway_mysql/2` for an explicit `--only requires_docker` run without Docker.
+  """
   @spec docker_available?() :: boolean()
   def docker_available? do
     case System.cmd("docker", ["info"], stderr_to_stdout: true) do
@@ -290,10 +296,20 @@ defmodule Capstan.MysqlCase do
   Spins a throwaway `mysql:8.0` on a fresh ephemeral port with `extra_flags` (beyond the five
   precondition variables + GTID), waits until it answers an authenticated query, provisions the
   caching_sha2 user + `probe_db`, runs `fun.(port)`, and tears the container down with a
-  guaranteed `after` (`docker rm -f`). The caller must gate on `docker_available?/0`.
+  guaranteed `after` (`docker rm -f`). Callers must be `@moduletag :requires_docker` (the ExUnit
+  gate — excluded when not selected, so absent Docker is a genuine skip, never a pass); do NOT
+  wrap call sites in a `docker_available?/0` conditional — a pass-when-absent branch is exactly
+  the false green the tag replaced. This function raises a clear error as the last resort for an
+  explicit `--only requires_docker` run without Docker.
   """
   @spec with_throwaway_mysql([String.t()], (pos_integer() -> result)) :: result when result: var
   def with_throwaway_mysql(extra_flags, fun) when is_list(extra_flags) and is_function(fun, 1) do
+    unless docker_available?() do
+      raise "capstan mysql_case: Docker unavailable — :requires_docker marquees need a throwaway " <>
+              "container. They are excluded by default; run them with Docker present " <>
+              "(`mix test --only requires_docker`)."
+    end
+
     name = "capstan-throwaway-#{System.unique_integer([:positive])}"
     port = free_port()
 
