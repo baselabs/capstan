@@ -36,8 +36,24 @@ defmodule Capstan.Connection do
         -> read @@gtid_executed / @@gtid_purged
         -> gap_check/3                          (proactive retention gap, F1 / Q4)
         -> SET @master_binlog_checksum          (F4 — required BEFORE the dump)
+        -> SET @master_heartbeat_period         (liveness — required BEFORE the dump)
         -> COM_BINLOG_DUMP_GTID                 (resume from the start position)
         -> stream frames -> receiver
+
+  ## Streaming liveness (half-open partition detection)
+
+  A silent half-open partition mid-stream would otherwise hang the pipeline forever — the
+  reader blocks on `recv` and MySQL only heartbeats an IDLE stream. Two mechanisms bound the
+  detection window: (1) `SET @master_heartbeat_period` asks the master to emit a
+  `HEARTBEAT_LOG_EVENT` after `:heartbeat_period_ms` of idleness (self-contained — not
+  dependent on the server's `slave_net_timeout`), so even a quiet-but-healthy stream keeps
+  delivering frames; (2) a parent-side **liveness timer** fires if NO frame (event OR
+  heartbeat) arrives within `:stream_timeout_ms` (default 4× the heartbeat period, tolerating
+  3 missed heartbeats) — on fire it emits `[:capstan, :connection, :stream_timeout]` (the stall
+  is no longer silent), kills the recv-blocked reader, and reconnects; a persistent partition
+  halts `:stream_stalled` via the established-then-dropped budget. `keepalive: true` on the
+  socket is the OS backstop for a fully-dead peer (its ~2h default idle is too slow to be
+  primary). The reader itself keeps reading with no recv timeout; liveness is the parent's job.
 
   ## Receiver contract
 
@@ -95,6 +111,15 @@ defmodule Capstan.Connection do
   @default_reconnect_backoff 1_000
   @default_connect_timeout 20_000
 
+  # Streaming liveness (half-open partition detection). The master sends a HEARTBEAT_LOG_EVENT
+  # after `@master_heartbeat_period` of stream idleness; capstan sets it explicitly so the
+  # liveness signal does not depend on the server's `slave_net_timeout`. The parent's liveness
+  # timer fires if NO frame (event or heartbeat) arrives within `stream_timeout_ms`; the default
+  # is 4× the heartbeat period, tolerating 3 consecutive missed heartbeats before declaring the
+  # stream dead. `@master_heartbeat_period` is set in NANOSECONDS (verified live: N=1e9 → ~1s).
+  @default_heartbeat_period_ms 15_000
+  @default_stream_timeout_ms 60_000
+
   @gtid_query "SELECT @@global.gtid_executed, @@global.gtid_purged"
   @set_checksum_query "SET @master_binlog_checksum = @@global.binlog_checksum"
 
@@ -119,12 +144,16 @@ defmodule Capstan.Connection do
     :checkpoint_store,
     :connect_fun,
     :reconnect_backoff,
+    :heartbeat_period_ms,
+    :stream_timeout_ms,
     :socket,
     :server_info,
     :reader,
     :reconnect_timer,
+    :liveness_timer,
     command_failures: 0,
-    cycle_count: 0
+    cycle_count: 0,
+    liveness_epoch: 0
   ]
 
   ## ---------------------------------------------------------------------------
@@ -141,7 +170,9 @@ defmodule Capstan.Connection do
   (an optional `{impl_module, handle}` re-read for the current resume position on every
   establish; see "Resume position"), `:max_command_retries` (default 5), `:connect_fun` (a
   1-arg override for the connect+auth step, default the real `gen_tcp` + `Handshake` path),
-  `:reconnect_backoff` ms, and `:name`.
+  `:reconnect_backoff` ms, `:heartbeat_period_ms` (default 15_000 — the master heartbeat
+  interval; see "Streaming liveness"), `:stream_timeout_ms` (default 60_000 — the liveness
+  window; MUST be `> :heartbeat_period_ms` or start-up fails closed), and `:name`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -225,18 +256,31 @@ defmodule Capstan.Connection do
     # handled as a drop, instead of crashing this process.
     Process.flag(:trap_exit, true)
 
-    state = %__MODULE__{
-      server_id: Keyword.fetch!(opts, :server_id),
-      connection: Keyword.get(opts, :connection, []),
-      max_command_retries: Keyword.get(opts, :max_command_retries, @default_max_command_retries),
-      receiver: Keyword.get(opts, :receiver),
-      checkpoint_str: checkpoint_string(Keyword.get(opts, :start_position)),
-      checkpoint_store: Keyword.get(opts, :checkpoint_store),
-      connect_fun: Keyword.get(opts, :connect_fun, &default_connect/1),
-      reconnect_backoff: Keyword.get(opts, :reconnect_backoff, @default_reconnect_backoff)
-    }
+    heartbeat_period_ms = Keyword.get(opts, :heartbeat_period_ms, @default_heartbeat_period_ms)
+    stream_timeout_ms = Keyword.get(opts, :stream_timeout_ms, @default_stream_timeout_ms)
 
-    {:ok, monitor_receiver(state), {:continue, :connect}}
+    if stream_timeout_ms <= heartbeat_period_ms do
+      # A liveness window at or below the heartbeat period would false-drop a HEALTHY idle
+      # stream — a full heartbeat interval can elapse between frames. Fail closed rather than
+      # run a liveness check that fires on a working pipeline.
+      {:stop, {:shutdown, {:halt, :invalid_liveness_config}}}
+    else
+      state = %__MODULE__{
+        server_id: Keyword.fetch!(opts, :server_id),
+        connection: Keyword.get(opts, :connection, []),
+        max_command_retries:
+          Keyword.get(opts, :max_command_retries, @default_max_command_retries),
+        receiver: Keyword.get(opts, :receiver),
+        checkpoint_str: checkpoint_string(Keyword.get(opts, :start_position)),
+        checkpoint_store: Keyword.get(opts, :checkpoint_store),
+        connect_fun: Keyword.get(opts, :connect_fun, &default_connect/1),
+        reconnect_backoff: Keyword.get(opts, :reconnect_backoff, @default_reconnect_backoff),
+        heartbeat_period_ms: heartbeat_period_ms,
+        stream_timeout_ms: stream_timeout_ms
+      }
+
+      {:ok, monitor_receiver(state), {:continue, :connect}}
+    end
   end
 
   # Monitor the receiver (the `AssemblerServer`) so its death is not silent. The receiver's
@@ -274,6 +318,18 @@ defmodule Capstan.Connection do
 
   def handle_info({:EXIT, _other, _reason}, state), do: {:noreply, state}
 
+  # The liveness timer fired: no frame — event OR heartbeat — arrived within
+  # `stream_timeout_ms`, so the stream is silently dead (a half-open partition). Only the
+  # CURRENT epoch acts; a stale timeout queued before a reset/cancel is ignored. Make the stall
+  # VISIBLE (it was a silent hang), then drop → reconnect, halting `:stream_stalled` if the
+  # established-then-dropped budget is exhausted (a persistent half-open partition).
+  def handle_info({:liveness_timeout, epoch}, %__MODULE__{liveness_epoch: epoch} = state) do
+    emit_stream_timeout()
+    state |> stop_reader() |> handle_drop(:stream_stalled)
+  end
+
+  def handle_info({:liveness_timeout, _stale}, state), do: {:noreply, state}
+
   # The monitored receiver (the `AssemblerServer`) died — a fail-closed halt it detected
   # (sink error, checkpoint budget, XA, decode crash) stops it WITHOUT messaging us. Stop the
   # whole pipeline fail-closed rather than keep streaming binlog events into a dead pid (the
@@ -288,6 +344,7 @@ defmodule Capstan.Connection do
   def terminate(_reason, state) do
     state
     |> stop_reader()
+    |> cancel_liveness()
     |> cancel_reconnect_timer()
     |> close_current_socket()
 
@@ -330,6 +387,7 @@ defmodule Capstan.Connection do
          {:ok, executed, purged} <- gtid_sets(state.socket),
          :ok <- gap_check(executed, purged, state.checkpoint_str),
          :ok <- set_checksum(state.socket),
+         :ok <- set_heartbeat(state.socket, state.heartbeat_period_ms),
          :ok <- send_dump(state) do
       start_streaming(state)
     else
@@ -385,6 +443,19 @@ defmodule Capstan.Connection do
     end
   end
 
+  # Ask the master to emit a HEARTBEAT_LOG_EVENT after `heartbeat_period_ms` of stream
+  # idleness, so the parent's liveness timer has a signal to reset on even when no real events
+  # flow. `@master_heartbeat_period` is in NANOSECONDS (verified live). Must precede the dump.
+  defp set_heartbeat(socket, heartbeat_period_ms) do
+    period_ns = heartbeat_period_ms * 1_000_000
+
+    case Command.query(socket, "SET @master_heartbeat_period = #{period_ns}") do
+      :ok -> :ok
+      {:ok, _rows} -> :ok
+      {:error, reason} -> {:command_error, reason}
+    end
+  end
+
   defp send_dump(state) do
     checkpoint_set = Gtid.parse(state.checkpoint_str)
     dump = Command.com_binlog_dump_gtid(state.server_id, checkpoint_set)
@@ -398,6 +469,7 @@ defmodule Capstan.Connection do
   defp start_streaming(state) do
     case start_reader(state) do
       {:ok, state} ->
+        state = schedule_liveness(state)
         emit_established(state)
         {:noreply, state}
 
@@ -411,10 +483,11 @@ defmodule Capstan.Connection do
   ## ---------------------------------------------------------------------------
 
   # An event packet: strip the leading 0x00 OK marker and forward the raw event bytes.
-  # A frame resets the command budget (A6) but NEVER the cycle counter (C8).
+  # A frame resets the command budget (A6) and the liveness timer (a heartbeat is a 0x00 frame
+  # too, so an idle-but-healthy stream keeps resetting it), but NEVER the cycle counter (C8).
   defp handle_frame(<<0x00, event::binary>>, state) do
     notify_receiver(state, {:binlog_event, event})
-    {:noreply, %{state | command_failures: 0}}
+    {:noreply, %{reset_liveness(state) | command_failures: 0}}
   end
 
   # A mid-stream error packet (the dump refusal surfaces here as the first frame).
@@ -432,8 +505,9 @@ defmodule Capstan.Connection do
   end
 
   # The reader owns the socket for the streaming phase (passive recv must run in the
-  # owning process), reads with no timeout (heartbeats keep a healthy stream flowing),
-  # and dies — signalling a drop — when the socket errors.
+  # owning process) and reads with no recv timeout — a recv-blocked reader on a half-open
+  # partition is killed by the PARENT's liveness timer (see "Streaming liveness"). It dies —
+  # signalling a drop — when the socket errors.
   defp start_reader(state) do
     parent = self()
     socket = state.socket
@@ -484,14 +558,18 @@ defmodule Capstan.Connection do
   ## ---------------------------------------------------------------------------
 
   # An established-then-dropped cycle (Q8 / C8). Frame arrival does NOT reach here, so
-  # the cycle counter is never frame-reset; it grows until the livelock is broken.
-  defp handle_drop(state) do
-    state = close_current_socket(state)
+  # the cycle counter is never frame-reset; it grows until the livelock is broken. The
+  # `exhausted_reason` is what the halt carries when the budget is spent: a clean EOF / socket
+  # drop keeps `:server_id_conflict` (the 8.0.x duplicate-replica signature); a liveness-timeout
+  # drop passes `:stream_stalled` so a persistent half-open partition is not misdiagnosed as a
+  # duplicate replica.
+  defp handle_drop(state, exhausted_reason \\ :server_id_conflict) do
+    state = state |> cancel_liveness() |> close_current_socket()
     cycle_count = state.cycle_count + 1
     state = %{state | cycle_count: cycle_count}
 
     if cycle_count > state.max_command_retries do
-      halt(state, :server_id_conflict)
+      halt(state, exhausted_reason)
     else
       schedule_reconnect(state)
     end
@@ -520,6 +598,7 @@ defmodule Capstan.Connection do
     state =
       state
       |> stop_reader()
+      |> cancel_liveness()
       |> cancel_reconnect_timer()
       |> close_current_socket()
 
@@ -547,6 +626,24 @@ defmodule Capstan.Connection do
   defp cancel_reconnect_timer(%__MODULE__{reconnect_timer: timer} = state) do
     Process.cancel_timer(timer)
     %{state | reconnect_timer: nil}
+  end
+
+  # The streaming-liveness timer (half-open partition detection). Scheduling and resetting both
+  # go through `schedule_liveness/1`, which cancels any live timer and bumps the epoch so a
+  # timeout already queued for a prior window is ignored (`{:liveness_timeout, stale}`). Reset
+  # runs on every frame; cancel runs on every drop/halt/teardown.
+  defp schedule_liveness(state) do
+    state = cancel_liveness(state)
+    epoch = state.liveness_epoch
+    timer = Process.send_after(self(), {:liveness_timeout, epoch}, state.stream_timeout_ms)
+    %{state | liveness_timer: timer}
+  end
+
+  defp reset_liveness(state), do: schedule_liveness(state)
+
+  defp cancel_liveness(%__MODULE__{liveness_timer: timer, liveness_epoch: epoch} = state) do
+    if timer, do: Process.cancel_timer(timer)
+    %{state | liveness_timer: nil, liveness_epoch: epoch + 1}
   end
 
   defp close_current_socket(%__MODULE__{socket: nil} = state), do: state
@@ -587,6 +684,13 @@ defmodule Capstan.Connection do
     Telemetry.event([:capstan, :connection, :halt], %{}, %{reason: reason})
   end
 
+  # A stream stall (the liveness timer fired): the pipeline was hung on a silently-dead stream
+  # and is now reconnecting. Value-free (a bare reason atom) — makes the previously-silent hang
+  # visible to an operator's monitoring.
+  defp emit_stream_timeout do
+    Telemetry.event([:capstan, :connection, :stream_timeout], %{}, %{reason: :stream_stalled})
+  end
+
   defp server_info(%__MODULE__{server_info: info}, key) when is_map(info),
     do: Map.get(info, key)
 
@@ -601,7 +705,9 @@ defmodule Capstan.Connection do
     port = Keyword.fetch!(connection, :port)
     timeout = Keyword.get(connection, :timeout, @default_connect_timeout)
 
-    case :gen_tcp.connect(host, port, [:binary, active: false], timeout) do
+    # `keepalive: true` is the OS-level backstop for a fully-dead peer; the parent's liveness
+    # timer is the PRIMARY bounded detector (keepalive's default idle time is ~2h, far too slow).
+    case :gen_tcp.connect(host, port, [:binary, active: false, keepalive: true], timeout) do
       {:ok, raw} -> authenticate(raw, connection)
       {:error, reason} -> {:error, reason}
     end

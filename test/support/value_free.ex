@@ -82,6 +82,7 @@ defmodule Capstan.ValueFree do
   @capstan_events [
     [:capstan, :connection, :established],
     [:capstan, :connection, :halt],
+    [:capstan, :connection, :stream_timeout],
     [:capstan, :assembler, :halt],
     [:capstan, :transaction, :committed],
     [:capstan, :transaction, :filtered],

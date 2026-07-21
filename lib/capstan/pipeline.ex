@@ -163,7 +163,13 @@ defmodule Capstan.Pipeline do
         start_position: start_position,
         checkpoint_store: checkpoint_store,
         max_command_retries: Keyword.get(opts, :max_command_retries, 5)
-      ] ++ Keyword.take(opts, [:connect_fun, :reconnect_backoff])
+      ] ++
+        Keyword.take(opts, [
+          :connect_fun,
+          :reconnect_backoff,
+          :heartbeat_period_ms,
+          :stream_timeout_ms
+        ])
 
     %{id: :connection, start: {Connection, :start_link, [connection_opts]}, restart: :temporary}
   end

@@ -142,11 +142,13 @@ defmodule Capstan.ConnectionTest do
         connect_fun: mock_connect_fun(port)
       )
 
-      # The command order on the wire: preconditions -> gtid read -> SET -> dump.
-      # Received in this exact order proves SET precedes the dump (F4).
+      # The command order on the wire: preconditions -> gtid read -> SET checksum -> SET
+      # heartbeat -> dump. Received in this exact order proves both SETs precede the dump (F4 +
+      # the liveness heartbeat period).
       assert_receive {:server_recv, :preconditions}, 2000
       assert_receive {:server_recv, :gtid}, 2000
       assert_receive {:server_recv, :set}, 2000
+      assert_receive {:server_recv, :heartbeat}, 2000
       assert_receive {:server_recv, :dump}, 2000
 
       assert_receive {:binlog_event, "EVENT-ALPHA"}, 2000
@@ -483,6 +485,80 @@ defmodule Capstan.ConnectionTest do
   end
 
   ## ---------------------------------------------------------------------------
+  ## Streaming liveness — a silent half-open partition is detected + reconnected
+  ## ---------------------------------------------------------------------------
+
+  describe "streaming liveness — a silent stream (no heartbeat) is detected and reconnected" do
+    test "the liveness timer fires, emits :stream_timeout, and reconnects" do
+      # A half-open partition: the stream establishes and delivers a frame, then goes SILENT —
+      # no more events AND no heartbeats. The parent's liveness timer must fire within
+      # stream_timeout_ms, make the stall visible via telemetry, and reconnect. Without the
+      # liveness timer the reader blocks on recv forever and none of this happens (the asserts
+      # below time out → RED).
+      test_pid = self()
+      handler = {__MODULE__, make_ref()}
+
+      :telemetry.attach(
+        handler,
+        [:capstan, :connection, :stream_timeout],
+        &__MODULE__.__forward_stream_timeout__/4,
+        test_pid
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      connect_fun = fn _ ->
+        {port, _srv} =
+          start_mock_server(fn sock, _inner ->
+            serve_full_establish(sock, @executed, @purged, test_pid)
+
+            # One frame proves the stream is alive, then SILENCE (no heartbeats) — the partition.
+            stream_event(sock, "ALIVE-FRAME", 1)
+            block_until_closed(sock)
+          end)
+
+        {:ok, raw} = :gen_tcp.connect(@loopback, port, [:binary, active: false], 5000)
+        {:ok, {:gen_tcp, raw}, %{server_version: "mock", tls: false}}
+      end
+
+      start_conn(
+        server_id: 62,
+        connection: [],
+        max_command_retries: 5,
+        receiver: test_pid,
+        start_position: %Position{gtid_set: @checkpoint},
+        connect_fun: connect_fun,
+        reconnect_backoff: 20,
+        heartbeat_period_ms: 50,
+        stream_timeout_ms: 300
+      )
+
+      # The stream is alive (a frame arrived)...
+      assert_receive {:binlog_event, "ALIVE-FRAME"}, 2000
+      # ...then it goes silent and the liveness timer fires within ~300ms, making it visible...
+      assert_receive {:stream_timeout, %{reason: :stream_stalled}}, 2000
+      # ...and it reconnects (a fresh mock server delivers the frame again).
+      assert_receive {:binlog_event, "ALIVE-FRAME"}, 2000
+    end
+
+    test "start-up fails closed :invalid_liveness_config when the window is not > the heartbeat period" do
+      # A liveness window at or below the heartbeat period would false-drop a healthy idle
+      # stream, so it is refused fail-closed rather than run a check that fires on a working
+      # pipeline.
+      assert {:error, {:shutdown, {:halt, :invalid_liveness_config}}} =
+               GenServer.start(Connection,
+                 server_id: 63,
+                 connection: [],
+                 receiver: self(),
+                 start_position: nil,
+                 connect_fun: fn _ -> {:error, :refused} end,
+                 heartbeat_period_ms: 1000,
+                 stream_timeout_ms: 1000
+               )
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
   ## Live probe (Step 3) — real connect + stream against mysql-cdc-probe
   ## ---------------------------------------------------------------------------
 
@@ -515,6 +591,49 @@ defmodule Capstan.ConnectionTest do
 
       assert_receive {:binlog_event, event}, 15_000
       assert is_binary(event) and byte_size(event) > 0
+    end
+
+    test "a healthy idle stream stays alive — heartbeats reset the liveness timer, no false drop" do
+      # Against REAL MySQL: the `SET @master_heartbeat_period` must be accepted and the master
+      # must emit heartbeats that reset the parent liveness timer, so a quiet-but-healthy stream
+      # never false-drops. Short heartbeat (500ms) + window (2s): over a 4s observation (2× the
+      # window) NO :stream_timeout may fire. A broken heartbeat SET / liveness reset would fire it.
+      test_pid = self()
+      handler = {__MODULE__, make_ref()}
+
+      :telemetry.attach(
+        handler,
+        [:capstan, :connection, :stream_timeout],
+        &__MODULE__.__forward_stream_timeout__/4,
+        test_pid
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      executed = live_gtid_executed()
+
+      start_conn(
+        server_id: 5141,
+        connection: [
+          host: "127.0.0.1",
+          port: 5633,
+          username: "root",
+          password: "probe",
+          ssl: false,
+          auth_plugins: [:mysql_native_password],
+          database: "probe_db"
+        ],
+        max_command_retries: 5,
+        receiver: test_pid,
+        start_position: %Position{gtid_set: executed},
+        heartbeat_period_ms: 500,
+        stream_timeout_ms: 2000
+      )
+
+      # Heartbeat frames arrive (the stream is alive)...
+      assert_receive {:binlog_event, _}, 15_000
+      # ...and keep resetting the 2s liveness timer, so no stall is detected over 4s.
+      refute_receive {:stream_timeout, _}, 4000
     end
   end
 
@@ -553,6 +672,12 @@ defmodule Capstan.ConnectionTest do
     _, _ -> :ok
   end
 
+  # A module-function telemetry handler (not a local capture) so :telemetry does not log a
+  # per-attach performance warning into the test output. The test pid rides in `config`.
+  def __forward_stream_timeout__(_event, _measurements, metadata, pid) do
+    send(pid, {:stream_timeout, metadata})
+  end
+
   # The connect_fun creates the client socket INSIDE the GenServer so the GenServer is
   # the socket's controlling process (passive recv, and the later ownership handoff to
   # the reader, both require this).
@@ -572,8 +697,12 @@ defmodule Capstan.ConnectionTest do
   # the caller can assert the SET-before-dump ordering (F4).
   defp serve_full_establish(sock, executed, purged, test) do
     serve_through_gtid(sock, executed, purged, test)
-    {0, set_cmd} = recv_pkt(sock)
-    send(test, {:server_recv, classify_cmd(set_cmd)})
+    # SET @master_binlog_checksum, then SET @master_heartbeat_period — BOTH precede the dump.
+    {0, checksum_cmd} = recv_pkt(sock)
+    send(test, {:server_recv, classify_cmd(checksum_cmd)})
+    serve_ok(sock)
+    {0, heartbeat_cmd} = recv_pkt(sock)
+    send(test, {:server_recv, classify_cmd(heartbeat_cmd)})
     serve_ok(sock)
     {0, dump_cmd} = recv_pkt(sock)
     send(test, {:server_recv, classify_cmd(dump_cmd)})
@@ -597,6 +726,7 @@ defmodule Capstan.ConnectionTest do
   defp classify_cmd(<<0x03, sql::binary>>) do
     cond do
       bin_contains?(sql, "SET @master_binlog_checksum") -> :set
+      bin_contains?(sql, "SET @master_heartbeat_period") -> :heartbeat
       bin_contains?(sql, "binlog_format") -> :preconditions
       bin_contains?(sql, "gtid_executed") -> :gtid
       true -> :other_query
