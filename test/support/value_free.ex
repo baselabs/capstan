@@ -174,6 +174,16 @@ defmodule Capstan.ValueFree do
   """
   @spec assert_rows_query_free() :: :ok
   def assert_rows_query_free do
+    # Non-vacuity of THIS vector rests on a `ROWS_QUERY_LOG_EVENT` actually being in the
+    # stream — otherwise there is no SQL text to leak and the scan is trivially green. Two
+    # guards make that hold: (1) `Capstan.start_link/1` runs `Config.check_preconditions`,
+    # which REFUSES to start unless `binlog_format=ROW`, so the vector's pipeline cannot
+    # even start on a substrate where a ROWS_QUERY event would be absent (the test fails,
+    # it does not pass vacuously); (2) the `SET SESSION binlog_rows_query_log_events = ON`
+    # below runs through `run!/2`, which raises if the server rejects it. The insert is a
+    # normal ROW-image write, so `refute_live_leaks`'s `refute outputs == []` guard also
+    # confirms the transaction was delivered — the SQL text is the only channel the SQL
+    # sentinel could ride, and it is discarded (`{:rows_query, :discarded}`).
     plant = fn table ->
       [
         "SET SESSION binlog_rows_query_log_events = ON",
@@ -477,8 +487,11 @@ defmodule Capstan.ValueFree do
     @moduledoc false
     # A `Capstan.CheckpointStore` seeded to a starting `gtid_set` string, so a lib-owned
     # pipeline started via `Capstan.start_link/1` resumes from a chosen live watermark
-    # rather than from empty (which this purged substrate refuses `:data_gap`). Identical to
-    # `Capstan.CheckpointStore.InMemory` except the initial value comes from `:gtid_set`.
+    # rather than from empty (which this purged substrate refuses `:data_gap`). Same
+    # read/1 + write/2 semantics as `Capstan.CheckpointStore.InMemory`, but `start_link/1`
+    # consumes its opts for the initial `:gtid_set` (InMemory forwards opts to
+    # `Agent.start_link` as GenServer options) — `store_spec` passes no GenServer opts and
+    # captures the returned pid, so the signatures stay compatible.
     @behaviour Capstan.CheckpointStore
 
     @spec start_link(keyword()) :: Agent.on_start()
