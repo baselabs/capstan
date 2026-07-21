@@ -58,6 +58,27 @@ defmodule Capstan.AssemblerTest do
     }
   end
 
+  # A QUERY event (type 2) carrying `sql` under `schema`. The wire body matches
+  # Decoder.decode_query/1: thread_id, exec_time, schema_len, error_code,
+  # status_vars_len(=0), schema, NUL, sql. QUERY *wire decoding* is proven by the real
+  # `alter_ddl`/`myisam` fixtures; this constructs one only to unit-cover the DDL-string
+  # classifier over statement forms the captured fixtures do not include.
+  defp query_event(schema, sql) do
+    body =
+      <<0::32-little, 0::32-little, byte_size(schema)::8, 0::16-little, 0::16-little>> <>
+        schema <> <<0>> <> sql
+
+    %Event{
+      type: 2,
+      timestamp: 1_700_000_000,
+      server_id: 1,
+      event_size: 0,
+      log_pos: 100,
+      flags: 0,
+      body: body
+    }
+  end
+
   # =========================================================================
   # THE NAMED SAFETY PROPERTIES FIRST (risk-first): a transaction-shape halt,
   # or ANY mid-transaction failure, must DISCARD the in-flight transaction —
@@ -385,6 +406,65 @@ defmodule Capstan.AssemblerTest do
 
       assert {:error, :terminator_without_transaction, [], %Position{}} =
                Assembler.run(seq, empty_start())
+    end
+  end
+
+  describe "self-committing DDL classification across statement forms (kind + table only)" do
+    # A real GTID opens the scope; a constructed QUERY(DDL) is the self-committing
+    # terminator. Only kind + table may surface (Rule 1); the table must be the object
+    # name, never an `IF`/`NOT`/`EXISTS` keyword.
+    setup do
+      {:ok, {:gtid, {uuid, gno}}} = Decoder.decode(event!("alter_ddl", "05-gtid.bin"))
+      {:ok, %{gtid_ev: event!("alter_ddl", "05-gtid.bin"), gtid: "#{uuid}:#{gno}"}}
+    end
+
+    for {sql, kind, table} <- [
+          {"CREATE TABLE foo (id INT)", :create_table, "foo"},
+          {"CREATE TABLE IF NOT EXISTS foo (id INT)", :create_table, "foo"},
+          {"CREATE TEMPORARY TABLE bar (id INT)", :create_table, "bar"},
+          {"CREATE TEMPORARY TABLE IF NOT EXISTS bar (id INT)", :create_table, "bar"},
+          {"DROP TABLE foo", :drop_table, "foo"},
+          {"DROP TABLE IF EXISTS foo", :drop_table, "foo"},
+          {"TRUNCATE TABLE baz", :truncate, "baz"},
+          {"ALTER TABLE `mydb`.`widgets_ddl` ADD COLUMN x INT", :alter_table, "widgets_ddl"}
+        ] do
+      test "#{sql} -> #{kind}/#{table}", %{gtid_ev: gtid_ev, gtid: gtid} do
+        assert {:ok, [%SchemaChange{} = sc], _wm} =
+                 Assembler.run([gtid_ev, query_event("probe_db", unquote(sql))], empty_start())
+
+        assert sc.kind == unquote(kind)
+        assert sc.table == unquote(table)
+        assert sc.gtid == gtid
+        # Rule 1: the raw SQL never survives in any field.
+        refute inspect(sc) =~ "IF"
+        refute inspect(sc) =~ "INT"
+      end
+    end
+
+    test "a non-DDL / unrecognised statement fails to a safe {:other, nil} — guesses nothing" do
+      assert {:ok, [%SchemaChange{kind: :other, schema: nil, table: nil}], _wm} =
+               Assembler.run(
+                 [
+                   event!("alter_ddl", "05-gtid.bin"),
+                   query_event("probe_db", "ANALYZE TABLE foo")
+                 ],
+                 empty_start()
+               )
+    end
+  end
+
+  describe "orphan QUERY desyncs fail closed (behavior-adjacent tripwires)" do
+    test "a BEGIN with no open GTID aborts :begin_without_gtid" do
+      assert {:error, :begin_without_gtid, [], %Position{}} =
+               Assembler.run([query_event("probe_db", "BEGIN")], empty_start())
+    end
+
+    test "a non-BEGIN QUERY with no open GTID aborts :query_without_gtid" do
+      assert {:error, :query_without_gtid, [], %Position{}} =
+               Assembler.run(
+                 [query_event("probe_db", "ALTER TABLE foo ADD x INT")],
+                 empty_start()
+               )
     end
   end
 

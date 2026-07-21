@@ -409,16 +409,22 @@ defmodule Capstan.Assembler do
   # The raw SQL is inspected here to classify and is then dropped; only the
   # structured facts flow into `%SchemaChange{}`. Unrecognised DDL is `:other` with no
   # table — a safe default that guesses nothing and leaks nothing.
+  #
+  # This is a best-effort *metadata* extractor, not a SQL parser: it tokenises on
+  # whitespace, so a quoted identifier containing whitespace (`` `my table` ``) is
+  # truncated to a wrong `table` label. That is a diagnostic-label imperfection ONLY —
+  # never a row value, never a Rule-1 leak, and with no effect on the data path or the
+  # watermark. A quote-aware tokeniser is deferred until a real fixture demands it.
   @spec classify_ddl(String.t(), String.t()) :: {atom(), String.t() | nil, String.t() | nil}
   defp classify_ddl(default_schema, sql) do
     tokens = sql |> String.trim() |> String.split(~r/\s+/, trim: true)
 
     case Enum.map(Enum.take(tokens, 3), &String.upcase/1) do
       ["CREATE", "TABLE" | _] ->
-        object(default_schema, :create_table, Enum.drop(tokens, 2))
+        object(default_schema, :create_table, create_if_not_exists(Enum.drop(tokens, 2)))
 
       ["CREATE", "TEMPORARY", "TABLE"] ->
-        object(default_schema, :create_table, Enum.drop(tokens, 3))
+        object(default_schema, :create_table, create_if_not_exists(Enum.drop(tokens, 3)))
 
       ["ALTER", "TABLE" | _] ->
         object(default_schema, :alter_table, Enum.drop(tokens, 2))
@@ -454,6 +460,17 @@ defmodule Capstan.Assembler do
   end
 
   defp drop_if_exists(tokens), do: tokens
+
+  # `CREATE TABLE` takes `IF NOT EXISTS` (three tokens), the mirror of `drop_if_exists`.
+  # Without stripping it the object name would be read as `"IF"` — a silently-wrong
+  # table on a very common statement.
+  defp create_if_not_exists([first, second, third | rest]) do
+    if Enum.map([first, second, third], &String.upcase/1) == ["IF", "NOT", "EXISTS"],
+      do: rest,
+      else: [first, second, third | rest]
+  end
+
+  defp create_if_not_exists(tokens), do: tokens
 
   # Split an optional `schema.table` qualifier and strip identifier quoting and any
   # glued punctuation (`(`, trailing `,`/`;`). A bare name uses the connection schema.

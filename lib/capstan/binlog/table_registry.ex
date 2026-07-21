@@ -23,9 +23,11 @@ defmodule Capstan.Binlog.TableRegistry do
   `ALTER`) and a freed id is later reused for a different table. Within a binlog file
   the server re-emits a `TABLE_MAP` for a `table_id` before the row events that use it,
   so `put/2` overwriting a reused id keeps the binding current. Across a file boundary
-  the ids reset wholesale, so the **owner** (`AssemblerServer`, Task 15) calls
-  `invalidate/1` on `ROTATE` and `FORMAT_DESCRIPTION` to drop every binding — a
-  `table_id` carried over from the previous file must never resolve to a stale map.
+  the ids reset wholesale, so the **owner** calls `invalidate/1` on `ROTATE` and
+  `FORMAT_DESCRIPTION` to drop every binding — a `table_id` carried over from the
+  previous file must never resolve to a stale map. The owner is the pure
+  `Capstan.Assembler` fold, which threads this registry and invalidates it inline;
+  `Capstan.AssemblerServer` (Task 15) drives that fold.
 
   ## Unmapped ids fail closed
 
