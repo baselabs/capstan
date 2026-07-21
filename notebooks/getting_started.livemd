@@ -1,0 +1,197 @@
+# Getting started with capstan
+
+## What you'll build
+
+In about ten minutes, running the cells below, you will connect to MySQL as a replica,
+stream committed row changes into this notebook, then **kill the pipeline, change data while
+it's down, and restart it** — watching it resume with no row lost and no row duplicated. That
+resume property is what capstan is for.
+
+You need [Docker](https://docker.com) and [Livebook](https://livebook.dev). Start a throwaway
+MySQL 8 (fully disposable — you delete it at the end):
+
+```shell
+docker run -d --name capstan-intro -p 127.0.0.1:5698:3306 \
+  -e MYSQL_ROOT_PASSWORD=demo -e MYSQL_DATABASE=shop mysql:8.0 \
+  --binlog-format=ROW --binlog-row-image=FULL --binlog-row-metadata=FULL \
+  --binlog-row-value-options= --gtid-mode=ON --enforce-gtid-consistency=ON \
+  --server-id=1
+```
+
+Give it ~30 seconds to initialise, then run the cells top to bottom.
+
+```elixir
+Mix.install([
+  {:capstan, "~> 0.1.0"},
+  {:myxql, "~> 0.7"}
+])
+```
+
+## Connect and create a table
+
+```elixir
+db_opts = [hostname: "127.0.0.1", port: 5698, username: "root", password: "demo"]
+{:ok, db} = MyXQL.start_link(db_opts)
+
+MyXQL.query!(db, """
+CREATE TABLE IF NOT EXISTS shop.orders (
+  id INT PRIMARY KEY,
+  amount DECIMAL(10,2),
+  status VARCHAR(20)
+)
+""")
+```
+
+## A durable checkpoint store — the whole contract is two callbacks
+
+capstan persists exactly one value per pipeline: the set of transactions already processed.
+Here is a complete, durable, file-backed implementation. In production this is a database
+table, but the `Capstan.CheckpointStore` contract is identical either way:
+
+```elixir
+defmodule FileStore do
+  @behaviour Capstan.CheckpointStore
+
+  def start_link(opts), do: Agent.start_link(fn -> Keyword.fetch!(opts, :path) end)
+
+  @impl true
+  def read(store) do
+    case File.read(Agent.get(store, & &1)) do
+      {:ok, gtid_set} -> {:ok, gtid_set}
+      {:error, :enoent} -> {:ok, nil}
+    end
+  end
+
+  @impl true
+  def write(store, gtid_set) do
+    path = Agent.get(store, & &1)
+    tmp = path <> ".tmp"
+    File.write!(tmp, gtid_set)
+    File.rename!(tmp, path)
+    :ok
+  end
+end
+```
+
+## A sink — committed transactions are delivered here
+
+A sink implements `Capstan.Sink`. Each committed transaction arrives as a
+`Capstan.Transaction` whose `changes` is a **single-pass enumerable** of `Capstan.Change` —
+enumerate it exactly once, and dedup (if you dedup) only via `Capstan.Gtid.member?/2`, never
+an ordinal comparison. This one forwards each transaction to the notebook so you can see it:
+
+```elixir
+defmodule DemoSink do
+  @behaviour Capstan.Sink
+
+  @impl true
+  def handle_transaction(txn) do
+    changes = Enum.map(txn.changes, &{&1.op, &1.table, &1.record})
+    send(:notebook, {:txn, txn.gtid, changes})
+    {:ok, txn.position}
+  end
+
+  @impl true
+  def handle_schema_change(_change, _position), do: :ok
+end
+
+Process.register(self(), :notebook)
+
+collect = fn count ->
+  for _ <- 1..count do
+    receive do
+      {:txn, gtid, changes} -> %{gtid: gtid, changes: changes}
+    after
+      10_000 -> :timeout
+    end
+  end
+end
+```
+
+## Seed the start position, then start the pipeline
+
+An empty checkpoint would ask the server for its *entire* retained history (and a server that
+has purged old logs refuses that — capstan halts `:data_gap`). Seeding the checkpoint with the
+server's current position means "start from now" — the exact recipe a production deployment
+uses:
+
+```elixir
+checkpoint_path = Path.join(System.tmp_dir!(), "capstan_intro_checkpoint")
+File.rm(checkpoint_path)
+
+%{rows: [[gtid_executed]]} = MyXQL.query!(db, "SELECT @@global.gtid_executed")
+File.write!(checkpoint_path, gtid_executed)
+
+start_pipeline = fn ->
+  Capstan.start_link(
+    connection: [
+      host: "127.0.0.1",
+      port: 5698,
+      username: "root",
+      password: "demo",
+      ssl: false
+    ],
+    server_id: 9001,
+    sink: DemoSink,
+    checkpoint_store: [module: FileStore, options: [path: checkpoint_path]],
+    tables: [{"shop", "orders"}]
+  )
+end
+
+{:ok, pipeline} = start_pipeline.()
+```
+
+> `ssl: false` keeps this notebook simple against a local throwaway server. Against a real
+> replica capstan requires TLS with an explicit peer-verification choice, or it refuses to
+> start — see [usage-rules](https://hexdocs.pm/capstan/usage-rules.html).
+
+## Watch committed changes arrive
+
+```elixir
+MyXQL.query!(db, "INSERT INTO shop.orders VALUES (1, 10.50, 'new'), (2, 20.00, 'new')")
+MyXQL.query!(db, "UPDATE shop.orders SET status = 'settled' WHERE id = 1")
+MyXQL.query!(db, "DELETE FROM shop.orders WHERE id = 2")
+
+collect.(3)
+```
+
+Three transactions. Note the two-row insert arrives as **one** transaction with both changes —
+a sink sees whole commits, never fragments.
+
+## The point: kill it, change data while it's down, restart
+
+```elixir
+:ok = Capstan.stop(pipeline)
+
+# committed while the pipeline is DOWN:
+MyXQL.query!(db, "INSERT INTO shop.orders VALUES (3, 99.99, 'while-down')")
+
+{:ok, pipeline} = start_pipeline.()
+collect.(1)
+```
+
+The insert made while capstan was dead arrives on restart — **nothing lost** — and none of the
+earlier transactions replay — **nothing duplicated** — because the durable checkpoint survived
+and the pipeline resumed exactly past it. Swap the file-backed `FileStore` for a
+database-backed one and this is production behaviour.
+
+## Cleanup
+
+```elixir
+Capstan.stop(pipeline)
+File.rm(checkpoint_path)
+```
+
+```shell
+docker rm -f capstan-intro
+```
+
+## Where to next
+
+- [usage-rules](https://hexdocs.pm/capstan/usage-rules.html) — the full consumer contract:
+  delivery guarantees, dedup, checkpoint semantics, telemetry, and every fail-closed halt.
+- [README](https://github.com/baselabs/capstan) — substrate requirements and the
+  `scripts/capstan-preflight.sql` readiness check for a real source.
+
+One thing you did **not** see above: a single row value in any log line. That is capstan's
+value-free contract (Rule 1), and it holds in production too.

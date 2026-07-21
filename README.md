@@ -1,5 +1,10 @@
 # capstan
 
+[![Hex.pm](https://img.shields.io/hexpm/v/capstan.svg)](https://hex.pm/packages/capstan)
+[![Docs](https://img.shields.io/badge/hex-docs-8e7ce6.svg)](https://hexdocs.pm/capstan)
+[![License](https://img.shields.io/hexpm/l/capstan.svg)](https://github.com/baselabs/capstan/blob/main/LICENSE)
+[![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https://github.com/baselabs/capstan/blob/main/notebooks/getting_started.livemd)
+
 **capstan is MySQL CDC on the BEAM — it streams committed MySQL row changes from the binary
 log to a sink, fail-closed and at-least-once (effect-once is the sink-owned atomic path,
 deferred in C1 — see below).** It is [replicant](https://github.com/baselabs/replicant)'s
@@ -26,6 +31,26 @@ operate, and none of the delivery guarantees a BEAM-native library can offer by 
 sink callback.
 
 capstan is a **library in your supervision tree**, not a daemon.
+
+## Getting started
+
+Two ways in:
+
+- **Try it in ten minutes, no project setup** — open the interactive tour in Livebook. It
+  spins up a throwaway MySQL, streams live changes, then kills and restarts the pipeline to
+  show resume-with-no-loss-and-no-duplicate:
+
+  [![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https://github.com/baselabs/capstan/blob/main/notebooks/getting_started.livemd)
+
+  (or open
+  [`notebooks/getting_started.livemd`](https://github.com/baselabs/capstan/blob/main/notebooks/getting_started.livemd)
+  in any Livebook.)
+
+- **Add it to your app** — follow [Installation](#installation) and [Quickstart](#quickstart)
+  below, then read [usage-rules.md](usage-rules.md) for the full consumer contract. Before
+  pointing it at a real server, confirm the source is ready with the read-only
+  [`scripts/capstan-preflight.sql`](scripts/capstan-preflight.sql) (see
+  [Substrate requirements](#substrate-requirements)).
 
 ## Installation
 
