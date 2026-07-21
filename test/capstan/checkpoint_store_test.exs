@@ -136,4 +136,33 @@ defmodule Capstan.CheckpointStoreTest do
       assert Gtid.sources(Gtid.parse(final)) == [{@uuid, [{1, 100}]}]
     end
   end
+
+  ## ---------------------------------------------------------------------------
+  ## A store read fault MUST propagate — never masquerade as "never checkpointed"
+  ## ---------------------------------------------------------------------------
+
+  # A store whose read/1 faults. If read_position/2 collapsed this to {:ok, nil},
+  # the pipeline would resume from the EMPTY set and silently re-deliver the whole
+  # history effect-once — the exact silent failure the fail-closed passthrough guards.
+  defmodule FaultyStore do
+    @behaviour Capstan.CheckpointStore
+    @impl true
+    def read(_store), do: {:error, :store_unavailable}
+    @impl true
+    def write(_store, _gtid_set), do: {:error, :store_unavailable}
+  end
+
+  describe "a store read fault fails closed (propagates, never nil)" do
+    test "read_position/2 returns the store's {:error, _} verbatim, not {:ok, nil}" do
+      assert CheckpointStore.read_position(FaultyStore, :ignored) ==
+               {:error, :store_unavailable}
+    end
+
+    test "write_position/3 propagates the store's {:error, _}" do
+      position = %Position{gtid_set: "#{@uuid}:1"}
+
+      assert CheckpointStore.write_position(FaultyStore, :ignored, position) ==
+               {:error, :store_unavailable}
+    end
+  end
 end

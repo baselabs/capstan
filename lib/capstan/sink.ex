@@ -4,12 +4,13 @@ defmodule Capstan.Sink do
   DDL schema changes to a sink and, in sink-owned checkpoint mode, reads the durable
   processed position back through `c:checkpoint/0`.
 
-  ## Callbacks are all optional; required-ness is enforced per mode by `Capstan.Config`
+  ## Callbacks are all optional; required-ness is a per-mode config concern
 
   Every callback here is an `@optional_callbacks` entry — the behaviour itself imposes
   **no** required set. Which callbacks a given sink MUST implement depends on the
-  configured checkpoint mode and is enforced by `Capstan.Config`, not by this
-  behaviour:
+  configured checkpoint mode; that per-mode requirement is validated where the pipeline
+  starts up and checks its config (not by this behaviour, and not yet wired as of this
+  module — see the pipeline's start-up validation):
 
     * **Sink-owned checkpoint mode** (no `:checkpoint_store`): the sink persists the
       position atomically with its own data write and hands it back via
