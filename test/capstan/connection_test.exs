@@ -1,0 +1,497 @@
+defmodule Capstan.ConnectionTest do
+  use ExUnit.Case, async: false
+
+  alias Capstan.Connection
+  alias Capstan.Position
+  alias Capstan.Protocol.Command
+  alias Capstan.Protocol.Handshake
+
+  # A canonical source UUID for the GTID-set fixtures below.
+  @uuid "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+
+  # The healthy resume scenario (design Q4 / C3): the server has executed 1..14,
+  # has purged 1..9, and the checkpoint sits at 1..12. The unapplied remainder is
+  # 13..14 which does NOT intersect the purged 1..9 — so the pipeline is healthy and
+  # must NOT halt, EVEN THOUGH the checkpoint (1..12) itself intersects purged (1..9).
+  # This is the exact case the naive v1 predicate (`checkpoint ∩ purged`) over-rejects.
+  @checkpoint "#{@uuid}:1-12"
+  @executed "#{@uuid}:1-14"
+  @purged "#{@uuid}:1-9"
+
+  # A genuinely missing range: checkpoint at 1..5, remainder 6..14 intersects the
+  # purged 1..9 at 6..9 — the log fell off the back of the retention window.
+  @gap_checkpoint "#{@uuid}:1-5"
+
+  # A checkpoint carrying GTIDs (15..20) the server never executed (executed only 1..14).
+  @foreign_checkpoint "#{@uuid}:1-20"
+
+  @loopback {127, 0, 0, 1}
+
+  ## ---------------------------------------------------------------------------
+  ## gap_check/3 — the proactive predicate, BOTH directions (F1 / Q4)
+  ## ---------------------------------------------------------------------------
+
+  describe "gap_check/3 — proactive retention-gap predicate (F1)" do
+    test "a healthy pipeline whose unapplied remainder is intact does NOT halt" do
+      # RED against the v1 predicate: checkpoint(1-12) ∩ purged(1-9) = 1-9 ≠ ∅, so a
+      # `checkpoint ∩ purged` implementation would (wrongly) halt this healthy pipeline.
+      assert :ok = Connection.gap_check(@executed, @purged, @checkpoint)
+    end
+
+    test "a genuinely missing range halts :data_gap" do
+      assert {:halt, :data_gap} = Connection.gap_check(@executed, @purged, @gap_checkpoint)
+    end
+
+    test "a checkpoint carrying never-executed GTIDs halts :source_identity_mismatch" do
+      assert {:halt, :source_identity_mismatch} =
+               Connection.gap_check(@executed, @purged, @foreign_checkpoint)
+    end
+
+    test "an empty checkpoint (fresh start) never halts, even against purged logs" do
+      # A fresh start has no durable position to lose, so requesting from the retained
+      # start is not a gap. Without this, every fresh start against any server that has
+      # ever purged would falsely halt :data_gap — the over-rejection Q4 forbids.
+      assert :ok = Connection.gap_check(@executed, @purged, "")
+    end
+
+    test "a multi-source checkpoint with an intact remainder does NOT halt" do
+      other = "9f8b1e2c-0000-11e1-1111-c80aa9429562"
+      executed = "#{@uuid}:1-14,#{other}:1-8"
+      purged = "#{@uuid}:1-9,#{other}:1-3"
+      checkpoint = "#{@uuid}:1-12,#{other}:1-6"
+      assert :ok = Connection.gap_check(executed, purged, checkpoint)
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## classify_dump_error/2 — error 1236 is OVERLOADED (F5 / A2)
+  ## ---------------------------------------------------------------------------
+
+  describe "classify_dump_error/2 — 1236 discriminated on message (F5)" do
+    test "checksum-negotiation text -> :checksum_negotiation_failed" do
+      msg =
+        "Slave can not handle replication events with the checksum that master is " <>
+          "configured to log; the first event 'binlog.000001' at 4"
+
+      assert :checksum_negotiation_failed = Connection.classify_dump_error(1236, msg)
+    end
+
+    test "purged text WITH a named missing range -> :data_gap" do
+      msg =
+        "Cannot replicate because the master purged required binary logs. The GTID set " <>
+          "sent by the slave is '#{@uuid}:1-5', and the missing transactions are '#{@uuid}:6-9'."
+
+      assert :data_gap = Connection.classify_dump_error(1236, msg)
+    end
+
+    test "purged text WITHOUT a named range -> :data_gap" do
+      msg =
+        "The slave is connecting using CHANGE MASTER TO MASTER_AUTO_POSITION = 1, but the " <>
+          "master has purged binary logs containing GTIDs that the slave requires."
+
+      assert :data_gap = Connection.classify_dump_error(1236, msg)
+    end
+
+    test "an unrecognized 1236 gets its own reason and is NEVER :data_gap" do
+      msg = "Client requested master to start replication from position > file size"
+      reason = Connection.classify_dump_error(1236, msg)
+      assert reason == :unrecognized_dump_error
+      refute reason == :data_gap
+    end
+
+    test "a non-1236 dump error is surfaced with its code, never :data_gap" do
+      reason = Connection.classify_dump_error(1159, "Got fatal error reading event")
+      assert reason == {:dump_failed, 1159}
+      refute reason == :data_gap
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## Lifecycle — SET before dump, frame delivery (F4)
+  ## ---------------------------------------------------------------------------
+
+  describe "lifecycle — SET @master_binlog_checksum BEFORE the dump (F4)" do
+    test "issues SET before COM_BINLOG_DUMP_GTID and forwards frames to the receiver" do
+      {port, _srv} =
+        start_mock_server(fn sock, test ->
+          serve_full_establish(sock, @executed, @purged, test)
+          stream_event(sock, "EVENT-ALPHA", 1)
+          stream_event(sock, "EVENT-BETA", 2)
+          block_until_closed(sock)
+        end)
+
+      start_conn(
+        server_id: 42,
+        connection: [],
+        max_command_retries: 5,
+        receiver: self(),
+        start_position: %Position{gtid_set: @checkpoint},
+        connect_fun: mock_connect_fun(port)
+      )
+
+      # The command order on the wire: preconditions -> gtid read -> SET -> dump.
+      # Received in this exact order proves SET precedes the dump (F4).
+      assert_receive {:server_recv, :preconditions}, 2000
+      assert_receive {:server_recv, :gtid}, 2000
+      assert_receive {:server_recv, :set}, 2000
+      assert_receive {:server_recv, :dump}, 2000
+
+      assert_receive {:binlog_event, "EVENT-ALPHA"}, 2000
+      assert_receive {:binlog_event, "EVENT-BETA"}, 2000
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## Lifecycle — proactive gap halt is WIRED (F1)
+  ## ---------------------------------------------------------------------------
+
+  describe "lifecycle — a real retention gap halts before any frame is delivered" do
+    test "halts :data_gap and delivers zero frames" do
+      {port, _srv} =
+        start_mock_server(fn sock, test ->
+          serve_through_gtid(sock, @executed, @purged, test)
+          block_until_closed(sock)
+        end)
+
+      start_conn(
+        server_id: 43,
+        connection: [],
+        max_command_retries: 5,
+        receiver: self(),
+        start_position: %Position{gtid_set: @gap_checkpoint},
+        connect_fun: mock_connect_fun(port)
+      )
+
+      assert_receive {:capstan_halt, :data_gap}, 2000
+      refute_receive {:binlog_event, _}, 300
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## Lifecycle — a mid-stream 1236 halt is discriminated (F5)
+  ## ---------------------------------------------------------------------------
+
+  describe "lifecycle — a 1236 dump refusal is discriminated on its message" do
+    test "a checksum-negotiation 1236 halts :checksum_negotiation_failed, not :data_gap" do
+      {port, _srv} =
+        start_mock_server(fn sock, test ->
+          serve_full_establish(sock, @executed, @purged, test)
+
+          error =
+            "#HY000Slave can not handle replication events with the checksum that master " <>
+              "is configured to log"
+
+          send_pkt(sock, <<0xFF, 1236::16-little, error::binary>>, 1)
+          block_until_closed(sock)
+        end)
+
+      start_conn(
+        server_id: 44,
+        connection: [],
+        max_command_retries: 5,
+        receiver: self(),
+        start_position: %Position{gtid_set: @checkpoint},
+        connect_fun: mock_connect_fun(port)
+      )
+
+      assert_receive {:capstan_halt, :checksum_negotiation_failed}, 2000
+      refute_receive {:binlog_event, _}, 300
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## Lifecycle — command budget halts at max_command_retries + 1 (Q8 / A6)
+  ## ---------------------------------------------------------------------------
+
+  describe "lifecycle — the command budget halts at max_command_retries + 1" do
+    test "a connect that always fails halts after exactly max+1 attempts" do
+      test = self()
+
+      connect_fun = fn _connection ->
+        send(test, :connect_attempt)
+        {:error, :refused}
+      end
+
+      start_conn(
+        server_id: 45,
+        connection: [],
+        max_command_retries: 2,
+        receiver: self(),
+        start_position: nil,
+        connect_fun: connect_fun,
+        reconnect_backoff: 20
+      )
+
+      assert_receive :connect_attempt, 2000
+      assert_receive :connect_attempt, 2000
+      assert_receive :connect_attempt, 2000
+      assert_receive {:capstan_halt, :command_retries_exhausted}, 2000
+      # Exactly max+1 (=3) attempts — no fourth.
+      refute_receive :connect_attempt, 300
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## Lifecycle — server_id conflict livelock (Q8 / C8)
+  ## ---------------------------------------------------------------------------
+
+  describe "lifecycle — a duplicate server_id livelock surfaces :server_id_conflict" do
+    test "an established-then-dropped cycle counter is not reset by frame arrival" do
+      test = self()
+
+      # Each connect establishes cleanly, streams ONE frame, then the server drops the
+      # connection — the exact signature of a duplicate-server_id eviction. If frame
+      # arrival reset the cycle counter (the A6 bug), this would livelock forever.
+      connect_fun = fn _connection ->
+        {port, _srv} =
+          start_mock_server(fn sock, inner ->
+            serve_full_establish(sock, @executed, @purged, inner)
+            stream_event(sock, "CYCLE-EVENT", 1)
+          end)
+
+        {:ok, raw} = :gen_tcp.connect(@loopback, port, [:binary, active: false], 5000)
+        send(test, :cycle_established)
+        {:ok, {:gen_tcp, raw}, %{server_version: "mock", tls: false}}
+      end
+
+      start_conn(
+        server_id: 46,
+        connection: [],
+        max_command_retries: 2,
+        receiver: self(),
+        start_position: %Position{gtid_set: @checkpoint},
+        connect_fun: connect_fun,
+        reconnect_backoff: 20
+      )
+
+      # A frame arrives every cycle (proving the counter is NOT frame-reset), and after
+      # max+1 (=3) established-then-dropped cycles the livelock is broken.
+      assert_receive {:binlog_event, "CYCLE-EVENT"}, 2000
+      assert_receive {:binlog_event, "CYCLE-EVENT"}, 2000
+      assert_receive {:binlog_event, "CYCLE-EVENT"}, 2000
+      assert_receive {:capstan_halt, :server_id_conflict}, 2000
+      refute_receive {:binlog_event, _}, 300
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## Lifecycle — every timer is cancelled on teardown (Q7)
+  ## ---------------------------------------------------------------------------
+
+  describe "lifecycle — no async primitive outlives the state it serves" do
+    test "the reconnect timer is cancelled on stop; no stale reconnect fires" do
+      test = self()
+
+      connect_fun = fn _connection ->
+        send(test, :connect_attempt)
+        {:error, :refused}
+      end
+
+      pid =
+        start_conn(
+          server_id: 47,
+          connection: [],
+          max_command_retries: 10,
+          receiver: self(),
+          start_position: nil,
+          connect_fun: connect_fun,
+          # A backoff long enough that the timer is still pending when we stop.
+          reconnect_backoff: 200
+        )
+
+      # The first attempt failed and armed a reconnect timer.
+      assert_receive :connect_attempt, 2000
+      # Stop before the timer fires — terminate must cancel it.
+      :ok = GenServer.stop(pid, :normal, 1000)
+      # No stale reconnect: no further connect attempt after teardown.
+      refute_receive :connect_attempt, 500
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## Live probe (Step 3) — real connect + stream against mysql-cdc-probe
+  ## ---------------------------------------------------------------------------
+
+  describe "live — frames reach the configured receiver against mysql-cdc-probe" do
+    @describetag :live
+
+    test "connects, dumps, and forwards a real event frame" do
+      # Resume from the server's CURRENT position: no gap (the checkpoint is exactly the
+      # executed set) and the dump-thread preamble (ROTATE / FORMAT_DESCRIPTION /
+      # PREVIOUS_GTIDS / HEARTBEAT) always streams, so a frame is guaranteed without
+      # writing to the substrate. An empty start would request from GTID 1, which this
+      # long-lived (purged) substrate correctly refuses with a 1236 retention gap.
+      executed = live_gtid_executed()
+
+      start_conn(
+        server_id: 5140,
+        connection: [
+          host: "127.0.0.1",
+          port: 5633,
+          username: "root",
+          password: "probe",
+          ssl: false,
+          auth_plugins: [:mysql_native_password],
+          database: "probe_db"
+        ],
+        max_command_retries: 5,
+        receiver: self(),
+        start_position: %Position{gtid_set: executed}
+      )
+
+      assert_receive {:binlog_event, event}, 15_000
+      assert is_binary(event) and byte_size(event) > 0
+    end
+  end
+
+  # Reads @@global.gtid_executed off the live substrate so the connection under test can
+  # resume from a non-purged position.
+  defp live_gtid_executed do
+    {:ok, raw} = :gen_tcp.connect(@loopback, 5633, [:binary, active: false], 10_000)
+
+    {:ok, %{socket: socket}} =
+      Handshake.connect({:gen_tcp, raw},
+        host: ~c"127.0.0.1",
+        username: "root",
+        password: "probe",
+        ssl: false,
+        auth_plugins: [:mysql_native_password]
+      )
+
+    {:ok, [[executed]]} = Command.query(socket, "SELECT @@global.gtid_executed")
+    :gen_tcp.close(raw)
+    executed
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## helpers — the connection under test
+  ## ---------------------------------------------------------------------------
+
+  defp start_conn(opts) do
+    {:ok, pid} = GenServer.start(Connection, opts)
+    on_exit(fn -> if Process.alive?(pid), do: safe_stop(pid) end)
+    pid
+  end
+
+  defp safe_stop(pid) do
+    GenServer.stop(pid, :normal, 1000)
+  catch
+    _, _ -> :ok
+  end
+
+  # The connect_fun creates the client socket INSIDE the GenServer so the GenServer is
+  # the socket's controlling process (passive recv, and the later ownership handoff to
+  # the reader, both require this).
+  defp mock_connect_fun(port) do
+    fn _connection ->
+      {:ok, raw} = :gen_tcp.connect(@loopback, port, [:binary, active: false], 5000)
+      {:ok, {:gen_tcp, raw}, %{server_version: "mock", tls: false}}
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## helpers — the mock MySQL server (post-auth wire exchange)
+  ## ---------------------------------------------------------------------------
+
+  # Serves the full establish handshake: preconditions resultset -> gtid resultset ->
+  # SET OK -> reads the dump command. Reports each received command kind to `test` so
+  # the caller can assert the SET-before-dump ordering (F4).
+  defp serve_full_establish(sock, executed, purged, test) do
+    serve_through_gtid(sock, executed, purged, test)
+    {0, set_cmd} = recv_pkt(sock)
+    send(test, {:server_recv, classify_cmd(set_cmd)})
+    serve_ok(sock)
+    {0, dump_cmd} = recv_pkt(sock)
+    send(test, {:server_recv, classify_cmd(dump_cmd)})
+    :ok
+  end
+
+  # Serves only up to (and including) the gtid_executed/gtid_purged read — used by the
+  # gap-halt test, where the client halts before ever issuing the SET.
+  defp serve_through_gtid(sock, executed, purged, test) do
+    {0, precond_cmd} = recv_pkt(sock)
+    send(test, {:server_recv, classify_cmd(precond_cmd)})
+    serve_resultset(sock, ["ROW", "FULL", "FULL", "", "ON"])
+    {0, gtid_cmd} = recv_pkt(sock)
+    send(test, {:server_recv, classify_cmd(gtid_cmd)})
+    serve_resultset(sock, [executed, purged])
+    :ok
+  end
+
+  defp classify_cmd(<<0x1E, _rest::binary>>), do: :dump
+
+  defp classify_cmd(<<0x03, sql::binary>>) do
+    cond do
+      bin_contains?(sql, "SET @master_binlog_checksum") -> :set
+      bin_contains?(sql, "binlog_format") -> :preconditions
+      bin_contains?(sql, "gtid_executed") -> :gtid
+      true -> :other_query
+    end
+  end
+
+  defp bin_contains?(haystack, needle), do: :binary.match(haystack, needle) != :nomatch
+
+  # One-row text resultset with `length(values)` columns (config_test's shape).
+  defp serve_resultset(sock, values) do
+    ncols = length(values)
+    send_pkt(sock, <<ncols>>, 1)
+    Enum.each(1..ncols, fn i -> send_pkt(sock, "coldef_#{i}", i + 1) end)
+    send_pkt(sock, encode_text_row(values), ncols + 2)
+    send_pkt(sock, <<0xFE, 0, 0, 2, 0, 0, 0>>, ncols + 3)
+  end
+
+  defp serve_ok(sock), do: send_pkt(sock, <<0x00, 0, 0, 2, 0, 0, 0>>, 1)
+
+  defp stream_event(sock, bytes, seq), do: send_pkt(sock, <<0x00>> <> bytes, seq)
+
+  # Blocks until the client (reader) closes its end of the socket.
+  defp block_until_closed(sock), do: :gen_tcp.recv(sock, 0, :infinity)
+
+  defp encode_text_row(values) do
+    Enum.reduce(values, <<>>, fn value, acc -> acc <> <<byte_size(value)::8, value::binary>> end)
+  end
+
+  defp start_mock_server(script) do
+    test = self()
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: @loopback])
+    {:ok, port} = :inet.port(listen)
+
+    server =
+      spawn(fn ->
+        {:ok, sock} = :gen_tcp.accept(listen, 5000)
+        :gen_tcp.close(listen)
+
+        try do
+          script.(sock, test)
+        rescue
+          _ -> :ok
+        catch
+          _, _ -> :ok
+        after
+          :gen_tcp.close(sock)
+        end
+      end)
+
+    {port, server}
+  end
+
+  defp send_pkt(sock, payload, seq) do
+    :ok = :gen_tcp.send(sock, <<byte_size(payload)::24-little, seq::8, payload::binary>>)
+  end
+
+  defp recv_pkt(sock) do
+    {:ok, <<len::24-little, seq::8>>} = :gen_tcp.recv(sock, 4, 5000)
+
+    payload =
+      case len do
+        0 ->
+          <<>>
+
+        n ->
+          {:ok, p} = :gen_tcp.recv(sock, n, 5000)
+          p
+      end
+
+    {seq, payload}
+  end
+end
