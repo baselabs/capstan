@@ -279,14 +279,16 @@ defmodule Capstan.ConnectionTest do
   ## ---------------------------------------------------------------------------
 
   describe "lifecycle — no async primitive outlives the state it serves" do
-    test "the reconnect timer is cancelled on stop; no stale reconnect fires" do
-      test = self()
-
-      connect_fun = fn _connection ->
-        send(test, :connect_attempt)
-        {:error, :refused}
-      end
-
+    # The terminate/halt-path cancels of the reconnect timer and the streaming reader are
+    # NOT independently testable: a `Process.send_after` timer whose destination is the
+    # GenServer, and a `spawn_link`'d reader, are BOTH auto-reaped by the runtime the
+    # instant the GenServer dies — so `read_timer`/`alive?` read the same after teardown
+    # whether or not `terminate/2` cancelled them (this is why the earlier `refute_receive`
+    # was vacuous, and why a `read_timer` rewrite would be too). Those cancels stay in the
+    # code as correct hygiene. The OBSERVABLE "no stale message survives" property — the
+    # one that guards against a killed old reader delivering a phantom event after a
+    # drop→reconnect — is the stale-pid frame guard, tested here non-vacuously.
+    test "a frame from a NON-current reader is dropped, never forwarded (stale-message guard)" do
       pid =
         start_conn(
           server_id: 47,
@@ -294,17 +296,18 @@ defmodule Capstan.ConnectionTest do
           max_command_retries: 10,
           receiver: self(),
           start_position: nil,
-          connect_fun: connect_fun,
-          # A backoff long enough that the timer is still pending when we stop.
-          reconnect_backoff: 200
+          connect_fun: fn _ -> {:error, :refused} end,
+          reconnect_backoff: 60_000
         )
 
-      # The first attempt failed and armed a reconnect timer.
-      assert_receive :connect_attempt, 2000
-      # Stop before the timer fires — terminate must cancel it.
-      :ok = GenServer.stop(pid, :normal, 1000)
-      # No stale reconnect: no further connect attempt after teardown.
-      refute_receive :connect_attempt, 500
+      # A well-formed event frame (0x00 OK marker + event bytes) carrying a pid that is
+      # NOT the connection's current reader — a stand-in for a killed old reader after a
+      # reconnect. The `%{reader: reader}` match must reject it; if that guard matched any
+      # pid, `handle_frame` would forward the phantom event to the receiver.
+      stale_reader = spawn(fn -> :ok end)
+      send(pid, {:frame, stale_reader, <<0x00, "STALE-EVENT">>})
+
+      refute_receive {:binlog_event, "STALE-EVENT"}, 300
     end
   end
 

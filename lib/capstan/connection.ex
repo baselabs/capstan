@@ -91,8 +91,7 @@ defmodule Capstan.Connection do
     :reader,
     :reconnect_timer,
     command_failures: 0,
-    cycle_count: 0,
-    streaming: false
+    cycle_count: 0
   ]
 
   ## ---------------------------------------------------------------------------
@@ -302,7 +301,7 @@ defmodule Capstan.Connection do
     case start_reader(state) do
       {:ok, state} ->
         emit_established(state)
-        {:noreply, %{state | streaming: true}}
+        {:noreply, state}
 
       {:error, _reason} ->
         note_command_failure(state)
@@ -389,7 +388,7 @@ defmodule Capstan.Connection do
   # An established-then-dropped cycle (Q8 / C8). Frame arrival does NOT reach here, so
   # the cycle counter is never frame-reset; it grows until the livelock is broken.
   defp handle_drop(state) do
-    state = close_current_socket(%{state | streaming: false})
+    state = close_current_socket(state)
     cycle_count = state.cycle_count + 1
     state = %{state | cycle_count: cycle_count}
 
