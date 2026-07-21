@@ -421,6 +421,34 @@ defmodule Capstan.Protocol.HandshakeTest do
   end
 
   ## ---------------------------------------------------------------------------
+  ## connect/2 — socket lifetime (connect owns the socket it is handed)
+  ## ---------------------------------------------------------------------------
+
+  describe "connect/2 — owns its socket lifetime on every error path" do
+    test "closes the raw plaintext socket when authentication fails" do
+      {:gen_tcp, raw} =
+        socket =
+        mock_client(fn srv, _test ->
+          t_send(srv, build_handshake(salt: @salt), 0)
+          {1, _resp} = t_recv_pkt(srv)
+          t_send(srv, error_packet(1045), 4)
+        end)
+
+      assert {:error, {:auth_failed, 1045}} =
+               Handshake.connect(socket, username: @username, password: @password, ssl: false)
+
+      # Handshake.connect/2 owns the socket it is handed: on the {:error, _} path it
+      # must close it. A still-open socket here is the pre-fix leak (the caller then
+      # closed the RAW fd, which — after a TLS upgrade — would orphan the :ssl
+      # process; on plaintext it double-freed the same fd from two owners).
+      assert :inet.port(raw) == {:error, :einval},
+             "connect/2 must close the socket it owns on an auth failure (it leaked open)"
+
+      assert :gen_tcp.send(raw, <<0>>) == {:error, :closed}
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
   ## connect/2 — CLIENT_CONNECT_WITH_DB
   ## ---------------------------------------------------------------------------
 
@@ -504,9 +532,60 @@ defmodule Capstan.Protocol.HandshakeTest do
     end
   end
 
+  describe "connect/2 — live TLS-upgrade-then-auth-fail leaks no :ssl process" do
+    @tag :live
+    test "a failed auth after the TLS upgrade closes the :ssl socket (no orphaned gen_statem)" do
+      iterations = 20
+      before = ssl_conn_procs()
+
+      for _ <- 1..iterations do
+        {:ok, raw} = :gen_tcp.connect(~c"127.0.0.1", 5633, [:binary, active: false], 10_000)
+
+        # capstan_sha2 is caching_sha2: TLS upgrades under verify_none, THEN the
+        # wrong password is rejected — a post-upgrade failure, the leak-prone path.
+        assert {:error, {:auth_failed, _code}} =
+                 Handshake.connect({:gen_tcp, raw},
+                   host: ~c"127.0.0.1",
+                   username: "capstan_sha2",
+                   password: "DELIBERATELY-WRONG",
+                   ssl: true,
+                   ssl_opts: [verify: :verify_none]
+                 ),
+               "expected a post-TLS-upgrade auth failure"
+      end
+
+      # Let any lagging gen_statem teardown reap before the census.
+      Process.sleep(300)
+      growth = ssl_conn_procs() - before
+
+      # Pre-fix each failed connect orphans an :ssl_gen_statem (+ :tls_sender): the
+      # caller frees the raw fd but the :ssl process is never closed, so growth
+      # tracks `iterations` (measured: ~2 procs/connect). The fixed Handshake closes
+      # the :ssl socket on the error path, so the census stays flat.
+      assert growth <= 2,
+             "orphaned :ssl processes leaked: grew by #{growth} over #{iterations} failed TLS connects"
+    end
+  end
+
   ## ---------------------------------------------------------------------------
   ## helpers
   ## ---------------------------------------------------------------------------
+
+  # Counts the per-connection TLS processes (an :ssl_gen_statem plus its :tls_sender
+  # sibling). Static ssl infrastructure (:ssl_manager, :ssl_pem_cache,
+  # :tls_client_ticket_store) is excluded, so a leaked connection shows up as growth.
+  defp ssl_conn_procs do
+    Enum.count(Process.list(), &tls_connection_proc?/1)
+  end
+
+  defp tls_connection_proc?(pid) do
+    with {:dictionary, dict} <- Process.info(pid, :dictionary),
+         {mod, _f, _a} <- Keyword.get(dict, :"$initial_call") do
+      mod in [:ssl_gen_statem, :tls_sender]
+    else
+      _ -> false
+    end
+  end
 
   # Serves `server_fun.(raw_socket, test_pid)` from a separate process and hands
   # the connected {:gen_tcp, _} client back to the test.

@@ -126,10 +126,18 @@ defmodule Capstan.Protocol.Handshake do
     }
 
     # Both checks are pure and precede any I/O so an invalid TLS posture fails
-    # closed without ever touching the wire.
+    # closed without ever touching the wire. `connect/2` owns the socket it is
+    # handed: on the pre-I/O pure failures the raw socket is closed here; once
+    # `perform/4` takes over it owns closing the (possibly TLS-upgraded) socket on
+    # its own error paths, so a `perform/4` error is passed through untouched and is
+    # never routed through this `else` (no double-close).
     with {:ok, lead} <- lead_plugin(auth_plugins),
          {:ok, transport} <- transport(ssl?, ssl_opts) do
       perform(socket, transport, lead, ctx)
+    else
+      {:error, reason} ->
+        close_socket(socket)
+        {:error, reason}
     end
   end
 
@@ -211,6 +219,13 @@ defmodule Capstan.Protocol.Handshake do
   ## handshake orchestration
   ## ---------------------------------------------------------------------------
 
+  # Owns the socket lifetime once I/O begins. The raw `socket` is upgraded to the
+  # transport-tagged `active` socket (`{:ssl, _}` after a TLS upgrade, unchanged on
+  # plaintext). Because a `with` that rebinds `socket` cannot reach the upgraded
+  # value from an error handler, the credential exchange lives in `authenticate_over/7`
+  # which closes the `active` socket it holds on any failure. Errors BEFORE the
+  # upgrade (a malformed handshake, or `{:tls_failed, _}`) close the raw socket here
+  # — defensively, since a failed `:ssl.connect/3` may leave it open.
   defp perform(socket, transport, lead, ctx) do
     {_seq, handshake_bin} = Packet.read_packet(socket, ctx.timeout)
     ssl? = transport != :plaintext
@@ -218,13 +233,39 @@ defmodule Capstan.Protocol.Handshake do
     response_seq = if ssl?, do: 2, else: 1
 
     with {:ok, handshake} <- parse_initial_handshake(handshake_bin),
-         {:ok, socket} <- maybe_upgrade_tls(socket, transport, caps, ctx.timeout),
-         response = handshake_response(lead, ctx, handshake.salt, caps),
-         :ok <- reply(socket, response, response_seq),
-         :ok <- authenticate(socket, ctx, handshake.salt) do
-      {:ok, build_result(socket, handshake, caps, ssl?)}
+         {:ok, active} <- maybe_upgrade_tls(socket, transport, caps, ctx.timeout) do
+      authenticate_over(active, lead, ctx, handshake, caps, ssl?, response_seq)
+    else
+      {:error, reason} ->
+        close_socket(socket)
+        {:error, reason}
     end
   end
+
+  # Runs the HandshakeResponse + authentication over the (possibly TLS-upgraded)
+  # `active` socket. On any failure it closes `active` — the crux of the fix: this is
+  # the only scope from which the upgraded `{:ssl, _}` socket is reachable, so it is
+  # the only place that can free it. A success returns the result unchanged; a
+  # returned `{:error, _}` is `perform/4`'s do-block value and so bypasses that
+  # function's `else`, guaranteeing a single close.
+  defp authenticate_over(active, lead, ctx, handshake, caps, ssl?, response_seq) do
+    response = handshake_response(lead, ctx, handshake.salt, caps)
+
+    with :ok <- reply(active, response, response_seq),
+         :ok <- authenticate(active, ctx, handshake.salt) do
+      {:ok, build_result(active, handshake, caps, ssl?)}
+    else
+      {:error, reason} ->
+        close_socket(active)
+        {:error, reason}
+    end
+  end
+
+  # Frees whichever transport a `{:error, _}` path still holds. `:gen_tcp.close/1`
+  # and `:ssl.close/1` are idempotent, so a defensive close of an already-freed
+  # socket is harmless.
+  defp close_socket({:gen_tcp, sock}), do: :gen_tcp.close(sock)
+  defp close_socket({:ssl, sock}), do: :ssl.close(sock)
 
   defp build_result(socket, handshake, caps, ssl?) do
     %{

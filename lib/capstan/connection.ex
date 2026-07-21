@@ -507,12 +507,16 @@ defmodule Capstan.Connection do
   end
 
   defp authenticate(raw, connection) do
+    # Handshake.connect/2 owns the socket lifetime end-to-end: on any {:error, _} it
+    # has already closed whatever socket it held — the raw {:gen_tcp, _} before a TLS
+    # upgrade, or the {:ssl, _} after. Closing `raw` here would double-free the fd
+    # and, on the post-upgrade path, orphan the live :ssl process (whose only handle
+    # is the {:ssl, _} we never see), so we must NOT close on the error branch.
     case Handshake.connect({:gen_tcp, raw}, connection) do
       {:ok, %{socket: socket} = info} ->
         {:ok, socket, info}
 
       {:error, reason} ->
-        :gen_tcp.close(raw)
         {:error, reason}
     end
   end
