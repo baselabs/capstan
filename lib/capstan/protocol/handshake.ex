@@ -213,6 +213,14 @@ defmodule Capstan.Protocol.Handshake do
       [] ->
         {:error, :bad_public_key}
     end
+  rescue
+    # `pem_entry_decode`/`encrypt_public` RAISE on a server-supplied key that decodes to a
+    # PEM entry but is not a usable RSA key (a crafted or wrong-type key on the plaintext
+    # full-auth path). Honour the documented "never a raise" contract: fail closed with the
+    # value-free `:bad_public_key`. The exception is discarded — it could reference the
+    # obfuscated password or key bytes (Rule 1) — so nothing leaks and the password is never
+    # sent when the key is unusable.
+    _ -> {:error, :bad_public_key}
   end
 
   ## ---------------------------------------------------------------------------
@@ -240,6 +248,17 @@ defmodule Capstan.Protocol.Handshake do
         close_socket(socket)
         {:error, reason}
     end
+  rescue
+    # `Packet.read_packet` RAISES on a transport error rather than returning `{:error, _}`.
+    # Fail closed value-free instead of letting it crash out of `connect/2`. This is the
+    # catch-all for a handshake I/O raise: a PRE-upgrade raise (the initial read, the SSLRequest
+    # reply, the `:ssl.connect`) is caught here while `socket` is still the raw `{:gen_tcp, _}`,
+    # and a POST-upgrade raise inside `authenticate_over/7` is caught THERE first (it closes the
+    # upgraded `{:ssl, _}` gracefully); were it not, this arm would still reap the `:ssl` process
+    # by closing the raw transport it wraps — so no path leaks the socket.
+    _exception ->
+      close_socket(socket)
+      {:error, :handshake_io_failed}
   end
 
   # Runs the HandshakeResponse + authentication over the (possibly TLS-upgraded)
@@ -259,6 +278,16 @@ defmodule Capstan.Protocol.Handshake do
         close_socket(active)
         {:error, reason}
     end
+  rescue
+    # `Packet.read_packet` inside `authenticate/3` / `full_auth/4` RAISES on a transport error.
+    # This is the scope that holds the (possibly TLS-upgraded) `active` socket, so it closes it
+    # GRACEFULLY here (`:ssl.close` on the real `{:ssl, _}` handle) — mirroring the `{:error, _}`
+    # arm above — rather than leaving it to `perform/4`'s backstop, which would only reap the
+    # `:ssl` process by abruptly closing the raw transport. The returned `{:error, _}` is
+    # `perform/4`'s do-block value and so bypasses its `else`, keeping a single close.
+    _exception ->
+      close_socket(active)
+      {:error, :handshake_io_failed}
   end
 
   # Frees whichever transport a `{:error, _}` path still holds. `:gen_tcp.close/1`

@@ -397,6 +397,92 @@ defmodule Capstan.ConnectionTest do
   end
 
   ## ---------------------------------------------------------------------------
+  ## Lifecycle — the receiver monitor stops the Connection when its receiver dies (B3)
+  ## ---------------------------------------------------------------------------
+
+  describe "receiver monitor — a dead receiver stops the Connection fail-closed (B3)" do
+    test "a receiver :DOWN halts :receiver_down rather than streaming into a dead pid" do
+      # The Connection monitors its receiver (the AssemblerServer) in init. When the receiver
+      # dies — as it does on ANY fail-closed halt it detects — the Connection must stop
+      # fail-closed, not keep streaming events into a dead pid (the silent stall). A failing
+      # connect_fun keeps the Connection alive in a reconnect loop, so the :DOWN is what stops it.
+      receiver = spawn(fn -> Process.sleep(:infinity) end)
+
+      conn =
+        start_conn(
+          server_id: 60,
+          connection: [],
+          max_command_retries: 100,
+          receiver: receiver,
+          start_position: nil,
+          connect_fun: fn _ -> {:error, :refused} end,
+          reconnect_backoff: 60_000
+        )
+
+      conn_ref = Process.monitor(conn)
+
+      # Barrier: a synchronous call proves the Connection is alive right AFTER the monitor, so
+      # the monitor captured a live process — its `:DOWN` will carry conn's real exit reason,
+      # not a `:noproc` from racing the monitor against conn's near-immediate death. (It also
+      # ensures conn has finished `handle_continue(:connect)` before the receiver is killed.)
+      _ = :sys.get_state(conn)
+      Process.exit(receiver, :kill)
+
+      assert_receive {:DOWN, ^conn_ref, :process, ^conn, {:shutdown, {:halt, :receiver_down}}},
+                     2000
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## Lifecycle — a raise during establish fails closed, never crashes (B3 hardening)
+  ## ---------------------------------------------------------------------------
+
+  describe "establish raise — a malformed server GTID fails closed, never crashes" do
+    test "a raise in gap_check (malformed @@gtid_executed) becomes a command failure, then halts" do
+      # A malformed @@gtid_executed makes gap_check/3's Gtid.parse RAISE ArgumentError. Without
+      # establish_guarded that crashes the :temporary Connection (no restart, no halt, and the
+      # server bytes could ride the OTP crash report). With it, the raise is a value-free command
+      # failure: spend the budget, reconnect, then halt :command_retries_exhausted.
+      test_pid = self()
+
+      connect_fun = fn _ ->
+        {port, _srv} =
+          start_mock_server(fn sock, _inner ->
+            # precondition resultset OK, then a MALFORMED gtid_executed the client will parse.
+            {0, _precond} = recv_pkt(sock)
+            serve_resultset(sock, ["ROW", "FULL", "FULL", "", "ON"])
+            {0, _gtid} = recv_pkt(sock)
+            serve_resultset(sock, ["!!not-a-valid-gtid!!", @purged])
+            block_until_closed(sock)
+          end)
+
+        {:ok, raw} = :gen_tcp.connect(@loopback, port, [:binary, active: false], 5000)
+        {:ok, {:gen_tcp, raw}, %{server_version: "mock", tls: false}}
+      end
+
+      conn =
+        start_conn(
+          server_id: 61,
+          connection: [],
+          max_command_retries: 2,
+          receiver: test_pid,
+          # A non-empty checkpoint makes gap_check actually parse the (malformed) executed set.
+          start_position: %Position{gtid_set: @checkpoint},
+          connect_fun: connect_fun,
+          reconnect_backoff: 20
+        )
+
+      conn_ref = Process.monitor(conn)
+
+      assert_receive {:capstan_halt, :command_retries_exhausted}, 4000
+
+      assert_receive {:DOWN, ^conn_ref, :process, ^conn,
+                      {:shutdown, {:halt, :command_retries_exhausted}}},
+                     2000
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
   ## Live probe (Step 3) — real connect + stream against mysql-cdc-probe
   ## ---------------------------------------------------------------------------
 

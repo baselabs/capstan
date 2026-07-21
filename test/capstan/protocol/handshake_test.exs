@@ -133,6 +133,20 @@ defmodule Capstan.Protocol.HandshakeTest do
       assert {:error, :bad_public_key} =
                Handshake.encrypt_password(@password, @salt, "this is not a pem key")
     end
+
+    test "fails closed :bad_public_key on a key that decodes but cannot encrypt (no raise)" do
+      # A PEM that pem_decodes to an ENTRY but is not a usable RSA public key — here an RSA
+      # PRIVATE key PEM — reaches `pem_entry_decode`/`encrypt_public`, which RAISE
+      # (FunctionClauseError). The rescue must convert that to the value-free
+      # {:error, :bad_public_key} (the documented "never a raise" contract), not crash. The
+      # `[]`-decode case is covered by the sibling test above; this is the decodes-but-unusable
+      # case the bare `case` missed.
+      {_pub_pem, priv} = generate_rsa()
+      priv_pem = :public_key.pem_encode([:public_key.pem_entry_encode(:RSAPrivateKey, priv)])
+
+      assert {:error, :bad_public_key} =
+               Handshake.encrypt_password(@password, @salt, priv_pem)
+    end
   end
 
   ## ---------------------------------------------------------------------------
@@ -445,6 +459,81 @@ defmodule Capstan.Protocol.HandshakeTest do
              "connect/2 must close the socket it owns on an auth failure (it leaked open)"
 
       assert :gen_tcp.send(raw, <<0>>) == {:error, :closed}
+    end
+
+    test "a transport error reading the initial handshake fails closed :handshake_io_failed (no raise)" do
+      # The server accepts then closes WITHOUT sending the initial handshake, so the client's
+      # `Packet.read_packet` RAISES on the closed socket. Before the perform/4 rescue this raise
+      # propagated out of connect/2 — crashing the caller (the Connection) and orphaning the raw
+      # socket. It must instead be a value-free {:error, :handshake_io_failed}, socket freed.
+      {:gen_tcp, raw} = socket = mock_client(fn srv, _test -> :gen_tcp.close(srv) end)
+
+      assert {:error, :handshake_io_failed} =
+               Handshake.connect(socket, username: @username, password: @password, ssl: false)
+
+      assert :gen_tcp.send(raw, <<0>>) == {:error, :closed},
+             "connect/2 must close the raw socket when the handshake read raises (it leaked open)"
+    end
+
+    test "a transport error DURING authentication (plaintext) fails closed :handshake_io_failed" do
+      # The server sends a valid handshake and reads the response, then closes before the auth
+      # result — so the client's `Packet.read_packet` inside authenticate/3 RAISES. On this
+      # PLAINTEXT path `active == socket == {:gen_tcp, raw}`, so either handshake rescue frees
+      # the same raw socket; the TLS test below is what ISOLATES authenticate_over/7's rescue
+      # (where `active` is a distinct `{:ssl, _}`). Here we assert the fail-closed result + freed
+      # socket for the plaintext auth-raise.
+      {:gen_tcp, raw} =
+        socket =
+        mock_client(fn srv, _test ->
+          t_send(srv, build_handshake(salt: @salt), 0)
+          {1, _resp} = t_recv_pkt(srv)
+          :gen_tcp.close(srv)
+        end)
+
+      assert {:error, :handshake_io_failed} =
+               Handshake.connect(socket, username: @username, password: @password, ssl: false)
+
+      assert :gen_tcp.send(raw, <<0>>) == {:error, :closed}
+    end
+
+    test "a transport error DURING auth over TLS fails closed and frees the :ssl socket, no orphan" do
+      # Exercises the post-TLS-upgrade auth-raise path (`active` is the `{:ssl, _}` socket): the
+      # server upgrades TLS, reads the HandshakeResponse, then closes — so the client's read_packet
+      # DURING auth RAISES over the :ssl socket. The handshake rescues must fail closed
+      # (:handshake_io_failed) AND leave no orphaned :ssl process. (`authenticate_over/7`'s rescue
+      # closes `active` gracefully; `perform/4`'s backstop would also reap the :ssl process by
+      # closing the raw transport — so the census stays flat, and it goes RED only if BOTH rescues
+      # are removed. This is the TLS/:ssl-census counterpart to the plaintext auth-raise test.)
+      # An orphaned :ssl process would grow the per-connection census by ~2 per connect.
+      tls_opts = server_tls_opts()
+      iterations = 10
+      before = ssl_conn_procs()
+
+      for _ <- 1..iterations do
+        socket =
+          mock_client(fn srv, _test ->
+            t_send(srv, build_handshake(salt: @salt), 0)
+            {1, _ssl_request} = t_recv_pkt(srv)
+            {:ok, tls} = :ssl.handshake(srv, tls_opts, 5000)
+            {2, _resp} = t_recv_pkt({:ssl, tls})
+            # Close mid-auth (no auth result) — the client's next read RAISES over :ssl.
+            :ssl.close(tls)
+          end)
+
+        assert {:error, :handshake_io_failed} =
+                 Handshake.connect(socket,
+                   username: @username,
+                   password: @password,
+                   ssl: true,
+                   ssl_opts: [verify: :verify_none]
+                 )
+      end
+
+      # Let any lagging gen_statem teardown reap before the census.
+      Process.sleep(300)
+
+      assert ssl_conn_procs() - before <= 2,
+             "the :ssl socket must be freed on a post-upgrade auth raise (it orphaned)"
     end
   end
 

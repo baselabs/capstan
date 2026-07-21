@@ -47,6 +47,14 @@ defmodule Capstan.Connection do
   assembler's job). A fail-closed halt is delivered as `{:capstan_halt, reason}` and
   then the process stops with `{:shutdown, {:halt, reason}}`.
 
+  The forwarding is a bare `send/2`, so it never raises when the receiver is dead — but a
+  send into a dead receiver is a silent no-op, and the receiver's OWN fail-closed halt does
+  not message back here. So this module **monitors** the receiver: on its `:DOWN` the
+  Connection stops fail-closed (`:receiver_down`) rather than keep streaming events into a
+  dead pid. Monitoring is not linking — a `:shutdown` stop of a `:temporary` child never
+  restarts, so this closes the silent stall without the restart livelock the plain-`send`
+  wiring exists to avoid.
+
   ## Two independent counters (design Q8)
 
     * **Command budget** (`max_command_retries`, default 5): counts failures that occur
@@ -106,6 +114,7 @@ defmodule Capstan.Connection do
     :connection,
     :max_command_retries,
     :receiver,
+    :receiver_ref,
     :checkpoint_str,
     :checkpoint_store,
     :connect_fun,
@@ -227,8 +236,20 @@ defmodule Capstan.Connection do
       reconnect_backoff: Keyword.get(opts, :reconnect_backoff, @default_reconnect_backoff)
     }
 
-    {:ok, state, {:continue, :connect}}
+    {:ok, monitor_receiver(state), {:continue, :connect}}
   end
+
+  # Monitor the receiver (the `AssemblerServer`) so its death is not silent. The receiver's
+  # fail-closed halt stops IT but sends no message back here (the forwarding is a bare
+  # `send/2`); without this monitor the Connection would keep streaming binlog events into a
+  # dead pid — a silent no-op — while looking healthy, exactly the stall the fail-closed
+  # design forbids. A `:DOWN` triggers a fail-closed stop (see the `{:DOWN, _}` handler). A
+  # non-pid receiver (a registered name, or `nil` in a unit test) is left unmonitored.
+  defp monitor_receiver(%__MODULE__{receiver: receiver} = state) when is_pid(receiver) do
+    %{state | receiver_ref: Process.monitor(receiver)}
+  end
+
+  defp monitor_receiver(state), do: state
 
   @impl true
   def handle_continue(:connect, state), do: do_connect(state)
@@ -253,6 +274,14 @@ defmodule Capstan.Connection do
 
   def handle_info({:EXIT, _other, _reason}, state), do: {:noreply, state}
 
+  # The monitored receiver (the `AssemblerServer`) died — a fail-closed halt it detected
+  # (sink error, checkpoint budget, XA, decode crash) stops it WITHOUT messaging us. Stop the
+  # whole pipeline fail-closed rather than keep streaming binlog events into a dead pid (the
+  # silent stall). `:temporary` children mean neither restarts into a livelock.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %__MODULE__{receiver_ref: ref} = state) do
+    halt(state, :receiver_down)
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
@@ -271,9 +300,24 @@ defmodule Capstan.Connection do
 
   defp do_connect(state) do
     case state.connect_fun.(state.connection) do
-      {:ok, socket, info} -> establish(%{state | socket: socket, server_info: info})
+      {:ok, socket, info} -> establish_guarded(%{state | socket: socket, server_info: info})
       {:error, _reason} -> note_command_failure(state)
     end
+  end
+
+  # `establish/1` can RAISE on untrusted server input: `Command.query` -> `Packet.read_packet`
+  # raises on a transport error, and `gap_check/3` -> `Gtid.parse` raises `ArgumentError` on a
+  # malformed `@@gtid_executed`/`@@gtid_purged`. Fail closed value-free instead of crashing the
+  # `:temporary` Connection (which would neither restart nor emit a halt, and could leak the
+  # server bytes via the OTP crash report). Treat it as a command failure — spend the budget,
+  # reconnect, and halt `:command_retries_exhausted` if it persists. `state` carries the open
+  # socket, so `note_command_failure/1` closes it (no fd leak); the exception is discarded.
+  defp establish_guarded(state) do
+    establish(state)
+  rescue
+    _exception -> note_command_failure(state)
+  catch
+    _kind, _reason -> note_command_failure(state)
   end
 
   defp establish(state) do

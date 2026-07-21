@@ -8,7 +8,11 @@ defmodule Capstan.Pipeline do
   `Connection`'s `:receiver` must be the `AssemblerServer`'s PID (design Q7). The
   `Connection` forwards frames with a plain `send/2`, so the receiver is a **PID**: a
   send to a terminated `AssemblerServer` is a silent no-op, never a raise that could
-  restart a fail-closed pipeline into a livelock.
+  restart a fail-closed pipeline into a livelock. The `Connection` also **monitors** that
+  PID, so the `AssemblerServer`'s fail-closed halt (which stops it without messaging back)
+  is not silent — the `Connection` stops fail-closed on the `:DOWN` instead of streaming
+  into the dead pid. Monitoring detects the death without linking, so neither `:temporary`
+  child restarts into the livelock the plain-`send` avoids.
 
   ## Per-mode `Sink` callback required-ness (routed from the Task 13 review)
 
