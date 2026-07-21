@@ -55,29 +55,22 @@ defmodule Capstan.InspectRedactionTest do
     refute rendered =~ "changes:"
   end
 
-  test "inspecting a Transaction never ENUMERATES a single-pass changes enumerable" do
-    # `changes` is typed `Enumerable.t()` and C3 will make it a lazy single-pass Stream; the
-    # derive must not consume it. Prove it: a Stream that counts each element it yields is
-    # never touched by inspect, so the counter stays 0. Without the `only:` derive the
-    # default inspect would enumerate `changes` and drive the counter up.
-    {:ok, counter} = Agent.start_link(fn -> 0 end)
-
-    counting =
-      Stream.map([1, 2, 3], fn x ->
-        Agent.update(counter, &(&1 + 1))
-        x
-      end)
-
+  test "inspect(%Transaction{}) redacts a lazy Stream changes SOURCE too (C3-forward)" do
+    # C3 makes `changes` a lazy single-pass Stream. A `%Stream{}` renders STRUCTURALLY —
+    # `#Stream<[enum: [<source>], funs: [...]]>` — so if `changes` were not excluded, inspect
+    # would surface the Stream's SOURCE (the row values), WITHOUT even running it. The `only:`
+    # derive elides `changes` entirely, so the source sentinel never appears. Non-vacuity:
+    # remove the derive and the default inspect renders `changes: #Stream<[enum: [<sentinel>]…`.
     txn = %Transaction{
       gtid: "#{@uuid}:1",
       position: %Position{gtid_set: "#{@uuid}:1"},
-      changes: counting,
+      changes: Stream.map([@row_sentinel], & &1),
       commit_ts: ~U[2026-07-21 00:00:00Z]
     }
 
-    _ = inspect(txn)
+    rendered = inspect(txn)
 
-    assert Agent.get(counter, & &1) == 0
-    Agent.stop(counter)
+    refute rendered =~ @row_sentinel
+    refute rendered =~ "changes:"
   end
 end
