@@ -98,19 +98,31 @@ Per-file floor on every touched file, **prod AND test**: format, compile (warnin
 
 ## Local substrate
 
-`scripts/dev-substrate.sh` idempotently stands up the MySQL servers the suite streams from, with the
-five precondition variables and the `caching_sha2_password` replication user the auth path needs:
+The MySQL servers the suite streams from are defined ONCE in **`docker-compose.yml`** (the single
+source of truth for the five precondition variables + ports + images). The `caching_sha2_password`
+replication user — with `LOCK TABLES`, which the C2 snapshot brief-lock needs — is seeded at first
+container init by **`scripts/mysql-init/`**. Tunables live in **`.env`** (gitignored; copy from
+`env.example`), so an unedited checkout reproduces the substrate exactly.
 
-    scripts/dev-substrate.sh            # MySQL 8.0 (:5633) + 8.4 (:5634)
+    docker compose up -d --wait            # MySQL 8.0 (:5633) + 8.4 (:5634), ready + user seeded
+    docker compose up -d --wait mysql-80   # just 8.0
+    docker compose down                    # stop + remove (add -v to wipe the data volumes)
+
+`scripts/dev-substrate.sh` is a thin, forge-safe wrapper over compose (same `--only-80` flag); prefer
+either — they drive the same definition.
+
+    scripts/dev-substrate.sh            # both servers
     scripts/dev-substrate.sh --only-80  # just 8.0
 
 - 8.0 `mysql-cdc-probe` @ `127.0.0.1:5633` — root is `mysql_native_password` (the `probe/`
   diagnostics authenticate as native root); replication user `capstan_sha2` / `capstan_sha2_pw`.
 - 8.4 `mysql-cdc-probe-84` @ `127.0.0.1:5634` — 8.4 removed built-in `mysql_native_password`, so root
   is `caching_sha2` (exercises the default auth posture); same `capstan_sha2` user.
-- **Never restart or duplicate a running server** — a live server is left untouched. The script
-  never hard-codes a server UUID (a recreated container gets a new one; read it live).
-- Credentials there are **throwaway** for disposable local containers — not secrets.
+- **Never restart or duplicate a running server** — a live server is left untouched (`docker compose
+  up -d` is idempotent). No server UUID is hard-coded (a recreated container gets a new one; read it
+  live). Container names are stable (`handshake_test.exs` does `docker exec mysql-cdc-probe …`).
+- Credentials are **throwaway** for disposable local containers — not secrets. `.env` is gitignored;
+  never put a real password in it.
 
 ## Docs & lifecycle-artifact policy
 

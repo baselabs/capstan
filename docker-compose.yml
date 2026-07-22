@@ -1,0 +1,110 @@
+# capstan dev MySQL substrate — the SINGLE SOURCE OF TRUTH for the local CDC servers.
+#
+# The server flags below are the exact set C1's fail-closed precondition gate requires (design Q5 /
+# AGENTS.md Critical Rules) — they are load-bearing, not cosmetic. `scripts/dev-substrate.sh` is now a
+# thin wrapper over this file; `.github/workflows/ci.yml` should track the same flags + init user.
+#
+# Usage:
+#   docker compose up -d --wait             # both servers, ready + capstan_sha2 seeded
+#   docker compose up -d --wait mysql-80    # just 8.0 (equivalent to dev-substrate.sh --only-80)
+#   docker compose ps                       # status
+#   docker compose down                     # stop + remove containers (data volumes kept)
+#   docker compose down -v                  # ...and wipe the data volumes (forces a fresh init)
+#
+# Tunables (ports, images, credentials, container names) live in .env — copy env.example to .env.
+# Ports bind to 127.0.0.1 ONLY. Credentials are THROWAWAY for disposable LOCAL containers.
+name: capstan-substrate
+
+services:
+  # 8.0 — root stays mysql_native_password so the native-root probe/ diagnostics keep working;
+  # capstan_sha2 (the pipeline account) is caching_sha2. Bound to :5633 — the port the live /
+  # integration marquees hardcode (test/support/mysql_case.ex).
+  mysql-80:
+    image: ${MYSQL_IMAGE_80:-mysql:8.0}
+    container_name: ${MYSQL_CONTAINER_80:-mysql-cdc-probe}
+    command:
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-row-metadata=FULL
+      - --binlog-row-value-options=
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --server-id=1
+      - --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-probe}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-probe_db}
+      CAPSTAN_SHA2_USER: ${CAPSTAN_SHA2_USER:-capstan_sha2}
+      CAPSTAN_SHA2_PASSWORD: ${CAPSTAN_SHA2_PASSWORD:-capstan_sha2_pw}
+    ports:
+      - "127.0.0.1:${MYSQL_PORT_80:-5633}:3306"
+    volumes:
+      - mysql80-data:/var/lib/mysql
+      - ./scripts/mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Ready = the REAL networked server answers an AUTHENTICATED TCP query. `mysqladmin ping` also
+      # answers on the entrypoint's temporary socket-only init server (a false-ready) — force TCP via
+      # -h127.0.0.1; --get-server-public-key lets caching_sha2 auth complete over the plaintext probe.
+      test:
+        [
+          "CMD",
+          "mysql",
+          "-h127.0.0.1",
+          "-P3306",
+          "--get-server-public-key",
+          "-uroot",
+          "-p${MYSQL_ROOT_PASSWORD:-probe}",
+          "-N",
+          "-e",
+          "SELECT 1",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+
+  # 8.4 — removed built-in mysql_native_password, so NO --default-authentication-plugin flag (it
+  # errors) and root defaults to caching_sha2 (exercises design Q6's default posture). Bound to :5634.
+  mysql-84:
+    image: ${MYSQL_IMAGE_84:-mysql:8.4}
+    container_name: ${MYSQL_CONTAINER_84:-mysql-cdc-probe-84}
+    command:
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-row-metadata=FULL
+      - --binlog-row-value-options=
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --server-id=2
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-probe}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-probe_db}
+      CAPSTAN_SHA2_USER: ${CAPSTAN_SHA2_USER:-capstan_sha2}
+      CAPSTAN_SHA2_PASSWORD: ${CAPSTAN_SHA2_PASSWORD:-capstan_sha2_pw}
+    ports:
+      - "127.0.0.1:${MYSQL_PORT_84:-5634}:3306"
+    volumes:
+      - mysql84-data:/var/lib/mysql
+      - ./scripts/mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mysql",
+          "-h127.0.0.1",
+          "-P3306",
+          "--get-server-public-key",
+          "-uroot",
+          "-p${MYSQL_ROOT_PASSWORD:-probe}",
+          "-N",
+          "-e",
+          "SELECT 1",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+
+volumes:
+  mysql80-data:
+  mysql84-data:
