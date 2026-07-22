@@ -80,7 +80,15 @@ defmodule Capstan.AssemblerServer do
     :checkpoint_impl,
     :checkpoint_store,
     :processed_set,
-    :max_retries
+    :max_retries,
+    # C2 snapshot spine hooks (both absent in all of C1 ⇒ byte-identical behavior):
+    #   * `:watermark_observer` — an optional pid notified `{:capstan_watermark, gtid_set}`
+    #     at the checkpoint choke point, so a co-running snapshot coordinator sees EVERY
+    #     watermark advance (delivered, filtered, AND self-committing DDL) by construction.
+    #   * `:coordinator_ref` — the `Process.monitor/1` ref of an attached snapshot coordinator;
+    #     a silent coordinator death halts fail-closed (`:snapshot_coordinator_down`).
+    :watermark_observer,
+    :coordinator_ref
   ]
 
   ## ---------------------------------------------------------------------------
@@ -98,12 +106,30 @@ defmodule Capstan.AssemblerServer do
       an allowlist of `{schema, table}` pairs).
     * `:max_retries` — the checkpoint-write retry budget (default
       `Capstan.CheckpointStore.default_max_retries/0`).
+    * `:watermark_observer` — an optional pid notified `{:capstan_watermark, gtid_set}` on
+      every checkpoint advance (default `nil` ⇒ no notify; the C2 snapshot coordinator's
+      advance-gate feed). Also injectable post-start via `attach_coordinator/2`.
     * `:name` — an optional registered name.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
     {name, opts} = Keyword.pop(opts, :name)
     GenServer.start_link(__MODULE__, opts, if(name, do: [name: name], else: []))
+  end
+
+  @doc """
+  Injects the snapshot coordinator AFTER both processes are up (deferred injection —
+  design § Pinned decisions #4, mirrors the `Capstan.Connection` `:receiver_down` monitor).
+
+  The cast (a) sets `coordinator_pid` as the `:watermark_observer`, so every subsequent
+  checkpoint advance notifies it, and (b) arms a `Process.monitor/1` on it, so a silent
+  coordinator death halts the pipeline fail-closed with `:snapshot_coordinator_down` rather
+  than leaving the stream feeding a dead sink (a silently stranded backfill is a gap). Until
+  this is called — and in all of C1 — both are absent, so behavior is byte-identical.
+  """
+  @spec attach_coordinator(GenServer.server(), pid()) :: :ok
+  def attach_coordinator(server, coordinator_pid) when is_pid(coordinator_pid) do
+    GenServer.cast(server, {:attach_coordinator, coordinator_pid})
   end
 
   ## ---------------------------------------------------------------------------
@@ -116,6 +142,7 @@ defmodule Capstan.AssemblerServer do
     {impl, store} = Keyword.fetch!(opts, :checkpoint_store)
     tables = Keyword.get(opts, :tables, :all)
     max_retries = Keyword.get(opts, :max_retries, CheckpointStore.default_max_retries())
+    watermark_observer = Keyword.get(opts, :watermark_observer)
 
     case CheckpointStore.read_position(impl, store) do
       {:ok, resumed} ->
@@ -127,7 +154,9 @@ defmodule Capstan.AssemblerServer do
           checkpoint_impl: impl,
           checkpoint_store: store,
           processed_set: Gtid.parse(start_position.gtid_set),
-          max_retries: max_retries
+          max_retries: max_retries,
+          watermark_observer: watermark_observer,
+          coordinator_ref: nil
         }
 
         {:ok, state}
@@ -163,7 +192,29 @@ defmodule Capstan.AssemblerServer do
   # here would double-report the same halt.
   def handle_info({:capstan_halt, reason}, state), do: stop_halt(state, reason)
 
+  # The monitored snapshot coordinator (attached via `attach_coordinator/2`) died silently —
+  # a fault that stops IT without messaging us. Halt the pipeline fail-closed rather than keep
+  # advancing the watermark into a dead sink (a stranded backfill is a gap). Uses the EMITTING
+  # `halt/2` so the stop is visible to monitoring. Mirrors `connection.ex:337-338`'s
+  # `:receiver_down`. A `{:DOWN, _}` whose ref is not the monitored coordinator's falls through
+  # to the passthrough clause below (no coordinator attached ⇒ `coordinator_ref` is `nil`,
+  # which never matches a real ref).
+  def handle_info(
+        {:DOWN, ref, :process, _pid, _reason},
+        %__MODULE__{coordinator_ref: ref} = state
+      ) do
+    halt(state, :snapshot_coordinator_down)
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
+
+  @impl true
+  def handle_cast({:attach_coordinator, coordinator_pid}, state) do
+    # Deferred injection (design § Pinned decisions #4): set the observer AND arm the monitor
+    # in one step, so the coordinator sees every watermark advance and its silent death is loud.
+    ref = Process.monitor(coordinator_pid)
+    {:noreply, %{state | watermark_observer: coordinator_pid, coordinator_ref: ref}}
+  end
 
   ## ---------------------------------------------------------------------------
   ## event application
@@ -305,6 +356,10 @@ defmodule Capstan.AssemblerServer do
   defp do_checkpoint(state, position, retries) do
     case CheckpointStore.write_position(state.checkpoint_impl, state.checkpoint_store, position) do
       :ok ->
+        # The choke point ALL three advance paths route through (delivered, filtered, DDL), so
+        # the watermark observer fires on EVERY advance by construction (Ch6). The payload is
+        # the canonical GTID-set STRING — never a row value (Rule 1). `nil` observer ⇒ no send.
+        notify_watermark(state.watermark_observer, position.gtid_set)
         {:ok, %{state | processed_set: Gtid.parse(position.gtid_set)}}
 
       {:error, reason} ->
@@ -336,6 +391,20 @@ defmodule Capstan.AssemblerServer do
   # telemetry — used for a halt the Connection already surfaced via its own
   # `connection.halt` payload (the propagated `{:capstan_halt, _}` path).
   defp stop_halt(state, reason), do: {:stop, {:shutdown, {:halt, reason}}, state}
+
+  ## ---------------------------------------------------------------------------
+  ## watermark observer (Ch6) — notify a co-running snapshot coordinator on every advance
+  ## ---------------------------------------------------------------------------
+
+  # No observer configured (all of C1, every existing test) ⇒ no send: byte-identical.
+  defp notify_watermark(nil, _gtid_set), do: :ok
+
+  # The payload is the canonical GTID-set STRING only (Rule 1 — never a row value); a bare
+  # `send/2` so a dead observer is a no-op, never a raise (the monitor makes the death loud).
+  defp notify_watermark(observer, gtid_set) when is_pid(observer) do
+    send(observer, {:capstan_watermark, gtid_set})
+    :ok
+  end
 
   ## ---------------------------------------------------------------------------
   ## GTID helpers

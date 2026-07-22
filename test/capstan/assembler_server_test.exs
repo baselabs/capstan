@@ -526,17 +526,180 @@ defmodule Capstan.AssemblerServerTest do
   end
 
   ## ---------------------------------------------------------------------------
+  ## C2 spine hook (Ch6) — :watermark_observer fires on EVERY advance; byte-identical
+  ## when absent. Task 7 (a)/(b).
+  ## ---------------------------------------------------------------------------
+
+  describe ":watermark_observer — byte-identical when absent (Task 7 (a))" do
+    test "a DELIVERED advance sends NO watermark when no observer is configured" do
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+      server = start_server(store: store)
+
+      feed(server, raws("simple_dml", @dml_txn))
+
+      # The delivery happened (so an advance happened) — yet no observer notify fires.
+      assert_receive {:handle_transaction, %Transaction{}}, 2000
+      refute_receive {:capstan_watermark, _}, 300
+    end
+
+    test "a FILTERED (changes: []) advance sends NO watermark when no observer is configured" do
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+      attach_telemetry([[:capstan, :transaction, :filtered]])
+      server = start_server(store: store, tables: [{"probe_db", "some_other_table"}])
+
+      feed(server, raws("simple_dml", @dml_txn))
+
+      # The filtered advance happened (telemetry proves it) — yet no observer notify fires.
+      assert_receive {:telemetry, [:capstan, :transaction, :filtered], %{}, %{gtid: _}}, 2000
+      refute_receive {:capstan_watermark, _}, 300
+    end
+
+    test "a self-committing DDL advance sends NO watermark when no observer is configured" do
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+      server = start_server(store: store)
+
+      feed(server, raws("alter_ddl", @ddl_txn))
+
+      assert_receive {:handle_schema_change, %SchemaChange{}, %Position{}}, 2000
+      refute_receive {:capstan_watermark, _}, 300
+    end
+  end
+
+  describe ":watermark_observer — fires on EVERY advance path (Ch6, Task 7 (b), tripwire 10)" do
+    test "notifies on a DELIVERED advance; only the canonical GTID STRING rides (Rule 1)" do
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+      {uuid, gno} = gtid_of("simple_dml", "05-gtid.bin")
+      server = start_server(store: store, watermark_observer: self())
+
+      feed(server, raws("simple_dml", @dml_txn))
+
+      assert_receive {:capstan_watermark, set}, 2000
+      assert is_binary(set)
+      assert Gtid.member?(Gtid.parse(set), {uuid, gno})
+      # Rule 1: the payload is the canonical GTID-set STRING (uuid:range), never a row value
+      # from the INSERTed widgets record.
+      assert set =~ ~r/^[0-9a-fA-F-]+:[0-9:-]+$/
+    end
+
+    test "notifies on a FILTERED (changes: []) advance — tripwire 10: hooking only delivered omits this" do
+      # RED under the tripwire-10 mutation (notify only in the delivered dispatch): a fully
+      # filtered transaction advances the watermark with NO sink call, so a delivered-only hook
+      # never fires here → the advance gate would stall.
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+      {uuid, gno} = gtid_of("simple_dml", "05-gtid.bin")
+
+      server =
+        start_server(
+          store: store,
+          tables: [{"probe_db", "some_other_table"}],
+          watermark_observer: self()
+        )
+
+      feed(server, raws("simple_dml", @dml_txn))
+
+      assert_receive {:capstan_watermark, set}, 2000
+      assert Gtid.member?(Gtid.parse(set), {uuid, gno})
+      refute_receive {:handle_transaction, _}, 200
+    end
+
+    test "notifies on a self-committing DDL advance — tripwire 10: hooking only delivered omits this" do
+      # RED under the tripwire-10 mutation: a DDL advances via handle_schema_change/2, not
+      # handle_transaction/1, so a delivered-only hook never fires → the advance gate stalls
+      # behind a DDL on a non-snapshot table.
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+      {uuid, gno} = gtid_of("alter_ddl", "05-gtid.bin")
+      server = start_server(store: store, watermark_observer: self())
+
+      feed(server, raws("alter_ddl", @ddl_txn))
+
+      assert_receive {:handle_schema_change, %SchemaChange{}, %Position{}}, 2000
+      assert_receive {:capstan_watermark, set}, 2000
+      assert Gtid.member?(Gtid.parse(set), {uuid, gno})
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## C2 spine hook — coordinator monitor (:snapshot_coordinator_down). Mirrors the
+  ## connection.ex :receiver_down monitor. Task 7 (c)/(d).
+  ## ---------------------------------------------------------------------------
+
+  describe "coordinator monitor — a silent coordinator death halts loud (Task 7 (c))" do
+    test "attach_coordinator/2 arms a monitor; a silent death halts :snapshot_coordinator_down" do
+      # RED with no monitor: the coordinator's death is unobserved, the AssemblerServer stays
+      # up and would stream into a dead sink → a silently stranded backfill (a gap).
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+      attach_telemetry([[:capstan, :assembler, :halt]])
+      server = start_server(store: store)
+
+      coordinator = spawn(fn -> Process.sleep(:infinity) end)
+      :ok = AssemblerServer.attach_coordinator(server, coordinator)
+      # Barrier: force the cast that arms Process.monitor to be processed BEFORE the kill,
+      # so there is no monitor-vs-death race.
+      _ = :sys.get_state(server)
+
+      ref = Process.monitor(server)
+      # A SILENT death (Process.exit/:kill is untrappable) — NOT a {:capstan_halt, _} message.
+      Process.exit(coordinator, :kill)
+
+      assert_receive {:DOWN, ^ref, :process, ^server,
+                      {:shutdown, {:halt, :snapshot_coordinator_down}}},
+                     2000
+
+      # The EMITTING halt/2 was used (visible to monitoring), not the silent stop_halt/2.
+      assert_received {:telemetry, [:capstan, :assembler, :halt], %{},
+                       %{reason: :snapshot_coordinator_down}}
+
+      # Fail-closed: no delivery occurred, so the checkpoint never advanced.
+      assert {:ok, nil} = read_checkpoint(store)
+    end
+  end
+
+  describe "coordinator monitor — no coordinator attached ⇒ no monitor armed (Task 7 (d))" do
+    test "a spurious {:DOWN} for an un-armed ref is a passthrough — the server keeps running" do
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+      {uuid, gno} = gtid_of("simple_dml", "05-gtid.bin")
+      server = start_server(store: store)
+
+      # A DOWN for a reference the server never monitored (no coordinator attached).
+      send(server, {:DOWN, make_ref(), :process, self(), :noproc})
+
+      # It did not halt: a subsequent transaction is still delivered normally.
+      feed(server, raws("simple_dml", @dml_txn))
+      assert_receive {:handle_transaction, %Transaction{} = txn}, 2000
+      assert txn.gtid == "#{uuid}:#{gno}"
+      assert Process.alive?(server)
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
   ## helpers
   ## ---------------------------------------------------------------------------
 
   defp start_server(opts) do
     store = Keyword.fetch!(opts, :store)
 
-    server_opts = [
-      sink: RecordingSink,
-      checkpoint_store: {@in_memory, store},
-      tables: Keyword.get(opts, :tables, :all)
-    ]
+    # The `:watermark_observer` key is passed ONLY when the test sets it, so a test that
+    # omits it exercises the byte-identical (option-absent) C1 path.
+    observer_opts =
+      case Keyword.get(opts, :watermark_observer) do
+        nil -> []
+        pid -> [watermark_observer: pid]
+      end
+
+    server_opts =
+      [
+        sink: RecordingSink,
+        checkpoint_store: {@in_memory, store},
+        tables: Keyword.get(opts, :tables, :all)
+      ] ++ observer_opts
 
     {:ok, pid} = GenServer.start(AssemblerServer, server_opts)
     on_exit(fn -> if Process.alive?(pid), do: safe_stop(pid) end)
