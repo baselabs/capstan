@@ -441,11 +441,12 @@ defmodule Capstan.Snapshot.CoordinatorTest do
   ## at-least-once crash boundary (tripwire 16) — emit BEFORE persist; re-emit on the window
   ## ===========================================================================
 
-  describe "at-least-once crash boundary (tripwire 16)" do
-    test "the sink emit STRICTLY precedes the durable cursor persist" do
-      # If persist landed before emit, a crash between persist and emit would ADVANCE the cursor
-      # without emitting -> the chunk is LOST (at-most-once, a gap). Emitting first makes the
-      # crash a bounded DUP instead. Same-sender (coordinator) message order proves it.
+  describe "at-least-once crash boundary (tripwire 16) + F1 delete backstop" do
+    test "delivered_pk persists BEFORE the emit; pk_cursor persists AFTER it" do
+      # Two-step ordering (tripwire 16 + F1): (1) delivered_pk persists FIRST, before the sink emit,
+      # so it survives ahead of pk_cursor across a crash; (2) the sink emit; (3) pk_cursor persists
+      # AFTER, so a crash between emit and this persist re-emits (dup) rather than advancing the
+      # cursor without emitting (a gap). Same-sender (coordinator) message order proves the sequence.
       {:ok, agent} = ReportingStore.start_link(self())
       chunk1 = chunk(0, "#{@uuid}:1-5", [%{"id" => 1}], 1)
 
@@ -458,14 +459,23 @@ defmodule Capstan.Snapshot.CoordinatorTest do
 
       assert_receive first
       assert_receive second
+      assert_receive third
 
-      assert match?({:handle_snapshot, _c, _m}, first),
-             "expected the sink emit to PRECEDE the durable persist, got first: #{inspect(first)}"
+      # 1) delivered_pk advanced to max_pk, pk_cursor NOT yet advanced (still :start).
+      assert {:store_write, %State{tables: %{{"s", "t"} => p1}}} = first
+      assert p1.delivered_pk == 1
+      assert p1.pk_cursor == :start
 
-      assert match?({:store_write, _state}, second)
+      # 2) the sink emit STRICTLY precedes the pk_cursor persist (no gap on a crash here).
+      assert match?({:handle_snapshot, _c, _m}, second),
+             "expected the sink emit to precede the pk_cursor persist, got: #{inspect(second)}"
+
+      # 3) NOW pk_cursor advances.
+      assert {:store_write, %State{tables: %{{"s", "t"} => p2}}} = third
+      assert p2.pk_cursor == 1
     end
 
-    test "a kill in the emit->persist window leaves the durable cursor un-advanced -> the chunk re-emits" do
+    test "a kill in the emit->cursor-persist window leaves pk_cursor un-advanced but delivered_pk ahead (F1)" do
       {:ok, gate_agent} = GatedStore.start_link(self())
       chunk1 = chunk(0, "#{@uuid}:1-5", [%{"id" => 1}, %{"id" => 2}], 2)
 
@@ -477,30 +487,63 @@ defmodule Capstan.Snapshot.CoordinatorTest do
       ref = Process.monitor(coord1)
       send(coord1, {:capstan_watermark, "#{@uuid}:1-6"})
 
-      # Emit happened (bounded dup #1)...
+      # Write #1 = the DELIVERED persist (BEFORE emit) — let it through so it lands durably.
+      assert_receive {:write_reached, ^coord1}
+      send(coord1, :proceed)
+
+      # The sink emit follows (bounded dup #1).
       assert_receive {:handle_snapshot, first_emit, _meta}
       assert Enum.map(first_emit, & &1.record) == [%{"id" => 1}, %{"id" => 2}]
-      # ...and the durable persist is IN-FLIGHT, blocked before it can advance the cursor.
+
+      # Write #2 = the pk_cursor persist (AFTER emit) — now blocked in the crash window.
       assert_receive {:write_reached, ^coord1}
 
-      # KILL in the window. The write never reached Agent.update -> the durable state is un-advanced.
+      # KILL in the window. Write #2 never reached Agent.update -> pk_cursor stays un-advanced.
       Process.exit(coord1, :kill)
       assert_receive {:DOWN, ^ref, :process, ^coord1, :killed}
-      assert GatedStore.durable(gate_agent) == nil
 
-      # Restart: a fresh coordinator resumes from the (un-advanced) cursor :start and RE-EMITS
-      # the same chunk — the bounded, upsert-idempotent dup C1's posture accepts.
+      # The durable crash-window shape: delivered_pk advanced (write #1 landed), pk_cursor :start.
+      durable = GatedStore.durable(gate_agent)
+      assert durable.tables[table()].delivered_pk == 2
+      assert durable.tables[table()].pk_cursor == :start
+
+      # Restart from that durable state: re-reads from pk_cursor :start and RE-EMITS the chunk (the
+      # bounded, upsert-idempotent dup). delivered_pk (== 2) survived ahead for the delete backstop.
       {:ok, store2} = @in_memory.start_link()
 
       coord2 =
-        start_coordinator({@in_memory, store2}, snap_state(%{table() => int_table(:start)}),
+        start_coordinator({@in_memory, store2}, durable,
           readers: %{table() => %{script: [{:chunk, chunk1, false}]}}
         )
 
       send(coord2, {:capstan_watermark, "#{@uuid}:1-6"})
       assert_receive {:handle_snapshot, second_emit, _meta}
-      assert Enum.map(second_emit, & &1.record) == [%{"id" => 1}, %{"id" => 2}]
       assert first_emit == second_emit
+    end
+
+    test "crash-window: a streamed delete of an already-delivered key (pk_cursor < k <= delivered_pk) is FORWARDED (F1)" do
+      # The exact phantom the two-marker prevents: after a crash the durable state has delivered_pk
+      # ahead of pk_cursor. A streamed DELETE of id 1 — delivered (1 <= delivered_pk 2) yet not
+      # re-readable at pk_cursor (1 > :start) — MUST forward so the sink removes it; else the re-read
+      # chunk (as-of a fresh G with id 1 already gone) omits it and the suppressed delete is a
+      # permanent phantom. RED (delete gated on pk_cursor): 1 > :start -> suppressed -> no forward.
+      buffered = chunk(0, "#{@uuid}:9000-9001", [%{"id" => 999}], 999)
+
+      _coord =
+        start_coordinator(store_backed(), snap_state(%{table() => int_table(:start, false, 2)}),
+          readers: %{table() => %{script: [{:chunk, buffered, false}]}}
+        )
+
+      # Delivered key (id 1 <= delivered_pk 2): FORWARDED to sweep the crash-window phantom.
+      t = txn([delete(1)])
+      assert Coordinator.handle_transaction(t) == {:ok, t.position}
+      assert_receive {:handle_transaction, forwarded}
+      assert forwarded.changes == [delete(1)]
+
+      # Not-yet-delivered key (id 3 > delivered_pk 2): still SUPPRESSED — the threshold is exactly
+      # delivered_pk, not an indiscriminate forward-all-deletes.
+      assert Coordinator.handle_transaction(txn([delete(3)])) == {:ok, pos()}
+      refute_received {:handle_transaction, _}
     end
   end
 
@@ -689,9 +732,10 @@ defmodule Capstan.Snapshot.CoordinatorTest do
 
   describe "SnapshotStore write fault — budgeted retry then fail-closed halt" do
     test "a PERSISTENT store-write fault retries the shared budget then halts :snapshot_state_write_failed" do
-      # design § Preconditions: a SnapshotStore fault is BUDGETED, then halts. On a chunk emit the
-      # coordinator persists the advanced cursor; a persistent write fault must retry the shared
-      # CheckpointStore counter (max_retries + 1 attempts), NOT halt on the first fault.
+      # design § Preconditions: a SnapshotStore fault is BUDGETED, then halts. A chunk emit persists
+      # twice (delivered_pk before the emit, pk_cursor after); the FIRST persist here fails, so a
+      # persistent write fault must retry the shared CheckpointStore counter (max_retries + 1
+      # attempts) and halt fail-closed BEFORE any emit, NOT halt on the first fault.
       {:ok, fstore} = CountingFaultyStore.start_link(fail_until: :always)
       g = "#{@uuid}:1-6"
       c = chunk(0, g, [%{"id" => 42}], 42)
@@ -798,8 +842,17 @@ defmodule Capstan.Snapshot.CoordinatorTest do
 
   defp table, do: {"s", "t"}
 
-  defp int_table(cursor, done? \\ false) do
-    %{fingerprint: "fp", pk_columns: ["id"], pk_types: [:int], pk_cursor: cursor, done?: done?}
+  # `delivered` defaults to `cursor` (steady state: the delivered high-water == the re-read floor);
+  # a crash-window test passes `delivered` AHEAD of `cursor` to exercise the F1 delete backstop.
+  defp int_table(cursor, done? \\ false, delivered \\ nil) do
+    %{
+      fingerprint: "fp",
+      pk_columns: ["id"],
+      pk_types: [:int],
+      pk_cursor: cursor,
+      delivered_pk: delivered || cursor,
+      done?: done?
+    }
   end
 
   defp snap_state(tables), do: %State{status: :snapshotting, p0: @p0, tables: tables}

@@ -19,6 +19,15 @@ defmodule Capstan.Snapshot.CursorGate do
     * **suppress** otherwise (`k > cursor`) — a not-yet-backfilled key whose future chunk
       will deliver it. Forwarding it here would double-deliver (stream + chunk).
 
+  A `:delete` is the ONE asymmetric case: it gates on `delivered_pk` (the high-water the sink has
+  RECEIVED) rather than `pk_cursor` (the re-read floor). The two are equal in steady state, so
+  suppression is unchanged; they diverge only across the emit→cursor-persist crash window, where
+  `delivered_pk` sits ahead of the rolled-back `pk_cursor`. Forwarding a delete of an
+  already-delivered key (`k ≤ delivered_pk`) then sweeps the row rather than leaving a permanent
+  phantom (closeout F1) — the re-read chunk, taken as-of a fresh `G` with the row already gone,
+  would otherwise omit it while the suppressed delete never reached the sink. See the `table_spec`
+  doc; inserts/updates keep gating on `pk_cursor` so strict-once is preserved.
+
   `k` is derived from the change's record via `Capstan.Snapshot.PrimaryKey.canonical/2`
   (the raw column values in PK ordinal order) and compared with `PrimaryKey.compare/2` — the
   only ordering the cursor-gate is allowed to use, restricted to order-faithful PK types so
@@ -73,13 +82,17 @@ defmodule Capstan.Snapshot.CursorGate do
 
   @typedoc """
   The per-table gate context: the introspected PK shape (`pk_columns` in ordinal order and
-  their order-faithful `pk_types`) plus whether the table's backfill is `complete?`. Extra
-  keys are ignored, so the coordinator may pass a richer per-table state map.
+  their order-faithful `pk_types`), whether the table's backfill is `complete?`, and the
+  optional `delivered_pk` — the high-water the sink has RECEIVED, used as the DELETE threshold
+  (see the module doc's crash-window section). When `delivered_pk` is absent, deletes gate on
+  the `cursor` argument (pre-F1 behaviour). Extra keys are ignored, so the coordinator may pass
+  a richer per-table state map.
   """
   @type table_spec :: %{
           required(:pk_columns) => [String.t()],
           required(:pk_types) => [PrimaryKey.pk_type()],
           required(:complete?) => boolean(),
+          optional(:delivered_pk) => cursor(),
           optional(atom()) => term()
         }
 
@@ -149,11 +162,32 @@ defmodule Capstan.Snapshot.CursorGate do
   ## internals
   ## ---------------------------------------------------------------------------
 
-  # Forward the image (as a singleton) iff its key is at or below the cursor, or the table is
-  # complete; else suppress (empty list).
-  defp gate(change, k, cursor, table) do
-    if forward?(k, cursor, table.complete?), do: [change], else: []
+  # Forward the image (as a singleton) iff its key is at or below the APPLICABLE threshold, or the
+  # table is complete; else suppress (empty list). A `:delete` gates on `delivered_pk` (the
+  # high-water the sink has RECEIVED); every other op gates on `pk_cursor` (the `cursor` arg, the
+  # re-read floor). The two are equal in steady state and diverge only across the
+  # emit→cursor-persist crash window, where `delivered_pk` sits AHEAD of the rolled-back
+  # `pk_cursor`: a streamed delete of an already-delivered key (`k ≤ delivered_pk`) is then
+  # FORWARDED to sweep the row, instead of being suppressed and leaving a permanent phantom
+  # (closeout F1). Gating inserts/updates on `pk_cursor` preserves strict-once (the chunk already
+  # delivered `≤ pk_cursor`); a delete of a not-yet-delivered key in `(pk_cursor, delivered_pk]`
+  # is at worst a harmless no-op at the upsert/delete-by-PK sink.
+  defp gate(%Change{op: :delete} = change, k, cursor, table) do
+    gate_forward(change, k, delivered_pk(table, cursor), table.complete?)
   end
+
+  defp gate(change, k, cursor, table) do
+    gate_forward(change, k, cursor, table.complete?)
+  end
+
+  defp gate_forward(change, k, threshold, complete?) do
+    if forward?(k, threshold, complete?), do: [change], else: []
+  end
+
+  # The delete threshold: `delivered_pk` when the caller supplies it (the coordinator always does);
+  # else fall back to `cursor` — a gate context WITHOUT the field behaves exactly as pre-F1 (delete
+  # gated on the same cursor as every other op).
+  defp delivered_pk(table, cursor), do: Map.get(table, :delivered_pk, cursor)
 
   defp forward?(_k, _cursor, true), do: true
   defp forward?(_k, :start, false), do: false

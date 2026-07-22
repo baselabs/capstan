@@ -60,12 +60,28 @@ end
 defmodule Capstan.SupervisorTest.CompleteSnapStore do
   @moduledoc false
   # A SnapshotStore whose durable state is already `status: :complete`, so the bootstrap
-  # short-circuits to pure C1 (no coordinator) WITHOUT opening a source connection.
+  # short-circuits to pure C1 (no coordinator) WITHOUT opening a source connection. Its stored
+  # table set MATCHES the config's `[{"probe_db", "orders"}]` so `reconcile_tables/2` (F3) passes.
   @behaviour Capstan.SnapshotStore
   def start_link(_opts), do: Agent.start_link(fn -> :complete end)
 
-  def read(_store),
-    do: {:ok, %Capstan.Snapshot.State{status: :complete, p0: "u:1-9", tables: %{}}}
+  def read(_store) do
+    {:ok,
+     %Capstan.Snapshot.State{
+       status: :complete,
+       p0: "u:1-9",
+       tables: %{
+         {"probe_db", "orders"} => %{
+           fingerprint: "fp",
+           pk_columns: ["id"],
+           pk_types: [:integer],
+           pk_cursor: 1,
+           delivered_pk: 1,
+           done?: true
+         }
+       }
+     }}
+  end
 
   def write(_store, _state), do: :ok
 end

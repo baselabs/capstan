@@ -396,7 +396,8 @@ defmodule Capstan.Snapshot do
     end)
   end
 
-  # The durable per-table progress derived from each freshly-opened reader (cursor at `:start`).
+  # The durable per-table progress derived from each freshly-opened reader (both the re-read
+  # floor `pk_cursor` and the delivered high-water `delivered_pk` at `:start`).
   defp tables_from_readers(readers) do
     Map.new(readers, fn {key, reader} ->
       {key,
@@ -405,6 +406,7 @@ defmodule Capstan.Snapshot do
          pk_columns: reader.pk_columns,
          pk_types: reader.pk_types,
          pk_cursor: :start,
+         delivered_pk: :start,
          done?: false
        }}
     end)

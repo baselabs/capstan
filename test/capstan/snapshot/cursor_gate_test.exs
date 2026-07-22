@@ -35,6 +35,10 @@ defmodule Capstan.Snapshot.CursorGateTest do
   # tuple-compare boundary (Ch4 order-faithfulness).
   @composite_pk %{pk_columns: ["a", "b"], pk_types: [:int, :binary], complete?: false}
 
+  # The F1 crash-window shape: `delivered_pk` (20) sits AHEAD of the `cursor` argument
+  # (`pk_cursor`) a test passes — the durable state after a crash in the emit→cursor-persist window.
+  @int_pk_crash_window %{pk_columns: ["id"], pk_types: [:int], complete?: false, delivered_pk: 20}
+
   @uuid "3e11fa47-71ca-11e1-9e33-c80aa9429562"
 
   defp insert(id),
@@ -90,6 +94,45 @@ defmodule Capstan.Snapshot.CursorGateTest do
       d = delete(5)
       assert CursorGate.classify(d, 10, @int_pk) == [d]
       assert CursorGate.classify(delete(15), 10, @int_pk) == []
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## classify/3 — deletes gate on delivered_pk (the crash-window backstop, F1)
+  ## ---------------------------------------------------------------------------
+
+  describe "classify/3 — deletes gate on delivered_pk, not pk_cursor (F1)" do
+    test "a delete of an already-delivered key (pk_cursor < k <= delivered_pk) FORWARDS" do
+      # k = 15: > pk_cursor (10) yet <= delivered_pk (20). RED (delete gated on pk_cursor): 15 > 10
+      # -> suppressed -> the crash-window phantom the two-marker exists to sweep.
+      d = delete(15)
+      assert CursorGate.classify(d, 10, @int_pk_crash_window) == [d]
+    end
+
+    test "a delete beyond delivered_pk (k > delivered_pk) still SUPPRESSES (exact threshold)" do
+      # k = 25: > delivered_pk (20) — never delivered, so its future chunk delivers it. The delete
+      # threshold is EXACTLY delivered_pk, not an indiscriminate forward-all-deletes.
+      assert CursorGate.classify(delete(25), 10, @int_pk_crash_window) == []
+    end
+
+    test "an INSERT still gates on pk_cursor even when delivered_pk is ahead (strict-once preserved)" do
+      # k = 15: <= delivered_pk (20) but > pk_cursor (10). Only DELETES use the wider delivered_pk
+      # threshold — an insert must NOT forward (its chunk delivers it), or strict-once breaks.
+      assert CursorGate.classify(insert(15), 10, @int_pk_crash_window) == []
+    end
+
+    test "a PK-changing update: the delete-half uses delivered_pk, the upsert-half uses pk_cursor" do
+      # pk_update(15 -> 25), pk_cursor 10, delivered_pk 20: delete(15) forwards (15 <= 20), upsert(25)
+      # suppresses (25 > 10) — only the delete-half survives.
+      assert CursorGate.classify(pk_update(15, 25), 10, @int_pk_crash_window) == [
+               %Change{
+                 op: :delete,
+                 schema: "s",
+                 table: "t",
+                 record: nil,
+                 old_record: %{"id" => 15}
+               }
+             ]
     end
   end
 

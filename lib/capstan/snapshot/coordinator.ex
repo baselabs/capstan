@@ -39,13 +39,21 @@ defmodule Capstan.Snapshot.Coordinator do
   ## The advance gate
 
   The coordinator holds AT MOST ONE buffered chunk (its `rows` + its exact `G`). When the
-  processed watermark covers `G` (`CursorGate.advance?/2`), it emits the chunk as a list of
-  `%Change{op: :snapshot}` through the real sink's `handle_snapshot/2` with a value-free
-  `%Capstan.Snapshot.Meta{}`, THEN advances the per-table cursor to `chunk.max_pk`, persists
-  the `%Capstan.Snapshot.State{}` via `Capstan.SnapshotStore`, and drives the reader for the
-  next chunk. The emit-BEFORE-persist ordering is the at-least-once boundary (tripwire 16): a
-  crash between the sink's `{:ok}` and the durable cursor persist re-emits the one chunk
-  (bounded dup, C1's posture; an upsert-by-PK sink converges).
+  processed watermark covers `G` (`CursorGate.advance?/2`), the emit runs in THREE ordered steps:
+
+    1. **Advance `delivered_pk` to `chunk.max_pk` and persist** — BEFORE the sink emit.
+    2. **Emit** the chunk as a list of `%Change{op: :snapshot}` through the real sink's
+       `handle_snapshot/2` with a value-free `%Capstan.Snapshot.Meta{}`.
+    3. **Advance `pk_cursor` to `chunk.max_pk`, persist, telemetry, drive the next chunk.**
+
+  The `pk_cursor` (re-read floor) still advances AFTER the emit — the at-least-once boundary
+  (tripwire 16): a crash between the sink's `{:ok}` and the `pk_cursor` persist re-emits the one
+  chunk (bounded dup, C1's posture; an upsert-by-PK sink converges). The NEW step 1 persists the
+  DELIVERED high-water first, so in that same crash window `delivered_pk` survives AHEAD of the
+  rolled-back `pk_cursor`; on restart the cursor-gate forwards a streamed delete of an
+  already-delivered key (`k ≤ delivered_pk`) instead of suppressing it, sweeping what would
+  otherwise be a permanent crash-window phantom (closeout F1, `Capstan.Snapshot.CursorGate` and
+  `Capstan.Snapshot.State`). A step-1 persist fault halts fail-closed before any emit.
 
   ## Fail-closed halts (symmetric with C1)
 
@@ -312,7 +320,13 @@ defmodule Capstan.Snapshot.Coordinator do
   end
 
   defp table_spec(progress) do
-    %{pk_columns: progress.pk_columns, pk_types: progress.pk_types, complete?: false}
+    %{
+      pk_columns: progress.pk_columns,
+      pk_types: progress.pk_types,
+      complete?: false,
+      # the DELETE threshold — the high-water the sink has RECEIVED (crash-window backstop, F1).
+      delivered_pk: progress.delivered_pk
+    }
   end
 
   # A table is snapshot-active — DDL on it is a drift — iff it is in the snapshot set AND its
@@ -362,8 +376,12 @@ defmodule Capstan.Snapshot.Coordinator do
     end
   end
 
-  # Emit FIRST (at-least-once), then advance the cursor + persist + telemetry + drive the next
-  # chunk. A `handle_snapshot/2` `{:error, _}` halts `{:snapshot_sink_error, _}`.
+  # Persist the DELIVERED high-water, emit, THEN advance the re-read cursor + persist + telemetry +
+  # drive the next chunk. The delivered-`max_pk` persist lands BEFORE the sink emit so that across
+  # the emit→cursor-persist crash window it survives AHEAD of the (rolled-back) `pk_cursor` — the
+  # cursor-gate then forwards a streamed delete of an already-delivered key on restart instead of
+  # leaving a phantom (closeout F1). A `handle_snapshot/2` `{:error, _}` halts
+  # `{:snapshot_sink_error, _}`; a delivered-persist fault halts before any emit (fail-closed).
   defp emit_chunk(state, %Chunk{} = chunk) do
     {schema, table} = chunk.table
 
@@ -380,9 +398,17 @@ defmodule Capstan.Snapshot.Coordinator do
       final_chunk?: state.buffered_final?
     }
 
-    case state.sink.handle_snapshot(changes, meta) do
-      :ok -> after_emit(state, chunk)
-      {:error, reason} -> coordinator_halt(state, {:snapshot_sink_error, reason})
+    state = advance_delivered(state, chunk.table, chunk.max_pk)
+
+    case persist(state) do
+      {:ok, state} ->
+        case state.sink.handle_snapshot(changes, meta) do
+          :ok -> after_emit(state, chunk)
+          {:error, reason} -> coordinator_halt(state, {:snapshot_sink_error, reason})
+        end
+
+      {:halt, reason} ->
+        coordinator_halt(state, reason)
     end
   end
 
@@ -457,6 +483,12 @@ defmodule Capstan.Snapshot.Coordinator do
 
   defp advance_cursor(state, key, max_pk) do
     update_table(state, key, fn progress -> %{progress | pk_cursor: max_pk} end)
+  end
+
+  # Advance the DELIVERED high-water (the cursor-gate's delete threshold) — persisted BEFORE the
+  # sink emit so it survives ahead of `pk_cursor` across the crash window (F1).
+  defp advance_delivered(state, key, max_pk) do
+    update_table(state, key, fn progress -> %{progress | delivered_pk: max_pk} end)
   end
 
   defp maybe_mark_done(state, _key, false), do: state
