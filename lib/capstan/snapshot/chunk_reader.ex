@@ -221,7 +221,7 @@ defmodule Capstan.Snapshot.ChunkReader do
   Reads the next chunk of rows with `pk > cursor` (or from the start when `cursor` is `:start`),
   paired with the chunk's exact GTID position `G`, under the pinned brief-lock capture sequence.
 
-  Returns a `#{inspect(__MODULE__)}.read_result/0`. The produced `%Capstan.Snapshot.Chunk{}`
+  Returns a `t:read_result/0`. The produced `%Capstan.Snapshot.Chunk{}`
   carries `g` (the exact lower bound), `rows` (the full row images as `column => value` maps),
   and `max_pk` (the canonical PK of the last row — the value the cursor advances to). Faults are
   classified positionally to `:snapshot_lock_unavailable` / `:snapshot_chunk_read_failed`; a

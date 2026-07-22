@@ -195,8 +195,8 @@ decoding rows into positional tuples of unknown provenance.
 | Directory | Contents |
 | --- | --- |
 | `lib/` | The Elixir library (hex package `capstan`) — the C1 streaming spine |
-| `examples/` | Runnable minimal consumers ([examples/README.md](examples/README.md)) |
-| `docker-compose.yml`, `scripts/` | The local MySQL test substrate ([docs/testing.md](docs/testing.md)) |
+| `examples/` | Runnable minimal consumers ([examples/README.md](https://github.com/baselabs/capstan/blob/main/examples/README.md)) |
+| `docker-compose.yml`, `scripts/` | The local MySQL test substrate ([docs/testing.md](https://github.com/baselabs/capstan/blob/main/docs/testing.md)) |
 | `probe/` | The executed protocol viability probe + committed evidence |
 | `docs/adr/` | Architecture decision records ([0001](docs/adr/0001-position-and-dedup-model.md)–[0005](docs/adr/0005-initial-snapshot-cursor-gate-brief-lock.md)) |
 | `docs/testing.md` | Test environment + how to run the suite |
