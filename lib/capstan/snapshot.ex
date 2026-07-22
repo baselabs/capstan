@@ -241,17 +241,33 @@ defmodule Capstan.Snapshot do
   defp read_stream_identity(connection, connect_fun) do
     case connect_fun.(connection) do
       {:ok, socket, _info} ->
-        result = Config.read_server_uuid(socket)
-        close_socket(socket)
-        identity_result(result)
+        read_and_close_identity(socket)
 
       {:error, _reason} ->
         {:error, :snapshot_query_connect_failed}
     end
   rescue
+    # `connect_fun` itself raised — no socket was opened, so there is nothing to release here.
     _exception -> {:error, :snapshot_query_connect_failed}
   catch
     _kind, _reason -> {:error, :snapshot_query_connect_failed}
+  end
+
+  # Read `@@server_uuid` over the just-opened identity socket, then CLOSE it — on the success path
+  # AND on a raise (the same fd-leak-on-raise posture as `finish_or_close/6`'s query close). The
+  # socket is in scope here so the rescue can release it.
+  defp read_and_close_identity(socket) do
+    result = Config.read_server_uuid(socket)
+    close_socket(socket)
+    identity_result(result)
+  rescue
+    _exception ->
+      close_socket(socket)
+      {:error, :snapshot_query_connect_failed}
+  catch
+    _kind, _reason ->
+      close_socket(socket)
+      {:error, :snapshot_query_connect_failed}
   end
 
   defp identity_result({:ok, uuid}), do: {:ok, uuid}

@@ -146,7 +146,9 @@ defmodule Capstan.Snapshot.CoordinatorTest.BlockingReader do
     receive do
       :proceed -> {:done, %{notify: notify, done: true}}
     after
-      2_000 -> {:done, %{notify: notify, done: true}}
+      # Long enough that the read stays blocked PAST the default 5 s GenServer.call timeout — the
+      # test releases it with :proceed, so this only bounds a stuck test (never auto-completes early).
+      8_000 -> {:done, %{notify: notify, done: true}}
     end
   end
 
@@ -644,14 +646,14 @@ defmodule Capstan.Snapshot.CoordinatorTest do
   ## ===========================================================================
 
   describe "sink dispatch survives a coordinator busy in a slow chunk read (F1)" do
-    test "a handle_transaction call is served (not timed out) while the coordinator blocks in read_chunk" do
+    test "a handle_transaction call stays queued past the default 5s timeout, then is served (:infinity)" do
       # The AssemblerServer dispatches handle_transaction/1 SYNCHRONOUSLY while the coordinator may
       # be busy for seconds inside a chunk read (a contended LOCK TABLES, retried per the budget).
-      # The call MUST be :infinity — a default 5s timeout would fire mid-read and tear a healthy
-      # backfill down. Here the coordinator blocks in read_chunk at bootstrap; a concurrent sink
-      # call queues behind it and is served after the read unblocks.
-      # RED (tamper :infinity -> a short finite timeout): the queued call exit(:timeout) before
-      # :proceed, and Task.await re-raises the exit.
+      # The call MUST be :infinity — the DEFAULT 5000 ms GenServer.call timeout would fire mid-read
+      # and tear a healthy backfill down. This test is deliberately slow: it holds the coordinator
+      # in read_chunk PAST 5000 ms to prove the queued sink call is NOT timed out.
+      # RED (revert :infinity -> the 5000 ms default): the queued call exits :timeout at 5000 ms, so
+      # the `refute Task.yield(task, 5_300)` below sees `{:exit, {:timeout, _}}` (truthy) and fails.
       coord =
         start_coordinator(store_backed(), snap_state(%{table() => int_table(10)}),
           readers: %{table() => %{notify: self()}},
@@ -665,10 +667,12 @@ defmodule Capstan.Snapshot.CoordinatorTest do
       t = txn([insert(5)])
       task = Task.async(fn -> Coordinator.handle_transaction(t) end)
 
-      # The call is queued behind the blocked read — not served yet.
-      refute Task.yield(task, 200)
+      # Still queued behind the blocked read at 5_300 ms — PAST the default 5000 ms timeout. With
+      # :infinity it is neither served (read still blocked) nor timed out (Task.yield -> nil). With
+      # the default timeout it would have exited at 5000 ms (Task.yield -> {:exit, _}).
+      refute Task.yield(task, 5_300)
 
-      # Unblock the read (the receive runs IN the coordinator process); drive completes, then the
+      # Release the read (the receive runs IN the coordinator process); drive completes, then the
       # queued handle_transaction is processed.
       send(coord, :proceed)
 
