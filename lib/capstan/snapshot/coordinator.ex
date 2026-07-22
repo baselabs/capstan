@@ -324,8 +324,11 @@ defmodule Capstan.Snapshot.Coordinator do
       pk_columns: progress.pk_columns,
       pk_types: progress.pk_types,
       complete?: false,
-      # the DELETE threshold — the high-water the sink has RECEIVED (crash-window backstop, F1).
-      delivered_pk: progress.delivered_pk
+      # the DELETE threshold — the high-water the sink has RECEIVED (crash-window backstop, F1). A
+      # durable state predating F1 has no `delivered_pk`; fall back to `pk_cursor` (the pre-F1
+      # steady-state equality) so a resume across the F1 upgrade never KeyErrors — mirrors the
+      # gate's own `Map.get(table, :delivered_pk, cursor)` fallback.
+      delivered_pk: Map.get(progress, :delivered_pk, progress.pk_cursor)
     }
   end
 
@@ -486,9 +489,11 @@ defmodule Capstan.Snapshot.Coordinator do
   end
 
   # Advance the DELIVERED high-water (the cursor-gate's delete threshold) — persisted BEFORE the
-  # sink emit so it survives ahead of `pk_cursor` across the crash window (F1).
+  # sink emit so it survives ahead of `pk_cursor` across the crash window (F1). `Map.put` (not the
+  # `%{p | ...}` update) so a durable state predating F1 — which has no `delivered_pk` key — gains
+  # the field on its first post-upgrade emit instead of raising `KeyError`.
   defp advance_delivered(state, key, max_pk) do
-    update_table(state, key, fn progress -> %{progress | delivered_pk: max_pk} end)
+    update_table(state, key, fn progress -> Map.put(progress, :delivered_pk, max_pk) end)
   end
 
   defp maybe_mark_done(state, _key, false), do: state

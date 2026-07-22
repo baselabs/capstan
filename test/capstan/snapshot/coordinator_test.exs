@@ -545,6 +545,31 @@ defmodule Capstan.Snapshot.CoordinatorTest do
       assert Coordinator.handle_transaction(txn([delete(3)])) == {:ok, pos()}
       refute_received {:handle_transaction, _}
     end
+
+    test "a durable state predating F1 (no delivered_pk key) resumes without a KeyError" do
+      # Robustness (delta review): a %State{} persisted before the F1 upgrade has no delivered_pk in
+      # its per-table progress. table_spec/1 falls back to pk_cursor and advance_delivered uses
+      # Map.put, so a resume across the upgrade gates AND emits without a KeyError (which would
+      # fail-closed-crash an otherwise-healthy backfill).
+      legacy = Map.delete(int_table(5), :delivered_pk)
+      chunk1 = chunk(0, "#{@uuid}:1-5", [%{"id" => 6}], 6)
+
+      coord =
+        start_coordinator(store_backed(), snap_state(%{table() => legacy}),
+          readers: %{table() => %{script: [{:chunk, chunk1, true}]}}
+        )
+
+      # Gating path: a delete at k=3 (<= the pk_cursor 5 fallback) forwards without a KeyError.
+      t = txn([delete(3)])
+      assert Coordinator.handle_transaction(t) == {:ok, t.position}
+      assert_receive {:handle_transaction, forwarded}
+      assert forwarded.changes == [delete(3)]
+
+      # Emit path: a watermark covering G emits chunk1; advance_delivered's Map.put GAINS the field.
+      send(coord, {:capstan_watermark, "#{@uuid}:1-6"})
+      assert_receive {:handle_snapshot, _c, _m}
+      assert Process.alive?(coord)
+    end
   end
 
   ## ===========================================================================
