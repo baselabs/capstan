@@ -92,7 +92,10 @@ defmodule Capstan.Snapshot.CursorGate do
   `:update` on its (equal) key unless it moves the PK, in which case it is split into
   `delete(k_old)` + `upsert(k_new)` and each half is gated on its own key (see the module
   doc). A `:snapshot` change never reaches the gate (the gate classifies streamed images
-  only) and raises `FunctionClauseError` — a loud, fail-closed misuse signal.
+  only) and raises a value-free `ArgumentError` — a loud, fail-closed misuse signal. It is an
+  EXPLICIT clause rather than a `FunctionClauseError` on purpose (Rule 1): a no-clause-match
+  error captures the call args — including the `cursor`, a canonical PK / user data — in its
+  stacktrace frame, whereas the explicit clause leaves the frame at arity 3 (no arg values).
   """
   @spec classify(Change.t(), cursor(), table_spec()) :: [Change.t()]
   def classify(%Change{op: :update, record: new_rec, old_record: old_rec} = change, cursor, table) do
@@ -116,6 +119,16 @@ defmodule Capstan.Snapshot.CursorGate do
 
   def classify(%Change{op: :delete, old_record: old_rec} = change, cursor, table) do
     gate(change, key(old_rec, table), cursor, table)
+  end
+
+  # A :snapshot image never reaches the gate — it classifies STREAMED images only. Fail loud,
+  # but VALUE-FREE (Rule 1): an explicit clause raising here keeps the stacktrace frame at
+  # arity 3, so the `cursor` PK is never captured into a crash report — unlike the
+  # FunctionClauseError a missing clause would raise, whose frame carries the call args.
+  def classify(%Change{op: :snapshot}, _cursor, _table) do
+    raise ArgumentError,
+          "Capstan.Snapshot.CursorGate.classify/3 received an op: :snapshot image; " <>
+            "the gate classifies streamed :insert/:update/:delete images only"
   end
 
   @doc """

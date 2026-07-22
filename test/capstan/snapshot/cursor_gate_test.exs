@@ -222,4 +222,34 @@ defmodule Capstan.Snapshot.CursorGateTest do
       assert CursorGate.classify(comp_insert(6, "a"), {5, "m"}, @composite_pk) == []
     end
   end
+
+  ## ---------------------------------------------------------------------------
+  ## classify/3 — a :snapshot op is misuse and fails loud VALUE-FREE (Rule 1)
+  ## ---------------------------------------------------------------------------
+
+  describe "classify/3 — :snapshot op fails loud without leaking the cursor (Rule 1)" do
+    # A canonical PK cursor is USER DATA. A FunctionClauseError (missing clause) would capture
+    # the call args — the cursor — in its stacktrace frame; the explicit clause raises a
+    # value-free ArgumentError with an arity-only frame. Non-vacuity: the cursor is a distinctive
+    # sentinel, asserted absent from BOTH the message and the formatted stacktrace.
+    @cursor_sentinel 987_654_321
+
+    test "raises ArgumentError, and neither the message nor the stacktrace carries the cursor" do
+      snap = %Change{op: :snapshot, schema: "s", table: "t", record: %{"id" => 1}, old_record: nil}
+
+      {exception, stacktrace} =
+        try do
+          CursorGate.classify(snap, @cursor_sentinel, @int_pk)
+          flunk("expected classify/3 to raise on a :snapshot op")
+        rescue
+          e -> {e, __STACKTRACE__}
+        end
+
+      assert %ArgumentError{} = exception
+      formatted = Exception.format(:error, exception, stacktrace)
+      refute formatted =~ Integer.to_string(@cursor_sentinel)
+      # The top frame is the arity-3 clause, never the FunctionClauseError arg list.
+      refute formatted =~ "#{@cursor_sentinel}"
+    end
+  end
 end
