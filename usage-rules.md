@@ -90,7 +90,9 @@ is simply resumed from:
 `:server_id_required`, `:config_invalid`, `:tls_verification_unspecified`, `:invalid_sink`,
 `:sink_missing_handle_transaction`, `:sink_missing_checkpoint`,
 `:sink_missing_handle_schema_change`, `:checkpoint_store_required`, `:sink_owned_mode_unsupported`,
-`:start_position_override_unsupported`, `:start_position_current_unsupported`. No row value,
+`:start_position_override_unsupported`, `:start_position_current_unsupported`. In snapshot mode
+also: `:sink_missing_handle_snapshot`, `:snapshot_table_not_captured`, and `:config_invalid` for a
+mis-shaped `snapshot:` block or a `tables: :all` snapshot set (see Initial snapshot). No row value,
 column value, or password ever appears in an error, log line, or telemetry payload (Rule 1).
 
 ## The `Capstan.Sink` behaviour
@@ -152,6 +154,59 @@ as permanent and halts immediately), then the pipeline halts fail-closed —
 `{:checkpoint_read_failed, reason}` / `{:checkpoint_write_failed, reason}`. This budget is
 separate from `max_command_retries`, which governs only pre-establish connection failures.
 
+## Initial snapshot (C2)
+
+Backfill the rows that pre-exist the pipeline's start, woven into the running stream so there is
+**no gap and no duplicate** at the snapshot→stream handoff (ADR-0005). Absent the `:snapshot`
+block, a pipeline is pure C1 — this is purely additive.
+
+```elixir
+Capstan.start_link(
+  connection: [...], server_id: 1001, sink: MyApp.Sink,
+  checkpoint_store: [module: MyApp.GtidStore],
+  tables: [{"app", "orders"}],                 # capture allowlist (must be a concrete list to snapshot :all)
+  snapshot: [
+    tables: [{"app", "orders"}],               # ⊆ captured; DEFAULTS to the captured list
+    store:  [module: MyApp.SnapshotStore],      # durable snapshot progress (SEPARATE from the gtid store)
+    chunk_size: 4096                            # rows per chunk (bounds the brief lock's hold + memory)
+  ]
+)
+```
+
+**Source privilege.** The query account needs **`LOCK TABLES`** on the snapshot tables (in addition
+to `SELECT`) — capstan takes a brief per-chunk `LOCK TABLES … READ` to capture an exact GTID
+position (the read-only-replica-safe substitute for a written watermark; ADR-0005). No `RELOAD` /
+FTWRL. The preflight (`scripts/capstan-preflight.sql`) checks it.
+
+**The sink implements `handle_snapshot/2`** (optional in general; **required** in snapshot mode):
+
+```elixir
+@callback handle_snapshot([Capstan.Change.t()], Capstan.Snapshot.Meta.t()) :: :ok | {:error, term()}
+```
+
+- The first argument is a **concrete list** of `%Capstan.Change{op: :snapshot}` (`record` = the full
+  row, `old_record` = `nil`) — a bounded, fully-materialized chunk, NOT the lazy `Enumerable.t()` of
+  `handle_transaction/1`. `Capstan.Snapshot.Meta` carries only value-free structural identity
+  (`schema`/`table`/`chunk_seq`/`g`/`final_chunk?`).
+- **Apply each chunk row as an UPSERT keyed on its primary key.** This is a HARD precondition: a
+  snapshot row may be superseded by a later streamed change, and the bounded crash-window re-emit
+  relies on upsert-by-PK to converge. Return `{:error, term()}` to halt fail-closed.
+
+**Guarantees.** Strict-once in normal operation. The only duplicate window is a crash between the
+chunk's `{:ok}` and the durable cursor persist — the one in-flight chunk re-emits, exactly C1's
+bounded posture; an upsert-by-PK sink converges. **Resumable mid-backfill**: the per-table PK cursor
+lives in `MyApp.SnapshotStore` (implement `read/1`+`write/2` over a `%Capstan.Snapshot.State{}`, same
+durable/idempotent contract as the checkpoint store), and the backfill resumes with `WHERE pk >
+cursor` — never a re-scan from zero. A store whose `status: :complete` never re-snapshots.
+
+**Supported primary keys (order-faithful only).** Chunking pages by MySQL `ORDER BY pk` while the
+gate compares in Elixir, so the PK type's Elixir order must provably match MySQL's: **integer**
+(signed/unsigned, incl. `BIGINT UNSIGNED`), **`BINARY`/`VARBINARY`**, and **composites** of those.
+A collation-ordered STRING PK (`CHAR`/`VARCHAR`/`TEXT`) is refused `:snapshot_pk_unsupported_type`
+(a named follow-up, ROADMAP C2a). A `tables: :all` snapshot — which arises when the capture
+allowlist is itself `:all` — is refused `:config_invalid`: **specify an explicit snapshot table
+list** ("snapshot every table on the server" is ambiguous and dangerous; ROADMAP C2b).
+
 ## Runtime halts (fail-closed)
 
 Any condition that could otherwise lose or corrupt data silently **halts the pipeline**: the
@@ -194,6 +249,28 @@ via `[:capstan, :connection, :halt]` / `[:capstan, :assembler, :halt]` telemetry
 - `{:event_parse_failed, reason}` — CRC mismatch or truncated event.
 - `{:event_decode_crashed, %Capstan.Error{}}` / `{:event_processing_crashed, %Capstan.Error{}}`
   — an unexpected raise, captured value-free.
+
+**Snapshot** halts (snapshot mode; each a distinct value-free reason per silent-loss condition):
+
+- `:snapshot_table_no_primary_key` — a snapshot table has no usable key (no PK and no `NOT
+  NULL`-complete unique key).
+- `:snapshot_pk_unsupported_type` — a PK column outside the order-faithful allowlist (a
+  collation-ordered string, `DECIMAL`/`DOUBLE`/temporal).
+- `:snapshot_lock_unavailable` — the brief `LOCK TABLES … READ` failed (missing `LOCK TABLES`
+  privilege, or a lock-wait timeout) beyond the retry budget.
+- `:snapshot_schema_drifted` — a snapshot table's structure changed mid-backfill (a per-chunk
+  fingerprint change, or an observed DDL on the table).
+- `:snapshot_source_mismatch` — the query connection's `@@server_uuid` differs from the stream's
+  (a reconnect to a different replica, at connect or on any query-conn reconnect).
+- `:snapshot_chunk_read_failed` / `:snapshot_query_connect_failed` /
+  `:snapshot_bootstrap_gtid_read_failed` — a chunk read, query-connect, or `P0` read fault beyond
+  the budget.
+- `:snapshot_state_read_failed` / `:snapshot_state_write_failed` — a `SnapshotStore` fault (budgeted,
+  then halts).
+- `:snapshot_coordinator_down` — the snapshot coordinator died silently (a stranded backfill is a
+  gap, so it halts loud).
+- `{:snapshot_sink_error, reason}` / `{:snapshot_processing_crashed, %Capstan.Error{}}` — your
+  `handle_snapshot/2` returned `{:error, _}`, or the snapshot path raised (captured value-free).
 
 ## Telemetry
 

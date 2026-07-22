@@ -154,4 +154,16 @@ SELECT '== DONE — see the questions below ==' AS section;
 --
 --   CREATE USER 'capstan'@'%' IDENTIFIED WITH caching_sha2_password BY '<secret>';
 --   GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'capstan'@'%';
+--
+-- If capstan will run an INITIAL SNAPSHOT (backfill of pre-existing rows — question 7),
+-- the account additionally needs LOCK TABLES on the snapshot tables (capstan takes a BRIEF
+-- per-chunk `LOCK TABLES <t> READ` to capture an exact GTID position; it does NOT need the
+-- global RELOAD/FLUSH TABLES WITH READ LOCK privilege):
+--
+--   GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT, LOCK TABLES ON *.* TO 'capstan'@'%';
+--   -- or scope LOCK TABLES + SELECT to the specific snapshot schema(s).
+--
+-- Note: the snapshot supports integer / BINARY / VARBINARY / composite primary keys; a
+-- collation-ordered string PK (CHAR/VARCHAR/TEXT) is refused (specify order-faithful-PK tables
+-- for backfill), and an explicit snapshot table list is required.
 -- ---------------------------------------------------------------------------

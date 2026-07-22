@@ -128,8 +128,11 @@ One behavior to know before the first start: an **empty checkpoint store request
 server's full retained binlog history**, and a server that has already purged its earliest
 logs refuses that dump (the pipeline halts fail-closed with `:data_gap`). To start "from
 now", seed the checkpoint store with the server's current `@@global.gtid_executed` before
-first start — the recipe is in [usage-rules.md](usage-rules.md). An initial table snapshot
-(backfill of pre-existing rows) is not shipped yet; see `docs/ROADMAP.md`.
+first start — the recipe is in [usage-rules.md](usage-rules.md). To backfill the rows that
+**pre-exist** the pipeline (an initial snapshot woven gap-free/dup-free into the stream), add a
+`snapshot:` block and implement `handle_snapshot/2` — see [usage-rules.md](usage-rules.md) §
+Initial snapshot and [ADR-0005](docs/adr/0005-initial-snapshot-cursor-gate-brief-lock.md). It
+needs the `LOCK TABLES` privilege on the snapshot tables.
 
 [usage-rules.md](usage-rules.md) is the full consumer contract — delivery guarantees, dedup
 rules, checkpoint semantics, telemetry, and the fail-closed error surface.
@@ -139,8 +142,9 @@ rules, checkpoint semantics, telemetry, and the fail-closed error surface.
 capstan deliberately aligns with replicant's consumer-facing contracts so that porting a sink
 between them is a small, *explicit* change rather than a rewrite:
 
-- the same `Sink` behaviour **shape** — `handle_transaction/1`, plus `checkpoint/0` and
-  `handle_schema_change/2` (batch and snapshot callbacks are later rows, not shipped yet),
+- the same `Sink` behaviour **shape** — `handle_transaction/1`, plus `checkpoint/0`,
+  `handle_schema_change/2`, and `handle_snapshot/2` (the initial-snapshot callback; batch
+  callbacks are a later row, not shipped yet),
 - the same lib-owned `CheckpointStore` alternative for non-transactional sinks,
 - the same delivery-guarantee taxonomy — effect-once on the sink-owned atomic path,
   at-least-once with a bounded duplicate window in lib-checkpoint mode (C1 ships the

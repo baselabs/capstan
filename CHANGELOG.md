@@ -4,6 +4,43 @@ All notable changes to capstan are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — C2 initial snapshot
+
+A consistent backfill of the rows that pre-exist a pipeline's start, woven into the
+continuously-running C1 stream so there is **no gap and no duplicate** at the snapshot→stream
+handoff — proven live under concurrent load, resumable mid-backfill, strict-once in normal
+operation, fail-closed on every silent-loss condition, Rule 1 end-to-end. **Additive: absent the
+`:snapshot` config, a pipeline is pure C1, byte-for-byte.**
+
+- **Public API** — a `snapshot: [tables:, store:, chunk_size:]` block on `Capstan.start_link/1`; a
+  new optional `c:Capstan.Sink.handle_snapshot/2` (required only in snapshot mode) delivering a
+  concrete list of `%Capstan.Change{op: :snapshot}` + a value-free `Capstan.Snapshot.Meta`;
+  **upsert-by-PK** sink semantics (a hard precondition). A new `Capstan.SnapshotStore` behaviour
+  (`read/1`+`write/2` over a `%Capstan.Snapshot.State{}`, `InMemory` reference impl) persists the
+  per-table PK cursor, separate from the GTID checkpoint.
+- **Mechanism (ADR-0005)** — cursor-gated suppression + a brief per-chunk `LOCK TABLES … READ` that
+  captures an **exact GTID position `G`** (a provable lower bound on the chunk's read view). The
+  read-only lock-free `@@gtid_executed` bracket was rejected: it leads InnoDB row-visibility under
+  concurrent commit (a probe-confirmed silent corruption). The stream advances the GTID watermark;
+  the snapshot advances the PK cursor — **two authorities, never conflated** (the snapshot adds no
+  GTID; ADR-0001 untouched). No C1b, no ADR-0004 supersession — the `P0` pre-seed makes the dump and
+  the watermark agree by construction.
+- **New source privilege** — the query account needs **`LOCK TABLES`** on the snapshot tables (in
+  addition to `SELECT`); no `RELOAD`/FTWRL. Added to `scripts/capstan-preflight.sql`.
+- **Fail-closed snapshot halts** (distinct value-free reason each, tripwired): order-faithful-PK
+  only (`:snapshot_pk_unsupported_type`; a collation-ordered string PK is refused — ROADMAP C2a),
+  `:snapshot_table_no_primary_key`, `:snapshot_table_not_captured`, `:snapshot_lock_unavailable`,
+  `:snapshot_schema_drifted`, `:snapshot_source_mismatch` (`@@server_uuid` across both connections),
+  `:snapshot_chunk_read_failed`, `:snapshot_bootstrap_gtid_read_failed`, `:snapshot_coordinator_down`,
+  the `SnapshotStore` faults, and `{:snapshot_sink_error, _}`. A `tables: :all` snapshot is refused
+  `:config_invalid` — an explicit table list is required (ROADMAP C2b).
+- **Delivery guarantee** — strict-once in normal operation; the only duplicate window is a crash
+  between a chunk's `{:ok}` and the durable cursor persist (the one in-flight chunk re-emits, C1's
+  bounded posture; an upsert-by-PK sink converges). Effect-once across the crash window is the
+  deferred sink-owned path (ROADMAP C1a).
+
 ## [0.1.0] - 2026-07-21
 
 ### Added — C1 streaming spine
