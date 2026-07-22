@@ -31,6 +31,7 @@ defmodule Capstan.Error do
           # C2 initial-snapshot fail-closed halts (one distinct reason per silent-loss
           # condition; each a bare atom — `from/1`'s `| atom()` branch carries them value-free).
           | :sink_missing_handle_snapshot
+          | :snapshot_config_drifted
           | :snapshot_table_not_captured
           | :snapshot_table_no_primary_key
           | :snapshot_pk_unsupported_type

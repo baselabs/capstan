@@ -1,12 +1,54 @@
 defmodule Capstan.Snapshot.BootstrapTest.CompleteStore do
   @moduledoc false
   # A SnapshotStore whose durable state is already `status: :complete` — proves the bootstrap
-  # short-circuits to pure C1 WITHOUT opening any source connection.
+  # short-circuits to pure C1 WITHOUT opening any source connection. Its stored table set MATCHES
+  # `snapshot_config/0`'s default `[{"probe_db", "capstan_bootstrap_marquee"}]` so `reconcile_tables/2`
+  # passes (a mismatched set is the drift tripwire below, not this store's concern).
   @behaviour Capstan.SnapshotStore
   def start_link(_opts), do: Agent.start_link(fn -> :complete end)
 
-  def read(_store),
-    do: {:ok, %Capstan.Snapshot.State{status: :complete, p0: "u:1-5", tables: %{}}}
+  def read(_store) do
+    {:ok,
+     %Capstan.Snapshot.State{
+       status: :complete,
+       p0: "u:1-5",
+       tables: %{
+         {"probe_db", "capstan_bootstrap_marquee"} => %{
+           fingerprint: "fp",
+           pk_columns: ["id"],
+           pk_types: [:integer],
+           pk_cursor: 5,
+           done?: true
+         }
+       }
+     }}
+  end
+
+  def write(_store, _state), do: :ok
+end
+
+defmodule Capstan.Snapshot.BootstrapTest.MidSnapshotStore do
+  @moduledoc false
+  # A SnapshotStore mid-backfill (`status: :snapshotting`) whose stored table set is
+  # {probe_db.capstan_bootstrap_marquee} — the config-drift tripwire feeds it a config that ADDS a
+  # table, and the reconcile must halt BEFORE any source connection is opened.
+  @behaviour Capstan.SnapshotStore
+  def read(_store) do
+    {:ok,
+     %Capstan.Snapshot.State{
+       status: :snapshotting,
+       p0: "u:1-5",
+       tables: %{
+         {"probe_db", "capstan_bootstrap_marquee"} => %{
+           fingerprint: "fp",
+           pk_columns: ["id"],
+           pk_types: [:integer],
+           pk_cursor: :start,
+           done?: false
+         }
+       }
+     }}
+  end
 
   def write(_store, _state), do: :ok
 end
@@ -96,6 +138,7 @@ defmodule Capstan.Snapshot.BootstrapTest do
   alias Capstan.Snapshot.BootstrapTest.{
     CompleteStore,
     FaultyStore,
+    MidSnapshotStore,
     RaisingCheckpointStore,
     RaisingSnapshotStore,
     SnapshotSink
@@ -208,6 +251,64 @@ defmodule Capstan.Snapshot.BootstrapTest do
                  {CheckpointInMemory, cstore},
                  {FaultyStore, :ignored}
                )
+    end
+
+    test "a :complete state whose table set diverges from config halts :snapshot_config_drifted" do
+      # F3 (cross-vendor): a table ADDED to `snapshot.tables` after a `:complete` state must NOT be
+      # silently skipped. CompleteStore holds {marquee}; config adds `probe_db.added`. RED (before
+      # the reconcile): the `:complete` short-circuit fires and `added` is never backfilled.
+      {:ok, cstore} = CheckpointInMemory.start_link([])
+      test_pid = self()
+
+      connect_fun = fn _connection ->
+        send(test_pid, :connect_attempted)
+        {:error, :should_not_connect}
+      end
+
+      config =
+        snapshot_config([{"probe_db", "capstan_bootstrap_marquee"}, {"probe_db", "added"}])
+
+      opts = [connection: fake_conn(), connect_fun: connect_fun]
+
+      assert {:error, :snapshot_config_drifted} =
+               Snapshot.bootstrap(
+                 opts,
+                 config,
+                 {CheckpointInMemory, cstore},
+                 {CompleteStore, :ignored}
+               )
+
+      # The reconcile is a pure key comparison — it halts WITHOUT opening any source connection.
+      refute_received :connect_attempted
+    end
+
+    test "a mid-snapshot state whose table set diverges from config halts BEFORE connecting" do
+      # F3 on the RESUME path: `open_resume/3` reopens only the STORED tables, so a config that adds
+      # a table would silently skip it. The reconcile runs before `start_backfill/5`, so no source
+      # connection is opened. RED (before the reconcile): the bootstrap proceeds to connect + resume
+      # only {marquee}, silently omitting `added`.
+      {:ok, cstore} = CheckpointInMemory.start_link([])
+      test_pid = self()
+
+      connect_fun = fn _connection ->
+        send(test_pid, :connect_attempted)
+        {:error, :should_not_connect}
+      end
+
+      config =
+        snapshot_config([{"probe_db", "capstan_bootstrap_marquee"}, {"probe_db", "added"}])
+
+      opts = [connection: fake_conn(), connect_fun: connect_fun]
+
+      assert {:error, :snapshot_config_drifted} =
+               Snapshot.bootstrap(
+                 opts,
+                 config,
+                 {CheckpointInMemory, cstore},
+                 {MidSnapshotStore, :ignored}
+               )
+
+      refute_received :connect_attempted
     end
   end
 

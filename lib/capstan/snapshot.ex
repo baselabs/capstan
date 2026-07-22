@@ -8,9 +8,15 @@ defmodule Capstan.Snapshot do
   In snapshot mode `Capstan.Supervisor` calls `bootstrap/4` after starting the checkpoint +
   snapshot stores and BEFORE it reads the checkpoint position, so the pre-seed lands first:
 
-    1. **Read the durable `%Capstan.Snapshot.State{}`.** `status: :complete` ⇒ the backfill is
-       already done — signal `:complete` so the supervisor wires the real sink directly (pure
-       C1, no coordinator). No source connection is opened in this case.
+    1. **Read the durable `%Capstan.Snapshot.State{}` + reconcile its table set against config.**
+       The stored state binds the tables introspected at the fresh start; the configured
+       `snapshot.tables` must still match it (`reconcile_tables/2`) or the bootstrap halts
+       `:snapshot_config_drifted` — a table ADDED to config after a `:complete`/mid-snapshot state
+       would otherwise be silently never backfilled (both the `:complete` short-circuit and
+       `open_resume/3` key off the STORED set). `status: :complete` (with a matching set) ⇒ the
+       backfill is already done — signal `:complete` so the supervisor wires the real sink directly
+       (pure C1, no coordinator). No source connection is opened in this case (the reconcile is a
+       pure key comparison).
     2. **Establish the transient query connection, source-identity pinned (Ch8).** The stream
        connection's `@@server_uuid` is read via `Capstan.Config.read_server_uuid/1` over an
        independent authenticated socket, and the `Capstan.Query` connection is established
@@ -132,11 +138,14 @@ defmodule Capstan.Snapshot do
   def bootstrap(opts, snapshot, checkpoint_store, {simpl, sstore} = snapshot_store)
       when is_list(opts) and is_map(snapshot) do
     case SnapshotStore.read(simpl, sstore) do
-      {:ok, %State{status: :complete}} ->
-        :complete
+      {:ok, nil} ->
+        # A FRESH start — no durable state yet, so config IS the table set (nothing to reconcile).
+        start_backfill(opts, snapshot, checkpoint_store, snapshot_store, nil)
 
-      {:ok, existing} ->
-        start_backfill(opts, snapshot, checkpoint_store, snapshot_store, existing)
+      {:ok, %State{} = existing} ->
+        with :ok <- reconcile_tables(snapshot, existing) do
+          resume_or_complete(existing, opts, snapshot, checkpoint_store, snapshot_store)
+        end
 
       {:error, _reason} ->
         {:error, :snapshot_state_read_failed}
@@ -151,6 +160,32 @@ defmodule Capstan.Snapshot do
   catch
     _kind, _reason -> {:error, :snapshot_bootstrap_crashed}
   end
+
+  # A durable `%State{}` binds its OWN table set (the tables introspected at the fresh start). The
+  # `:complete` short-circuit and `open_resume/3` both key off THAT stored set and IGNORE the
+  # configured `snapshot.tables`, so a table ADDED to config after a `:complete`/mid-snapshot state
+  # would be SILENTLY never backfilled (and a REMOVED table leaves orphaned durable progress). Fail
+  # closed on ANY divergence — the operator must resolve a config/state mismatch deliberately (drop
+  # the durable snapshot state to re-backfill the new set, or restore the config). Pure key
+  # comparison (no source connection), so the `:complete` no-connect property is preserved. A
+  # configured `:all` set is refused here for the same reason `open_tables/4` refuses it on a fresh
+  # start (`:config_invalid`) — a durable state is never created from `:all`, so `:all` vs any
+  # concrete stored set is a mis-config, not a drift.
+  defp reconcile_tables(%{tables: :all}, _existing), do: {:error, :config_invalid}
+
+  defp reconcile_tables(%{tables: configured}, %State{tables: stored}) when is_list(configured) do
+    if MapSet.new(configured) == MapSet.new(Map.keys(stored)),
+      do: :ok,
+      else: {:error, :snapshot_config_drifted}
+  end
+
+  # Post-reconciliation dispatch: a `:complete` state wires pure C1 (no coordinator, no source
+  # connection); any other durable state resumes the backfill.
+  defp resume_or_complete(%State{status: :complete}, _opts, _snapshot, _checkpoint_store, _ss),
+    do: :complete
+
+  defp resume_or_complete(existing, opts, snapshot, checkpoint_store, snapshot_store),
+    do: start_backfill(opts, snapshot, checkpoint_store, snapshot_store, existing)
 
   @doc """
   Seeds the checkpoint store with `p0` ONLY when the checkpoint is empty or already equals `p0`.
