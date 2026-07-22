@@ -380,6 +380,34 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
       Query.close(query)
     end
 
+    test "an exact-multiple table's last FULL chunk is final? live — the look-ahead, not a short page (closeout F6)" do
+      {:ok, query} =
+        Query.establish(connection: live_conn(schema()), connect_fun: &Query.default_connect/1)
+
+      # Exactly 2 * chunk_size rows: BOTH pages are a full chunk_size, the last one included. This is
+      # the case the mock unit test (`set_chunk_rows`) cannot prove — it hand-feeds each page's rows,
+      # so it never exercises real MySQL returning exactly chunk_size rows for `LIMIT chunk_size + 1`
+      # on the final page. Here the look-ahead runs against `mysql-cdc-probe`: the final page's read
+      # returns chunk_size rows (no chunk_size+1'th row exists) ⇒ final?: true. RED against the pre-F6
+      # `length < chunk_size` heuristic — a full page (50 == chunk_size) would report final?: false and
+      # the sink would learn completion only via a later silent {:done}, never a final_chunk? beat.
+      quiesce_seed(query, 100)
+      {:ok, reader} = ChunkReader.open(query, {schema(), "t"}, chunk_size: 50)
+
+      pages = drain_pages(reader, :start, [])
+
+      # Two FULL chunk_size pages — the last is not a short page.
+      assert Enum.map(pages, fn {ids, _final?} -> length(ids) end) == [50, 50]
+
+      # The last full page IS final via the look-ahead; the first is not. (Pre-F6 ⇒ [false, false].)
+      assert Enum.map(pages, fn {_ids, final?} -> final? end) == [false, true]
+
+      # Exact tiling across the two pages: ids 1..100 once, in order — no row skipped or duplicated.
+      assert Enum.flat_map(pages, fn {ids, _final?} -> ids end) == Enum.to_list(1..100)
+
+      Query.close(query)
+    end
+
     test "a DDL on the snapshot table mid-backfill halts :snapshot_schema_drifted" do
       {:ok, query} =
         Query.establish(connection: live_conn(schema()), connect_fun: &Query.default_connect/1)
@@ -562,6 +590,17 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
       {:ok, chunk, true, _r} -> acc ++ chunk_ids(chunk)
       {:ok, chunk, false, r} -> drain_all(r, chunk.max_pk, acc ++ chunk_ids(chunk))
       {:done, _r} -> acc
+    end
+  end
+
+  # Like drain_all, but records each page as `{ids, final?}` so a test can assert the finality
+  # signal per page (not just the tiled ids). Stops on the FIRST `final?: true` page — under the
+  # look-ahead an exact-multiple table's last full chunk is already final, so no trailing `{:done}`.
+  defp drain_pages(reader, cursor, acc) do
+    case ChunkReader.read_chunk(reader, cursor) do
+      {:ok, chunk, true, _r} -> Enum.reverse([{chunk_ids(chunk), true} | acc])
+      {:ok, chunk, false, r} -> drain_pages(r, chunk.max_pk, [{chunk_ids(chunk), false} | acc])
+      {:done, _r} -> Enum.reverse(acc)
     end
   end
 
