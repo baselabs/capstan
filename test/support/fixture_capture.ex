@@ -41,7 +41,6 @@ defmodule Capstan.FixtureCapture do
   alias Capstan.Protocol.{Command, Handshake, Packet}
 
   @host ~c"127.0.0.1"
-  @port 5633
   @connect_timeout 20_000
   @idle_timeout 15_000
   @max_events 500
@@ -463,7 +462,13 @@ defmodule Capstan.FixtureCapture do
   ## ---------------------------------------------------------------------------
 
   defp connect! do
-    {:ok, raw} = :gen_tcp.connect(@host, @port, [:binary, active: false], @connect_timeout)
+    {:ok, raw} =
+      :gen_tcp.connect(
+        @host,
+        Capstan.MysqlCase.shared_port(),
+        [:binary, active: false],
+        @connect_timeout
+      )
 
     case Handshake.connect({:gen_tcp, raw}, @connect_opts) do
       {:ok, %{socket: socket}} -> socket

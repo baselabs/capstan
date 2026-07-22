@@ -102,9 +102,11 @@ The MySQL servers the suite streams from are defined ONCE in **`docker-compose.y
 source of truth for the five precondition variables + ports + images). The `caching_sha2_password`
 replication user — with `LOCK TABLES`, which the C2 snapshot brief-lock needs — is seeded at first
 container init by **`scripts/mysql-init/`**. Tunables live in **`.env`** (gitignored; copy from
-`env.example`), so an unedited checkout reproduces the substrate exactly.
+`.env.example`), so an unedited checkout reproduces the substrate exactly. **No port is hard-coded** —
+`MYSQL_PORT_80` / `MYSQL_PORT_84` (default `11619` / `15401`) are read by docker-compose AND by the
+Elixir suite (Dotenvy in `config/runtime.exs` → `Capstan.MysqlCase.shared_port/0`).
 
-    docker compose up -d --wait            # MySQL 8.0 (:5633) + 8.4 (:5634), ready + user seeded
+    docker compose up -d --wait            # both servers (ports from MYSQL_PORT_80/84), ready + user seeded
     docker compose up -d --wait mysql-80   # just 8.0
     docker compose down                    # stop + remove (add -v to wipe the data volumes)
 
@@ -114,10 +116,10 @@ either — they drive the same definition.
     scripts/dev-substrate.sh            # both servers
     scripts/dev-substrate.sh --only-80  # just 8.0
 
-- 8.0 `mysql-cdc-probe` @ `127.0.0.1:5633` — root is `mysql_native_password` (the `probe/`
+- 8.0 `mysql-cdc-probe` @ `127.0.0.1:$MYSQL_PORT_80` — root is `mysql_native_password` (the `probe/`
   diagnostics authenticate as native root); replication user `capstan_sha2` / `capstan_sha2_pw`.
-- 8.4 `mysql-cdc-probe-84` @ `127.0.0.1:5634` — 8.4 removed built-in `mysql_native_password`, so root
-  is `caching_sha2` (exercises the default auth posture); same `capstan_sha2` user.
+- 8.4 `mysql-cdc-probe-84` @ `127.0.0.1:$MYSQL_PORT_84` — 8.4 removed built-in `mysql_native_password`,
+  so root is `caching_sha2` (exercises the default auth posture); same `capstan_sha2` user.
 - **Never restart or duplicate a running server** — a live server is left untouched (`docker compose
   up -d` is idempotent). No server UUID is hard-coded (a recreated container gets a new one; read it
   live). Container names are stable (`handshake_test.exs` does `docker exec mysql-cdc-probe …`).

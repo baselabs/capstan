@@ -577,7 +577,7 @@ defmodule Capstan.ConnectionTest do
         server_id: 5140,
         connection: [
           host: "127.0.0.1",
-          port: 5633,
+          port: Capstan.MysqlCase.shared_port(),
           username: "root",
           password: "probe",
           ssl: false,
@@ -616,7 +616,7 @@ defmodule Capstan.ConnectionTest do
         server_id: 5141,
         connection: [
           host: "127.0.0.1",
-          port: 5633,
+          port: Capstan.MysqlCase.shared_port(),
           username: "root",
           password: "probe",
           ssl: false,
@@ -640,7 +640,13 @@ defmodule Capstan.ConnectionTest do
   # Reads @@global.gtid_executed off the live substrate so the connection under test can
   # resume from a non-purged position.
   defp live_gtid_executed do
-    {:ok, raw} = :gen_tcp.connect(@loopback, 5633, [:binary, active: false], 10_000)
+    {:ok, raw} =
+      :gen_tcp.connect(
+        @loopback,
+        Capstan.MysqlCase.shared_port(),
+        [:binary, active: false],
+        10_000
+      )
 
     {:ok, %{socket: socket}} =
       Handshake.connect({:gen_tcp, raw},

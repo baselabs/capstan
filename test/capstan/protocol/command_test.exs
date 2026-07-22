@@ -341,7 +341,13 @@ defmodule Capstan.Protocol.CommandTest do
   ## ---------------------------------------------------------------------------
 
   defp live_connect do
-    {:ok, raw} = :gen_tcp.connect(~c"127.0.0.1", 5633, [:binary, active: false], 10_000)
+    {:ok, raw} =
+      :gen_tcp.connect(
+        ~c"127.0.0.1",
+        Capstan.MysqlCase.shared_port(),
+        [:binary, active: false],
+        10_000
+      )
 
     {:ok, result} =
       Handshake.connect({:gen_tcp, raw},

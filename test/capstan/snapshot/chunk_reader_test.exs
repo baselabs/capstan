@@ -609,7 +609,7 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
   defp live_conn(database) do
     [
       host: "127.0.0.1",
-      port: 5633,
+      port: Capstan.MysqlCase.shared_port(),
       username: "capstan_sha2",
       password: "capstan_sha2_pw",
       database: database,
@@ -619,7 +619,13 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
   end
 
   defp root_socket do
-    {:ok, raw} = :gen_tcp.connect(~c"127.0.0.1", 5633, [:binary, active: false], 10_000)
+    {:ok, raw} =
+      :gen_tcp.connect(
+        ~c"127.0.0.1",
+        Capstan.MysqlCase.shared_port(),
+        [:binary, active: false],
+        10_000
+      )
 
     {:ok, result} =
       Handshake.connect({:gen_tcp, raw},

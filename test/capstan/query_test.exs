@@ -67,7 +67,7 @@ defmodule Capstan.QueryTest do
 
       assert {:ok, q} = Query.establish(connection: fake_conn(), connect_fun: connect_fun)
       assert Query.server_uuid(q) == @uuid_a
-      assert Query.endpoint(q) == {~c"127.0.0.1", 5633}
+      assert Query.endpoint(q) == {~c"127.0.0.1", Capstan.MysqlCase.shared_port()}
     end
 
     test "an explicit :expected_server_uuid (the stream conn's identity) is verified at connect" do
@@ -315,13 +315,19 @@ defmodule Capstan.QueryTest do
   ## ---------------------------------------------------------------------------
 
   defp fake_conn(password \\ @sentinel_password) do
-    [host: "127.0.0.1", port: 5633, username: "capstan_sha2", password: password, ssl: false]
+    [
+      host: "127.0.0.1",
+      port: Capstan.MysqlCase.shared_port(),
+      username: "capstan_sha2",
+      password: password,
+      ssl: false
+    ]
   end
 
   defp live_conn do
     [
       host: "127.0.0.1",
-      port: 5633,
+      port: Capstan.MysqlCase.shared_port(),
       username: "capstan_sha2",
       password: "capstan_sha2_pw",
       database: "probe_db",
@@ -441,7 +447,13 @@ defmodule Capstan.QueryTest do
   ## ---------------------------------------------------------------------------
 
   defp live_root_socket do
-    {:ok, raw} = :gen_tcp.connect(~c"127.0.0.1", 5633, [:binary, active: false], 10_000)
+    {:ok, raw} =
+      :gen_tcp.connect(
+        ~c"127.0.0.1",
+        Capstan.MysqlCase.shared_port(),
+        [:binary, active: false],
+        10_000
+      )
 
     {:ok, result} =
       Handshake.connect({:gen_tcp, raw},

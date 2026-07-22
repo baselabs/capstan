@@ -618,7 +618,13 @@ defmodule Capstan.Snapshot.BootstrapTest do
   end
 
   defp fake_conn do
-    [host: "127.0.0.1", port: 5633, username: "capstan_sha2", password: "pw", ssl: false]
+    [
+      host: "127.0.0.1",
+      port: Capstan.MysqlCase.shared_port(),
+      username: "capstan_sha2",
+      password: "pw",
+      ssl: false
+    ]
   end
 
   defp seed(cstore, gtid_set) do
@@ -732,7 +738,7 @@ defmodule Capstan.Snapshot.BootstrapTest do
   defp live_conn do
     [
       host: "127.0.0.1",
-      port: 5633,
+      port: Capstan.MysqlCase.shared_port(),
       username: "capstan_sha2",
       password: "capstan_sha2_pw",
       database: "probe_db",
@@ -742,7 +748,13 @@ defmodule Capstan.Snapshot.BootstrapTest do
   end
 
   defp live_root_socket do
-    {:ok, raw} = :gen_tcp.connect(~c"127.0.0.1", 5633, [:binary, active: false], 10_000)
+    {:ok, raw} =
+      :gen_tcp.connect(
+        ~c"127.0.0.1",
+        Capstan.MysqlCase.shared_port(),
+        [:binary, active: false],
+        10_000
+      )
 
     {:ok, result} =
       Handshake.connect({:gen_tcp, raw},

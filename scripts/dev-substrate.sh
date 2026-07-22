@@ -4,9 +4,10 @@
 # documented entry point keeps working; the container definitions live in compose, not here, so there
 # is exactly one place to change them.
 #
-# Two servers (see docker-compose.yml; tunables in .env — copy from env.example):
-#   mysql-cdc-probe     MySQL 8.0  127.0.0.1:5633   root mysql_native_password; capstan_sha2 caching_sha2
-#   mysql-cdc-probe-84  MySQL 8.4  127.0.0.1:5634   root caching_sha2 (Q6 posture); capstan_sha2 caching_sha2
+# Two servers (see docker-compose.yml; tunables in .env — copy from .env.example). Host ports come
+# from MYSQL_PORT_80 / MYSQL_PORT_84 (default 11619 / 15401 — the Elixir suite reads the same value):
+#   mysql-cdc-probe     MySQL 8.0  127.0.0.1:$MYSQL_PORT_80  root mysql_native_password; capstan_sha2 caching_sha2
+#   mysql-cdc-probe-84  MySQL 8.4  127.0.0.1:$MYSQL_PORT_84  root caching_sha2 (Q6 posture); capstan_sha2 caching_sha2
 #
 # The exact server variables C1's fail-closed precondition gate requires (binlog ROW/FULL/FULL,
 # gtid-mode ON, enforce-gtid-consistency ON) live in the compose `command:` blocks. The caching_sha2

@@ -52,6 +52,10 @@ defmodule Capstan.MixProject do
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"},
       # Dev/Test
+      # dotenvy loads the dev MySQL substrate tunables from .env in config/runtime.exs (Base-family
+      # pattern). Scoped :dev/:test — capstan is a published library and must not force it on
+      # consumers; config/ is not shipped to Hex either (see `package.files`).
+      {:dotenvy, "~> 1.1", only: [:dev, :test]},
       {:ex_doc, "~> 0.31", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

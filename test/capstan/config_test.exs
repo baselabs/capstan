@@ -47,7 +47,7 @@ defmodule Capstan.ConfigTest do
     end
 
     test "a missing host is a config error" do
-      conn = [port: 5633, username: "root", ssl: false]
+      conn = [port: Capstan.MysqlCase.shared_port(), username: "root", ssl: false]
       assert {:error, :config_invalid} = Config.validate(server_id: 5115, connection: conn)
     end
 
@@ -57,24 +57,36 @@ defmodule Capstan.ConfigTest do
     end
 
     test "a missing username is a config error" do
-      conn = [host: "127.0.0.1", port: 5633, ssl: false]
+      conn = [host: "127.0.0.1", port: Capstan.MysqlCase.shared_port(), ssl: false]
       assert {:error, :config_invalid} = Config.validate(server_id: 5115, connection: conn)
     end
 
     test "a charlist host is accepted" do
-      conn = [host: ~c"127.0.0.1", port: 5633, username: "root", ssl: false]
+      conn = [
+        host: ~c"127.0.0.1",
+        port: Capstan.MysqlCase.shared_port(),
+        username: "root",
+        ssl: false
+      ]
+
       assert {:ok, resolved} = Config.validate(server_id: 5115, connection: conn)
       assert resolved.connection[:host] == ~c"127.0.0.1"
     end
 
     test "a valid charlist host (~c\"localhost\") is accepted" do
-      conn = [host: ~c"localhost", port: 5633, username: "root", ssl: false]
+      conn = [
+        host: ~c"localhost",
+        port: Capstan.MysqlCase.shared_port(),
+        username: "root",
+        ssl: false
+      ]
+
       assert {:ok, resolved} = Config.validate(server_id: 5115, connection: conn)
       assert resolved.connection[:host] == ~c"localhost"
     end
 
     test "a non-charlist list host ([:foo]) is refused :config_invalid" do
-      conn = [host: [:foo], port: 5633, username: "root", ssl: false]
+      conn = [host: [:foo], port: Capstan.MysqlCase.shared_port(), username: "root", ssl: false]
       assert {:error, :config_invalid} = Config.validate(server_id: 5115, connection: conn)
     end
 
@@ -87,7 +99,13 @@ defmodule Capstan.ConfigTest do
     end
 
     test "password defaults to an empty string when omitted" do
-      conn = [host: "127.0.0.1", port: 5633, username: "root", ssl: false]
+      conn = [
+        host: "127.0.0.1",
+        port: Capstan.MysqlCase.shared_port(),
+        username: "root",
+        ssl: false
+      ]
+
       assert {:ok, resolved} = Config.validate(server_id: 5115, connection: conn)
       assert resolved.connection[:password] == ""
     end
@@ -107,13 +125,19 @@ defmodule Capstan.ConfigTest do
 
   describe "validate/1 — ssl defaults true and F6 TLS verification (Q17)" do
     test "ssl defaults to true (an omitted ssl with an explicit verify resolves ssl: true)" do
-      conn = [host: "127.0.0.1", port: 5633, username: "root", ssl_opts: [verify: :verify_none]]
+      conn = [
+        host: "127.0.0.1",
+        port: Capstan.MysqlCase.shared_port(),
+        username: "root",
+        ssl_opts: [verify: :verify_none]
+      ]
+
       assert {:ok, resolved} = Config.validate(server_id: 5115, connection: conn)
       assert resolved.connection[:ssl] == true
     end
 
     test "ssl defaulting to true with NO verification choice fails closed (proves the default)" do
-      conn = [host: "127.0.0.1", port: 5633, username: "root"]
+      conn = [host: "127.0.0.1", port: Capstan.MysqlCase.shared_port(), username: "root"]
 
       assert {:error, :tls_verification_unspecified} =
                Config.validate(server_id: 5115, connection: conn)
@@ -441,7 +465,13 @@ defmodule Capstan.ConfigTest do
   # choice). `conn` overrides merge on top; TLS/auth tests override deliberately.
   defp valid_connection(conn \\ []) do
     Keyword.merge(
-      [host: "127.0.0.1", port: 5633, username: "root", password: "probe", ssl: false],
+      [
+        host: "127.0.0.1",
+        port: Capstan.MysqlCase.shared_port(),
+        username: "root",
+        password: "probe",
+        ssl: false
+      ],
       conn
     )
   end
@@ -591,7 +621,13 @@ defmodule Capstan.ConfigTest do
   ## ---------------------------------------------------------------------------
 
   defp live_connect do
-    {:ok, raw} = :gen_tcp.connect(~c"127.0.0.1", 5633, [:binary, active: false], 10_000)
+    {:ok, raw} =
+      :gen_tcp.connect(
+        ~c"127.0.0.1",
+        Capstan.MysqlCase.shared_port(),
+        [:binary, active: false],
+        10_000
+      )
 
     {:ok, result} =
       Handshake.connect({:gen_tcp, raw},

@@ -598,7 +598,13 @@ defmodule Capstan.Protocol.HandshakeTest do
       ]
 
       for {ssl_opts, label} <- probes do
-        {:ok, raw} = :gen_tcp.connect(~c"127.0.0.1", 5633, [:binary, active: false], 10_000)
+        {:ok, raw} =
+          :gen_tcp.connect(
+            ~c"127.0.0.1",
+            Capstan.MysqlCase.shared_port(),
+            [:binary, active: false],
+            10_000
+          )
 
         assert {:ok, result} =
                  Handshake.connect({:gen_tcp, raw},
@@ -628,7 +634,13 @@ defmodule Capstan.Protocol.HandshakeTest do
       before = ssl_conn_procs()
 
       for _ <- 1..iterations do
-        {:ok, raw} = :gen_tcp.connect(~c"127.0.0.1", 5633, [:binary, active: false], 10_000)
+        {:ok, raw} =
+          :gen_tcp.connect(
+            ~c"127.0.0.1",
+            Capstan.MysqlCase.shared_port(),
+            [:binary, active: false],
+            10_000
+          )
 
         # capstan_sha2 is caching_sha2: TLS upgrades under verify_none, THEN the
         # wrong password is rejected — a post-upgrade failure, the leak-prone path.

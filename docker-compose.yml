@@ -17,8 +17,8 @@ name: capstan-substrate
 
 services:
   # 8.0 — root stays mysql_native_password so the native-root probe/ diagnostics keep working;
-  # capstan_sha2 (the pipeline account) is caching_sha2. Bound to :5633 — the port the live /
-  # integration marquees hardcode (test/support/mysql_case.ex).
+  # capstan_sha2 (the pipeline account) is caching_sha2. Host port from MYSQL_PORT_80 — the SAME value
+  # the Elixir suite reads via Dotenvy → Capstan.MysqlCase.shared_port/0 (nothing hard-codes it).
   mysql-80:
     image: ${MYSQL_IMAGE_80:-mysql:8.0}
     container_name: ${MYSQL_CONTAINER_80:-mysql-cdc-probe}
@@ -37,7 +37,7 @@ services:
       CAPSTAN_SHA2_USER: ${CAPSTAN_SHA2_USER:-capstan_sha2}
       CAPSTAN_SHA2_PASSWORD: ${CAPSTAN_SHA2_PASSWORD:-capstan_sha2_pw}
     ports:
-      - "127.0.0.1:${MYSQL_PORT_80:-5633}:3306"
+      - "127.0.0.1:${MYSQL_PORT_80:-11619}:3306"
     volumes:
       - mysql80-data:/var/lib/mysql
       - ./scripts/mysql-init:/docker-entrypoint-initdb.d:ro
@@ -64,7 +64,8 @@ services:
       start_period: 60s
 
   # 8.4 — removed built-in mysql_native_password, so NO --default-authentication-plugin flag (it
-  # errors) and root defaults to caching_sha2 (exercises design Q6's default posture). Bound to :5634.
+  # errors) and root defaults to caching_sha2 (exercises design Q6's default posture). Host port from
+  # MYSQL_PORT_84.
   mysql-84:
     image: ${MYSQL_IMAGE_84:-mysql:8.4}
     container_name: ${MYSQL_CONTAINER_84:-mysql-cdc-probe-84}
@@ -82,7 +83,7 @@ services:
       CAPSTAN_SHA2_USER: ${CAPSTAN_SHA2_USER:-capstan_sha2}
       CAPSTAN_SHA2_PASSWORD: ${CAPSTAN_SHA2_PASSWORD:-capstan_sha2_pw}
     ports:
-      - "127.0.0.1:${MYSQL_PORT_84:-5634}:3306"
+      - "127.0.0.1:${MYSQL_PORT_84:-15401}:3306"
     volumes:
       - mysql84-data:/var/lib/mysql
       - ./scripts/mysql-init:/docker-entrypoint-initdb.d:ro

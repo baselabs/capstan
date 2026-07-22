@@ -5,13 +5,15 @@
 # and LIVE tailing (an insert issued mid-stream is observed and decoded).
 #
 # Run: elixir mysql_binlog_probe.exs
-# Substrate: mysql:8.0 @ 127.0.0.1:5633, root/probe, gtid_mode=ON, binlog_row_metadata=FULL
+# Substrate: mysql:8.0 @ 127.0.0.1:$MYSQL_PORT_80 (default 11619), root/probe, gtid_mode=ON, binlog_row_metadata=FULL
 
 defmodule Probe do
   import Bitwise
 
   @host ~c"127.0.0.1"
-  @port 5633
+  # Standalone script (run via `elixir`, no mix/dotenvy) — read the substrate port from the env,
+  # same MYSQL_PORT_80 docker-compose binds; default matches .env.example.
+  @port String.to_integer(System.get_env("MYSQL_PORT_80") || "11619")
   @user "root"
   @pass "probe"
 

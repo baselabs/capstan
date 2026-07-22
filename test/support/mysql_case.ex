@@ -6,7 +6,7 @@ defmodule Capstan.MysqlCase do
 
   ## Two substrates
 
-    * **The shared, running `mysql-cdc-probe`** (`127.0.0.1:5633`, `scripts/dev-substrate.sh`)
+    * **The shared, running `mysql-cdc-probe`** (`127.0.0.1`, port `MYSQL_PORT_80` — `shared_port/0`)
       — every NON-destructive marquee streams from it read-mostly, on DEDICATED per-marquee
       tables (`DROP TABLE IF EXISTS` in setup). It is **never** restarted, reconfigured, or
       duplicated (forge substrate rule).
@@ -42,7 +42,6 @@ defmodule Capstan.MysqlCase do
   alias Capstan.Protocol.{Command, Handshake, Packet}
 
   @host "127.0.0.1"
-  @shared_port 5633
   @root_password "probe"
   @sha2_user "capstan_sha2"
   # Throwaway credential for disposable local containers — never a real secret (dev-substrate.sh).
@@ -53,16 +52,20 @@ defmodule Capstan.MysqlCase do
   ## connection option shapes
   ## ---------------------------------------------------------------------------
 
-  @doc "The shared substrate's TCP port."
+  @doc """
+  The shared substrate's TCP port — the SINGLE accessor every test uses (no port literal appears in
+  lib/ or test/). Sourced from `MYSQL_PORT_80` via Dotenvy in config/runtime.exs (default in
+  .env.example); the same value docker-compose binds.
+  """
   @spec shared_port() :: pos_integer()
-  def shared_port, do: @shared_port
+  def shared_port, do: Application.fetch_env!(:capstan, :mysql_substrate)[:port_80]
 
   @doc """
   The planting connection: `root` over `mysql_native_password` (plaintext), which carries the
   `CREATE`/`DROP`/`INSERT` privileges the replication user lacks.
   """
   @spec query_connection(pos_integer()) :: keyword()
-  def query_connection(port \\ @shared_port) do
+  def query_connection(port \\ shared_port()) do
     [
       host: @host,
       port: port,
@@ -81,7 +84,7 @@ defmodule Capstan.MysqlCase do
   default (`[:caching_sha2_password]`) applies.
   """
   @spec pipeline_connection(pos_integer(), keyword()) :: keyword()
-  def pipeline_connection(port \\ @shared_port, opts \\ []) do
+  def pipeline_connection(port \\ shared_port(), opts \\ []) do
     base = [
       host: @host,
       port: port,

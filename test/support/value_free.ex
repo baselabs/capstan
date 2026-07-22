@@ -65,16 +65,20 @@ defmodule Capstan.ValueFree do
   # (REPLICATION SLAVE, REPLICATION CLIENT, SELECT only) lacks; these are the
   # `Capstan.FixtureCapture` connect opts. NEVER restarts or duplicates the container.
   @live_host "127.0.0.1"
-  @live_port 5633
-  @live_connection [
-    host: @live_host,
-    port: @live_port,
-    username: "root",
-    password: "probe",
-    ssl: false,
-    auth_plugins: [:mysql_native_password],
-    database: "probe_db"
-  ]
+
+  # Built at RUNTIME: the substrate port comes from config (Dotenvy / MYSQL_PORT_80 via
+  # Capstan.MysqlCase.shared_port/0), so a compile-time module attribute would freeze a stale port.
+  defp live_connection do
+    [
+      host: @live_host,
+      port: Capstan.MysqlCase.shared_port(),
+      username: "root",
+      password: "probe",
+      ssl: false,
+      auth_plugins: [:mysql_native_password],
+      database: "probe_db"
+    ]
+  end
 
   # Every capstan telemetry event (design § Events / telemetry) — the helper attaches to
   # ALL of them so a sentinel riding any payload is caught, not only the ones a given
@@ -388,7 +392,7 @@ defmodule Capstan.ValueFree do
 
   defp live_pipeline_opts(checkpoint) do
     [
-      connection: @live_connection,
+      connection: live_connection(),
       server_id: 6000 + rem(System.unique_integer([:positive]), 2000),
       sink: CapturingSink,
       checkpoint_store: [module: SeededStore, options: [gtid_set: checkpoint]],
@@ -412,11 +416,13 @@ defmodule Capstan.ValueFree do
 
   defp live_connect! do
     host = String.to_charlist(@live_host)
-    {:ok, raw} = :gen_tcp.connect(host, @live_port, [:binary, active: false], 20_000)
+
+    {:ok, raw} =
+      :gen_tcp.connect(host, Capstan.MysqlCase.shared_port(), [:binary, active: false], 20_000)
 
     # `Handshake.connect/2` takes an already-connected socket, so it has no `:port`
     # `connect_opt` — dropping it also loosens the literal's type so the call type-checks.
-    case Handshake.connect({:gen_tcp, raw}, Keyword.delete(@live_connection, :port)) do
+    case Handshake.connect({:gen_tcp, raw}, Keyword.delete(live_connection(), :port)) do
       {:ok, %{socket: socket}} -> socket
       {:error, reason} -> raise "capstan value_free: live handshake failed #{inspect(reason)}"
     end
