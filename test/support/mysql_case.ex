@@ -590,4 +590,217 @@ defmodule Capstan.MysqlCase do
     |> Enum.flat_map(fn {_uuid, intervals} -> intervals end)
     |> Enum.reduce(0, fn {low, high}, acc -> acc + (high - low + 1) end)
   end
+
+  ## ===========================================================================
+  ## C2 initial-snapshot marquee scaffolding (plan Task 11)
+  ## ===========================================================================
+
+  @doc """
+  A per-marquee throwaway SCHEMA name (`capstan_snap_<unique>`). Each snapshot marquee creates
+  its own schema, provisions its tables inside it, and `DROP DATABASE`s it in `on_exit` — so no
+  marquee ever leaks a schema onto the shared substrate (design Q-tests / forge substrate rule).
+  """
+  @spec unique_schema() :: String.t()
+  def unique_schema, do: "capstan_snap_" <> Integer.to_string(System.unique_integer([:positive]))
+
+  @doc "Creates the throwaway `schema` (fails if it somehow already exists)."
+  @spec create_schema!(Packet.socket(), String.t()) :: :ok
+  def create_schema!(socket, schema), do: run!(socket, "CREATE DATABASE #{ident(schema)}")
+
+  @doc "Drops the throwaway `schema` best-effort (an `on_exit` teardown; already-gone is fine)."
+  @spec drop_schema!(Packet.socket(), String.t()) :: :ok
+  def drop_schema!(socket, schema),
+    do: run_tolerant(socket, "DROP DATABASE IF EXISTS #{ident(schema)}")
+
+  # A backtick-quoted identifier (embedded backticks doubled) — guards a schema/table name.
+  defp ident(name), do: "`" <> String.replace(name, "`", "``") <> "`"
+
+  @doc """
+  A fresh append-only `(schema, table, canonical_pk)` `:duplicate_bag` ledger. A double-delivery
+  of a key/value is VISIBLE as two rows for the same key — a PK-upsert count would HIDE it. Each
+  entry is `{{schema, table, canonical_pk}, %{op:, source:, value:, seq:}}`; `seq` is a
+  process-global monotonic stamp giving every delivery a total order for the upsert-by-PK replay.
+  """
+  @spec new_ledger() :: :ets.tid()
+  def new_ledger, do: :ets.new(:capstan_snapshot_ledger, [:public, :duplicate_bag])
+
+  @doc "Every `{key, entry}` in the ledger (unordered — sort by `entry.seq` for replay order)."
+  @spec ledger_dump(:ets.tid()) :: [{{String.t(), String.t(), term()}, map()}]
+  def ledger_dump(ledger), do: :ets.tab2list(ledger)
+
+  @doc """
+  Attaches the four `[:capstan, :snapshot, *]` telemetry events, forwarding each to `test_pid`
+  as `{:snapshot_event, suffix, measurements, metadata}` (`suffix` ∈
+  `:started | :chunk_completed | :completed | :halt`). Returns the handler id (detach in
+  `on_exit`). Lets a marquee await backfill completion (`:completed`) and count chunk emissions
+  (`:chunk_completed`) without polling durable state.
+  """
+  @spec attach_snapshot_telemetry(pid()) :: {module(), reference()}
+  def attach_snapshot_telemetry(test_pid) do
+    handler_id = {__MODULE__, make_ref()}
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [
+          [:capstan, :snapshot, :started],
+          [:capstan, :snapshot, :chunk_completed],
+          [:capstan, :snapshot, :completed],
+          [:capstan, :snapshot, :halt]
+        ],
+        &__MODULE__.__forward_snapshot__/4,
+        test_pid
+      )
+
+    handler_id
+  end
+
+  @doc false
+  @spec __forward_snapshot__([atom(), ...], map(), map(), pid()) :: :ok
+  def __forward_snapshot__(event, measurements, metadata, test_pid) do
+    send(test_pid, {:snapshot_event, List.last(event), measurements, metadata})
+    :ok
+  end
+
+  defmodule SnapshotSink do
+    @moduledoc """
+    A `Capstan.Sink` for the initial-snapshot marquees: it records EVERY delivered key into the
+    shared append-only `(schema, table, canonical_pk)` ledger, tagged by which path delivered it
+    (`:chunk` via `handle_snapshot/2`, `:stream` via `handle_transaction/1`) so a double-delivery
+    is visible. The primary key is canonicalised with `Capstan.Snapshot.PrimaryKey.canonical/2`
+    (the SAME reconciliation form the pipeline uses), so a text-protocol chunk read (`"5"`) and a
+    binlog-decoded streamed change (`5`) key the same slot — otherwise a stale-vs-fresh comparison
+    would silently miss.
+
+    Config rides in `:persistent_term` (the marquees are `async: false`, and the coordinator's
+    fixed registered name serialises snapshot pipelines, so exactly one config is live).
+    """
+    @behaviour Capstan.Sink
+
+    alias Capstan.Change
+    alias Capstan.Snapshot.PrimaryKey
+
+    @key {__MODULE__, :config}
+
+    @typedoc "The live sink config: the test pid, the ledger, and the PK/value column shape."
+    @type config :: %{
+            pid: pid(),
+            ledger: :ets.tid(),
+            pk_columns: [String.t()],
+            pk_types: [PrimaryKey.pk_type()],
+            value_column: String.t()
+          }
+
+    @doc "Configure the live sink."
+    @spec configure(config()) :: :ok
+    def configure(config), do: :persistent_term.put(@key, config)
+
+    @doc "Erase the live sink config (an `on_exit` hook)."
+    @spec clear() :: :ok
+    def clear do
+      :persistent_term.erase(@key)
+      :ok
+    end
+
+    defp config, do: :persistent_term.get(@key)
+
+    @impl Capstan.Sink
+    @spec handle_transaction(Capstan.Transaction.t()) :: {:ok, Capstan.Position.t()}
+    def handle_transaction(txn) do
+      cfg = config()
+      Enum.each(txn.changes, &record_stream(cfg, &1))
+      send(cfg.pid, {:txn, txn.gtid})
+      {:ok, txn.position}
+    end
+
+    @impl Capstan.Sink
+    @spec handle_schema_change(Capstan.SchemaChange.t(), Capstan.Position.t()) :: :ok
+    def handle_schema_change(schema_change, _position) do
+      cfg = config()
+      send(cfg.pid, {:schema_change, schema_change.schema, schema_change.table})
+      :ok
+    end
+
+    @impl Capstan.Sink
+    @spec handle_snapshot([Change.t()], Capstan.Snapshot.Meta.t()) :: :ok
+    def handle_snapshot(changes, meta) do
+      cfg = config()
+      Enum.each(changes, &record_chunk(cfg, &1))
+      send(cfg.pid, {:snapshot_chunk, meta.schema, meta.table, meta.chunk_seq, meta.final_chunk?})
+      :ok
+    end
+
+    # A streamed :delete records the deleted key with the `:deleted` sentinel value (keyed on the
+    # BEFORE-image PK); an :insert/:update records its AFTER-image PK + value.
+    defp record_stream(cfg, %Change{op: :delete} = change),
+      do: append(cfg, change, change.old_record, :deleted, :stream)
+
+    defp record_stream(cfg, %Change{} = change),
+      do: append(cfg, change, change.record, value_of(cfg, change.record), :stream)
+
+    # A chunk row is a full after-image (upsert-by-PK).
+    defp record_chunk(cfg, %Change{} = change),
+      do: append(cfg, change, change.record, value_of(cfg, change.record), :chunk)
+
+    defp append(cfg, change, pk_record, value, source) do
+      pk = PrimaryKey.canonical(cfg.pk_types, Enum.map(cfg.pk_columns, &pk_record[&1]))
+      entry = %{op: change.op, source: source, value: value, seq: next_seq()}
+      :ets.insert(cfg.ledger, {{change.schema, change.table, pk}, entry})
+      :ok
+    end
+
+    # The value column normalised to a string so a text-protocol chunk read and a binlog-decoded
+    # streamed change compare equal (`"20"` == `to_string(20)`).
+    defp value_of(cfg, record), do: to_string(record[cfg.value_column])
+
+    defp next_seq, do: System.unique_integer([:monotonic, :positive])
+  end
+
+  defmodule DurableSnapshotStore do
+    @moduledoc """
+    A `Capstan.SnapshotStore` whose one durable `%Capstan.Snapshot.State{}` lives in an ETS cell
+    the TEST owns (keyed by `{table, key}`), so it OUTLIVES the store process — the resume
+    substrate. A pipeline restarted from a NEW store pointing at the same cell resumes the
+    backfill from the persisted per-table PK cursor (never re-scans from zero). Mirrors
+    `DurableStore` (the checkpoint sibling).
+    """
+    @behaviour Capstan.SnapshotStore
+
+    alias Capstan.Snapshot.State
+
+    @doc "Create the durable ETS backing."
+    @spec new_table() :: :ets.tid()
+    def new_table, do: :ets.new(:capstan_durable_snapshot_store, [:public, :set])
+
+    @doc "Read the persisted `%State{}` directly (a marquee asserts the cursor advanced)."
+    @spec current(:ets.tid(), term()) :: State.t() | nil
+    def current(table, key) do
+      case :ets.lookup(table, key) do
+        [{^key, state}] -> state
+        [] -> nil
+      end
+    end
+
+    @spec start_link(keyword()) :: Agent.on_start()
+    def start_link(opts) do
+      table = Keyword.fetch!(opts, :table)
+      key = Keyword.fetch!(opts, :key)
+      Agent.start_link(fn -> {table, key} end)
+    end
+
+    @impl Capstan.SnapshotStore
+    @spec read(Agent.agent()) :: {:ok, State.t() | nil}
+    def read(store) do
+      {table, key} = Agent.get(store, & &1)
+      {:ok, current(table, key)}
+    end
+
+    @impl Capstan.SnapshotStore
+    @spec write(Agent.agent(), State.t()) :: :ok
+    def write(store, %State{} = state) do
+      {table, key} = Agent.get(store, & &1)
+      true = :ets.insert(table, {key, state})
+      :ok
+    end
+  end
 end
