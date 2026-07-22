@@ -141,6 +141,15 @@ defmodule Capstan.Snapshot do
       {:error, _reason} ->
         {:error, :snapshot_state_read_failed}
     end
+  rescue
+    # A store that RAISES before any source connection opens (the initial `SnapshotStore.read`),
+    # or an unexpected raise on the pre-query identity path — fail closed VALUE-FREE, never an
+    # uncaught exception out of `start_link/1` (S-1 shape-gap). A raise on the query-open path is
+    # already caught + query-closed by `finish_or_close/6`, so this fires only pre-query (no fd to
+    # release here). The raised term is discarded (Rule 1).
+    _exception -> {:error, :snapshot_bootstrap_crashed}
+  catch
+    _kind, _reason -> {:error, :snapshot_bootstrap_crashed}
   end
 
   @doc """
@@ -184,7 +193,15 @@ defmodule Capstan.Snapshot do
   end
 
   # The query connection is open past this point: on any failure it must be closed (no fd leak);
-  # on success the readers own it for the backfill's life.
+  # on success the readers own it for the backfill's life. `build_backfill/6` calls store ops
+  # whose behaviour contract is `{:error, term()}`, but a real durable store (Ecto/DBConnection)
+  # RAISES on a transient backing-DB outage rather than returning `{:error, _}`. Bootstrap runs
+  # synchronously inside `Capstan.Supervisor.start_link/1` — NOT in a GenServer callback — so an
+  # un-rescued raise here both leaks the authenticated query connection AND aborts start with an
+  # uncaught exception instead of a value-free `{:error, _}` (a fail-closed-shape gap; under a
+  # restart loop against a down store it exhausts source connections — review S-1). Close the
+  # query and fail closed value-free; the raised term (a store's own exception, possibly
+  # value-bearing) is DISCARDED (Rule 1), exactly as the coordinator scrubs an emit-path raise.
   defp finish_or_close(query, opts, snapshot, checkpoint_store, snapshot_store, existing) do
     case build_backfill(query, opts, snapshot, checkpoint_store, snapshot_store, existing) do
       {:snapshot, _state, _readers, _processed} = ok ->
@@ -194,6 +211,14 @@ defmodule Capstan.Snapshot do
         Query.close(query)
         error
     end
+  rescue
+    _exception ->
+      Query.close(query)
+      {:error, :snapshot_bootstrap_crashed}
+  catch
+    _kind, _reason ->
+      Query.close(query)
+      {:error, :snapshot_bootstrap_crashed}
   end
 
   defp build_backfill(query, _opts, snapshot, checkpoint_store, snapshot_store, existing) do

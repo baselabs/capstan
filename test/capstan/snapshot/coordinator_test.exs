@@ -134,6 +134,25 @@ defmodule Capstan.Snapshot.CoordinatorTest.CountingFaultyStore do
   end
 end
 
+defmodule Capstan.Snapshot.CoordinatorTest.BlockingReader do
+  @moduledoc false
+  # A stubbed ChunkReader whose FIRST `read_chunk/2` BLOCKS (announcing itself, then waiting for
+  # `:proceed`) — so a test can hold the coordinator inside a synchronous chunk read while a
+  # concurrent `handle_transaction` sink call is dispatched (review F1: the assembler→coordinator
+  # call must be `:infinity`, or a slow read times it out and tears the backfill down).
+  def read_chunk(%{notify: notify}, _cursor) do
+    send(notify, {:reader_entered, self()})
+
+    receive do
+      :proceed -> {:done, %{notify: notify, done: true}}
+    after
+      2_000 -> {:done, %{notify: notify, done: true}}
+    end
+  end
+
+  def read_chunk(%{done: true} = reader, _cursor), do: {:done, reader}
+end
+
 defmodule Capstan.Snapshot.CoordinatorTest do
   @moduledoc """
   Task 8 (C2) — `Capstan.Snapshot.Coordinator`, the sink-interposing GenServer that runs the
@@ -617,6 +636,46 @@ defmodule Capstan.Snapshot.CoordinatorTest do
       assert rendered =~ ":snapshot"
       refute rendered =~ "SENTINEL_4242"
       refute rendered =~ "card_number"
+    end
+  end
+
+  ## ===========================================================================
+  ## the assembler→coordinator sink call is :infinity (review F1)
+  ## ===========================================================================
+
+  describe "sink dispatch survives a coordinator busy in a slow chunk read (F1)" do
+    test "a handle_transaction call is served (not timed out) while the coordinator blocks in read_chunk" do
+      # The AssemblerServer dispatches handle_transaction/1 SYNCHRONOUSLY while the coordinator may
+      # be busy for seconds inside a chunk read (a contended LOCK TABLES, retried per the budget).
+      # The call MUST be :infinity — a default 5s timeout would fire mid-read and tear a healthy
+      # backfill down. Here the coordinator blocks in read_chunk at bootstrap; a concurrent sink
+      # call queues behind it and is served after the read unblocks.
+      # RED (tamper :infinity -> a short finite timeout): the queued call exit(:timeout) before
+      # :proceed, and Task.await re-raises the exit.
+      coord =
+        start_coordinator(store_backed(), snap_state(%{table() => int_table(10)}),
+          readers: %{table() => %{notify: self()}},
+          table_order: [table()],
+          chunk_reader: Capstan.Snapshot.CoordinatorTest.BlockingReader
+        )
+
+      # The coordinator is now blocked inside read_chunk (handle_continue :bootstrap).
+      assert_receive {:reader_entered, ^coord}, 1_000
+
+      t = txn([insert(5)])
+      task = Task.async(fn -> Coordinator.handle_transaction(t) end)
+
+      # The call is queued behind the blocked read — not served yet.
+      refute Task.yield(task, 200)
+
+      # Unblock the read (the receive runs IN the coordinator process); drive completes, then the
+      # queued handle_transaction is processed.
+      send(coord, :proceed)
+
+      assert {:ok, position} = Task.await(task, 2_000)
+      assert position == t.position
+      assert_receive {:handle_transaction, forwarded}
+      assert forwarded.changes == [insert(5)]
     end
   end
 

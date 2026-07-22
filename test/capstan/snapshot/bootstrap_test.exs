@@ -20,6 +20,25 @@ defmodule Capstan.Snapshot.BootstrapTest.FaultyStore do
   def write(_store, _state), do: :ok
 end
 
+defmodule Capstan.Snapshot.BootstrapTest.RaisingCheckpointStore do
+  @moduledoc false
+  # A checkpoint store that RAISES on write (a realistic durable store on a transient backing-DB
+  # outage — the behaviour contract is {:error}, but Ecto/DBConnection RAISE). read/1 succeeds so
+  # the bootstrap reaches seed_checkpoint's write, AFTER the query is open (S-1).
+  @behaviour Capstan.CheckpointStore
+  def read(_store), do: {:ok, nil}
+  def write(_store, _gtid_set), do: raise("checkpoint store DB down")
+end
+
+defmodule Capstan.Snapshot.BootstrapTest.RaisingSnapshotStore do
+  @moduledoc false
+  # A snapshot store that RAISES on the initial read (before any source connection opens) — the
+  # S-1 shape-gap: bootstrap must fail closed value-free, never an uncaught exception.
+  @behaviour Capstan.SnapshotStore
+  def read(_store), do: raise("snapshot store DB down")
+  def write(_store, _state), do: :ok
+end
+
 defmodule Capstan.Snapshot.BootstrapTest.SnapshotSink do
   @moduledoc false
   # A valid snapshot-mode sink: handle_transaction/1 + handle_schema_change/2 + handle_snapshot/2.
@@ -74,7 +93,13 @@ defmodule Capstan.Snapshot.BootstrapTest do
   alias Capstan.SnapshotStore
   alias Capstan.SnapshotStore.InMemory, as: SnapshotInMemory
 
-  alias Capstan.Snapshot.BootstrapTest.{CompleteStore, FaultyStore, SnapshotSink}
+  alias Capstan.Snapshot.BootstrapTest.{
+    CompleteStore,
+    FaultyStore,
+    RaisingCheckpointStore,
+    RaisingSnapshotStore,
+    SnapshotSink
+  }
 
   @loopback {127, 0, 0, 1}
 
@@ -254,6 +279,50 @@ defmodule Capstan.Snapshot.BootstrapTest do
                  %{snapshot_config() | tables: :all},
                  {CheckpointInMemory, cstore},
                  {SnapshotInMemory, sstore}
+               )
+    end
+
+    test "a store that RAISES during build_backfill CLOSES the query + fails closed (S-1, no leak)" do
+      # A durable store that RAISES (not {:error}) once the query is open must NOT leak the
+      # authenticated query connection. finish_or_close/6 rescues, closes the query, and returns a
+      # value-free {:error}. Socket 2 (the query conn) MUST be closed afterward.
+      connect_fun =
+        scripted_connect_fun(
+          [
+            [uuid_result(@uuid_a)],
+            [@good_precond, uuid_result(@uuid_a), {1, [[gt("1-100")]]}]
+          ],
+          self()
+        )
+
+      {:ok, sstore} = SnapshotInMemory.start_link([])
+
+      assert {:error, :snapshot_bootstrap_crashed} =
+               Snapshot.bootstrap(
+                 [connection: fake_conn(), connect_fun: connect_fun],
+                 snapshot_config(),
+                 {RaisingCheckpointStore, :ignored},
+                 {SnapshotInMemory, sstore}
+               )
+
+      # The query (2nd establish) is closed — no leaked source connection. RED (remove the
+      # finish_or_close query-close): the bootstrap/4 rescue still returns {:error}, but the query
+      # socket stays OPEN, so the send below succeeds instead of {:error, :closed}.
+      assert_receive {:mock_socket, 2, {:gen_tcp, query_sock}}
+      assert {:error, :closed} = :gen_tcp.send(query_sock, "x")
+    end
+
+    test "a SnapshotStore that RAISES on the initial read fails closed :snapshot_bootstrap_crashed (S-1 shape-gap)" do
+      # A store raising on the FIRST read (before any source connection opens) — value-free
+      # {:error}, never an uncaught exception out of start_link/1. RED: bootstrap raises uncaught.
+      {:ok, cstore} = CheckpointInMemory.start_link([])
+
+      assert {:error, :snapshot_bootstrap_crashed} =
+               Snapshot.bootstrap(
+                 [connection: fake_conn()],
+                 snapshot_config(),
+                 {CheckpointInMemory, cstore},
+                 {RaisingSnapshotStore, :ignored}
                )
     end
 
@@ -464,16 +533,27 @@ defmodule Capstan.Snapshot.BootstrapTest do
   ## helpers — scripted mock MySQL server (the Capstan.QueryTest idiom)
   ## ---------------------------------------------------------------------------
 
-  defp scripted_connect_fun(sequences) do
+  defp scripted_connect_fun(sequences, capture \\ nil) do
     {:ok, agent} = Agent.start_link(fn -> sequences end)
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
     on_exit(fn -> if Process.alive?(agent), do: Agent.stop(agent) end)
+    on_exit(fn -> if Process.alive?(counter), do: Agent.stop(counter) end)
 
     fn _connection ->
       case pop_script(agent) do
         :none -> {:error, :no_more_scripts}
-        responses -> {:ok, spawn_mock_server(responses), %{}}
+        responses -> establish_mock(responses, counter, capture)
       end
     end
+  end
+
+  # Spawn the mock server for one establish; optionally report the socket (with its 1-based
+  # establish index) to a capture pid so a leak test can assert the query conn (index 2) is closed.
+  defp establish_mock(responses, counter, capture) do
+    socket = spawn_mock_server(responses)
+    index = Agent.get_and_update(counter, &{&1 + 1, &1 + 1})
+    if capture, do: send(capture, {:mock_socket, index, socket})
+    {:ok, socket, %{}}
   end
 
   defp pop_script(agent) do

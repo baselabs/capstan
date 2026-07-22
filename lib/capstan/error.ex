@@ -40,6 +40,7 @@ defmodule Capstan.Error do
           | :snapshot_chunk_read_failed
           | :snapshot_query_connect_failed
           | :snapshot_bootstrap_gtid_read_failed
+          | :snapshot_bootstrap_crashed
           | :snapshot_state_read_failed
           | :snapshot_state_write_failed
           | :snapshot_coordinator_down

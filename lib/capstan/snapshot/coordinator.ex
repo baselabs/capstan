@@ -153,7 +153,14 @@ defmodule Capstan.Snapshot.Coordinator do
   @spec handle_transaction(Capstan.Transaction.t()) ::
           {:ok, Capstan.Position.t()} | {:error, term()}
   def handle_transaction(txn) do
-    GenServer.call(__MODULE__, {:handle_transaction, txn})
+    # `:infinity`, deliberately (review F1). The AssemblerServer dispatches this sink call
+    # SYNCHRONOUSLY, and the coordinator may be busy for seconds in a `handle_info` watermark
+    # advance driving a `ChunkReader.read_chunk` (a contended `LOCK TABLES … READ` waits up to
+    # `lock_wait_timeout` and is retried per the budget — built to RIDE OUT transient contention).
+    # A default 5 s call timeout would fire mid-read and tear a HEALTHY backfill down at the 5 s
+    # mark, defeating the reader's retry budget. The pipeline is serial + back-pressured, so a
+    # timeout here buys nothing — the assembler waits for the coordinator by design.
+    GenServer.call(__MODULE__, {:handle_transaction, txn}, :infinity)
   end
 
   @doc """
@@ -164,7 +171,9 @@ defmodule Capstan.Snapshot.Coordinator do
   @spec handle_schema_change(Capstan.SchemaChange.t(), Capstan.Position.t()) ::
           :ok | {:error, term()}
   def handle_schema_change(schema_change, position) do
-    GenServer.call(__MODULE__, {:handle_schema_change, schema_change, position})
+    # `:infinity` for the same reason as `handle_transaction/1` (review F1) — the assembler's
+    # synchronous sink dispatch must wait out a coordinator busy in a slow chunk read.
+    GenServer.call(__MODULE__, {:handle_schema_change, schema_change, position}, :infinity)
   end
 
   ## ---------------------------------------------------------------------------
