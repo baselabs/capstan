@@ -1,7 +1,7 @@
 defmodule Capstan.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/baselabs/capstan"
 
   def project do
@@ -88,7 +88,8 @@ defmodule Capstan.MixProject do
         "docs/adr/0001-position-and-dedup-model.md",
         "docs/adr/0002-fail-closed-server-preconditions.md",
         "docs/adr/0003-transaction-shape-and-checkpoint-semantics.md",
-        "docs/adr/0004-c1-scope-lib-owned-checkpoint-only.md"
+        "docs/adr/0004-c1-scope-lib-owned-checkpoint-only.md",
+        "docs/adr/0005-initial-snapshot-cursor-gate-brief-lock.md"
       ],
       groups_for_modules: [
         "Consumer API": [
@@ -101,7 +102,11 @@ defmodule Capstan.MixProject do
           Capstan.SchemaChange,
           Capstan.Position,
           Capstan.Gtid,
-          Capstan.Error
+          Capstan.Error,
+          Capstan.SnapshotStore,
+          Capstan.SnapshotStore.InMemory,
+          Capstan.Snapshot.Meta,
+          Capstan.Snapshot.State
         ],
         Internals: [
           Capstan.Assembler,
@@ -119,7 +124,13 @@ defmodule Capstan.MixProject do
           Capstan.Casting.Types,
           Capstan.Protocol.Command,
           Capstan.Protocol.Handshake,
-          Capstan.Protocol.Packet
+          Capstan.Protocol.Packet,
+          Capstan.Snapshot,
+          Capstan.Snapshot.Coordinator,
+          Capstan.Snapshot.CursorGate,
+          Capstan.Snapshot.Chunk,
+          Capstan.Snapshot.ChunkReader,
+          Capstan.Snapshot.PrimaryKey
         ]
       ]
     ]

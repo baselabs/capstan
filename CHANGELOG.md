@@ -6,6 +6,8 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-22
+
 ### Added — C2 initial snapshot
 
 A consistent backfill of the rows that pre-exist a pipeline's start, woven into the
@@ -46,6 +48,13 @@ operation, fail-closed on every silent-loss condition, Rule 1 end-to-end. **Addi
   same window: on restart the cursor-gate forwards a streamed delete of an already-delivered key
   (`k ≤ delivered_pk`) so the row is swept, never left as a phantom. Effect-once across the crash
   window is the deferred sink-owned path (ROADMAP C1a).
+
+### Docs & tooling
+
+- A test-environment guide (`docs/testing.md`) and a runnable minimal example consumer
+  (`examples/print_consumer.exs`). ADR-0005 now ships in the generated documentation.
+- Removed a reference to a private repository from the README and ADR-0001 (the downstream-consumer
+  example is now stated generically).
 
 ## [0.1.0] - 2026-07-21
 
@@ -96,4 +105,6 @@ C1 ships **lib-owned checkpoint mode** and **resume-from-durable-checkpoint**
 (`:sink_owned_mode_unsupported`, `:start_position_override_unsupported`,
 `:start_position_current_unsupported`).
 
-[Unreleased]: https://github.com/baselabs/capstan/commits/main
+[Unreleased]: https://github.com/baselabs/capstan/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/baselabs/capstan/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/baselabs/capstan/releases/tag/v0.1.0
