@@ -87,9 +87,9 @@ ensure_sha2_user() {
   docker exec -i "$name" mysql -uroot -p"${ROOT_PW}" 2>/dev/null <<SQL
 CREATE USER IF NOT EXISTS '${SHA2_USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${SHA2_PW}';
 ALTER USER '${SHA2_USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${SHA2_PW}';
-GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO '${SHA2_USER}'@'%';
+GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT, LOCK TABLES ON *.* TO '${SHA2_USER}'@'%';
 SQL
-  echo "  [$name] caching_sha2 user '${SHA2_USER}' ensured (REPLICATION SLAVE, REPLICATION CLIENT, SELECT)"
+  echo "  [$name] caching_sha2 user '${SHA2_USER}' ensured (REPLICATION SLAVE, REPLICATION CLIENT, SELECT, LOCK TABLES)"
 }
 
 ONLY=""
