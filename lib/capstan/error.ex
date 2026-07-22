@@ -28,6 +28,21 @@ defmodule Capstan.Error do
           | :sink_owned_mode_unsupported
           | :start_position_current_unsupported
           | :start_position_override_unsupported
+          # C2 initial-snapshot fail-closed halts (one distinct reason per silent-loss
+          # condition; each a bare atom — `from/1`'s `| atom()` branch carries them value-free).
+          | :sink_missing_handle_snapshot
+          | :snapshot_table_not_captured
+          | :snapshot_table_no_primary_key
+          | :snapshot_pk_unsupported_type
+          | :snapshot_source_mismatch
+          | :snapshot_lock_unavailable
+          | :snapshot_schema_drifted
+          | :snapshot_chunk_read_failed
+          | :snapshot_query_connect_failed
+          | :snapshot_bootstrap_gtid_read_failed
+          | :snapshot_state_read_failed
+          | :snapshot_state_write_failed
+          | :snapshot_coordinator_down
           | :unknown
           | atom()
 

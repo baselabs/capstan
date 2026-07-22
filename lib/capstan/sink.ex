@@ -79,5 +79,30 @@ defmodule Capstan.Sink do
   @callback handle_schema_change(Capstan.SchemaChange.t(), Capstan.Position.t()) ::
               :ok | {:error, term()}
 
-  @optional_callbacks checkpoint: 0, handle_transaction: 1, handle_schema_change: 2
+  @doc """
+  Deliver one initial-snapshot backfill chunk (C2; required only in snapshot mode).
+
+  The first argument is a **concrete list** of `%Capstan.Change{op: :snapshot}` — a bounded,
+  fully-materialized chunk (at most one chunk is buffered), NOT the lazy single-pass
+  `Enumerable.t()` of `handle_transaction/1` — so a list here is correct and must not be
+  "widened" to `Enumerable.t()`. A snapshot chunk is **not** a committed transaction: it
+  carries no GTID and no atomicity, which is why it is a distinct callback (routing it
+  through `handle_transaction/1` would fabricate a GTID and break ADR-0001 / `member?/2`).
+
+  The `Capstan.Snapshot.Meta` carries only value-free structural identity (schema/table, the
+  chunk's exact GTID position string, chunk sequence, final-chunk flag).
+
+  **Semantics are upsert-by-PK** — a snapshot row may be superseded by a later streamed
+  change, so a compliant sink MUST apply each chunk row as an upsert keyed on its primary
+  key. This is a HARD C2 precondition (the strict-once suppression + the bounded crash-window
+  re-emit both rely on it to converge). Returns `:ok`, or a value-free `{:error, term()}` to
+  halt the pipeline fail-closed.
+  """
+  @callback handle_snapshot([Capstan.Change.t()], Capstan.Snapshot.Meta.t()) ::
+              :ok | {:error, term()}
+
+  @optional_callbacks checkpoint: 0,
+                      handle_transaction: 1,
+                      handle_schema_change: 2,
+                      handle_snapshot: 2
 end
