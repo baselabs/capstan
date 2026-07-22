@@ -10,6 +10,11 @@ defmodule Capstan.Config do
       socket and refuses to start unless the source's binlog is configured for
       lossless row-based CDC.
 
+  Two additive C2 helpers share this fail-closed posture: `validate_snapshot/1` (pure —
+  normalises the `:snapshot` block, or `{:ok, nil}` when absent so the pure-C1 path is
+  byte-for-byte unchanged) and `read_server_uuid/1` (the source-identity read reused across
+  BOTH connections, design Q-src / Ch8).
+
   ## Server preconditions (ADR-0002)
 
   `check_preconditions/1` reads five global variables in a single query and refuses
@@ -51,11 +56,14 @@ defmodule Capstan.Config do
   alias Capstan.Protocol.Packet
 
   @default_max_command_retries 5
+  @default_snapshot_chunk_size 4096
   @known_auth_plugins [:caching_sha2_password, :mysql_native_password]
 
   @precondition_query "SELECT @@global.binlog_format, @@global.binlog_row_image, " <>
                         "@@global.binlog_row_metadata, @@global.binlog_row_value_options, " <>
                         "@@global.gtid_mode"
+
+  @server_uuid_query "SELECT @@server_uuid"
 
   @typedoc "The normalised configuration `validate/1` returns on success."
   @type t :: %{
@@ -76,6 +84,19 @@ defmodule Capstan.Config do
           | :binlog_row_value_options_not_empty
           | :gtid_mode_not_on
           | :precondition_query_failed
+
+  @typedoc """
+  The normalised initial-snapshot configuration (C2), or `nil` when `:snapshot` is absent
+  (pure C1). `tables` is the snapshot set (a concrete `{schema, table}` list, or `:all` when
+  it defaults to an `:all` capture — resolved to a concrete list at bootstrap). `store` is the
+  durable snapshot store `{module, start_link_options}`. `chunk_size` bounds the brief lock's
+  hold + buffered memory.
+  """
+  @type snapshot_config :: %{
+          tables: [{String.t(), String.t()}] | :all,
+          store: {module(), keyword()},
+          chunk_size: pos_integer()
+        }
 
   @doc """
   Validates raw `start_link` options into a normalised config map, or returns a
@@ -145,6 +166,65 @@ defmodule Capstan.Config do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  @doc """
+  Normalises the initial-snapshot `:snapshot` block, or `{:ok, nil}` when it is absent (pure C1).
+
+  An absent `:snapshot` key returns `{:ok, nil}` and touches nothing — the pure-C1 path is
+  byte-for-byte unchanged. A present block normalises to a `snapshot_config()`:
+
+    * `tables` — the snapshot set. Defaults to the capture allowlist (`:tables`, itself `:all`
+      by default). When given it MUST be a non-empty list of `{schema, table}` binary tuples;
+      the `⊆ captured` check is `Capstan.Pipeline.validate_snapshot_tables/2`.
+    * `store` — REQUIRED, shaped like `checkpoint_store`: `[module: impl, options: keyword()]`.
+      A missing or mis-shaped store fails closed `:config_invalid` (a half-configured backfill
+      would silently lose its resumability durability).
+    * `chunk_size` — a POSITIVE integer, default `#{@default_snapshot_chunk_size}`.
+
+  Any mis-shaped field fails closed with the value-free `:config_invalid` (the generic
+  mis-shaped-option refusal, as elsewhere in this module).
+  """
+  @spec validate_snapshot(keyword()) :: {:ok, snapshot_config() | nil} | {:error, :config_invalid}
+  def validate_snapshot(opts) when is_list(opts) do
+    case Keyword.get(opts, :snapshot) do
+      nil ->
+        {:ok, nil}
+
+      snapshot when is_list(snapshot) ->
+        if Keyword.keyword?(snapshot),
+          do: normalise_snapshot(snapshot, opts),
+          else: {:error, :config_invalid}
+
+      _ ->
+        {:error, :config_invalid}
+    end
+  end
+
+  def validate_snapshot(_opts), do: {:error, :config_invalid}
+
+  @doc """
+  Reads `@@server_uuid` over an already-authenticated `socket` — the source-identity primitive
+  (design Q-src / Ch8).
+
+  The bootstrap reads the STREAM connection's identity through this helper and pins the
+  `Capstan.Query` connection against it (`:expected_server_uuid`), so a query connection that
+  silently reconnects to a DIFFERENT replica mid-backfill is caught (`:snapshot_source_mismatch`)
+  — `@@server_uuid` is compared across BOTH connections. Returns `{:ok, uuid}` (a value-free
+  structural identity string) or the value-free `{:error, :server_uuid_read_failed}`; a
+  transport/query fault is scrubbed to the bare reason, never the raw term (Rule 1).
+  """
+  @spec read_server_uuid(Packet.socket()) ::
+          {:ok, String.t()} | {:error, :server_uuid_read_failed}
+  def read_server_uuid(socket) do
+    case Command.query(socket, @server_uuid_query) do
+      {:ok, [[uuid]]} when is_binary(uuid) -> {:ok, uuid}
+      _other -> {:error, :server_uuid_read_failed}
+    end
+  rescue
+    _exception -> {:error, :server_uuid_read_failed}
+  catch
+    _kind, _reason -> {:error, :server_uuid_read_failed}
   end
 
   ## ---------------------------------------------------------------------------
@@ -287,6 +367,66 @@ defmodule Capstan.Config do
         {:error, :config_invalid}
     end
   end
+
+  ## ---------------------------------------------------------------------------
+  ## snapshot config normalization (pure) — additive; absent :snapshot ⇒ pure C1
+  ## ---------------------------------------------------------------------------
+
+  defp normalise_snapshot(snapshot, opts) do
+    with {:ok, tables} <- fetch_snapshot_tables(snapshot, opts),
+         {:ok, store} <- fetch_snapshot_store(snapshot),
+         {:ok, chunk_size} <- fetch_snapshot_chunk_size(snapshot) do
+      {:ok, %{tables: tables, store: store, chunk_size: chunk_size}}
+    end
+  end
+
+  # The snapshot table set defaults to the capture allowlist (`:tables`, itself `:all` by
+  # default). When given explicitly it must be a NON-EMPTY list of `{schema, table}` binary
+  # tuples; the `⊆ captured` subset check lives in `Capstan.Pipeline.validate_snapshot_tables/2`.
+  defp fetch_snapshot_tables(snapshot, opts) do
+    case Keyword.get(snapshot, :tables) do
+      nil ->
+        {:ok, Keyword.get(opts, :tables, :all)}
+
+      tables when is_list(tables) and tables != [] ->
+        if Enum.all?(tables, &table_tuple?/1), do: {:ok, tables}, else: {:error, :config_invalid}
+
+      _ ->
+        {:error, :config_invalid}
+    end
+  end
+
+  defp table_tuple?({schema, table}) when is_binary(schema) and is_binary(table), do: true
+  defp table_tuple?(_), do: false
+
+  # The durable snapshot store is REQUIRED in snapshot mode, shaped exactly like
+  # `checkpoint_store`: `[module: impl, options: keyword()]`. A missing/mis-shaped store fails
+  # closed — a half-configured backfill would silently lose its resumability durability.
+  defp fetch_snapshot_store(snapshot) do
+    with store when is_list(store) <- Keyword.get(snapshot, :store),
+         true <- Keyword.keyword?(store),
+         module when is_atom(module) and not is_nil(module) <- Keyword.get(store, :module),
+         options when is_list(options) <- Keyword.get(store, :options, []),
+         true <- Keyword.keyword?(options) do
+      {:ok, {module, options}}
+    else
+      _ -> {:error, :config_invalid}
+    end
+  end
+
+  # rows per chunk (bounds the brief lock's hold + buffered memory), default 4096. A present
+  # value must be a POSITIVE integer; zero, negative, or non-integer is a config error, never a
+  # silent fallback that would mask a mis-set bound.
+  defp fetch_snapshot_chunk_size(snapshot) do
+    case Keyword.get(snapshot, :chunk_size, @default_snapshot_chunk_size) do
+      n when is_integer(n) and n > 0 -> {:ok, n}
+      _ -> {:error, :config_invalid}
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## option validation (pure) — TLS
+  ## ---------------------------------------------------------------------------
 
   # F6/Q17: mirror Handshake's connect-time guard at config time. With TLS on, an
   # explicit verification choice is required — a CA source or an explicit `verify:`;

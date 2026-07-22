@@ -63,9 +63,20 @@ defmodule Capstan do
   `Capstan.Config` (`:server_id_required`, `:config_invalid`,
   `:tls_verification_unspecified`), from `Capstan.Pipeline` (`:invalid_sink`,
   `:sink_missing_handle_transaction`, `:sink_missing_checkpoint`,
-  `:sink_missing_handle_schema_change`), or from this module
+  `:sink_missing_handle_schema_change`, `:sink_missing_handle_snapshot`,
+  `:snapshot_table_not_captured`), or from this module
   (`:sink_owned_mode_unsupported`, `:checkpoint_store_required`,
   `:start_position_override_unsupported`, `:start_position_current_unsupported`).
+
+  ## Initial snapshot (C2)
+
+  An optional `snapshot: [tables: […], store: [module: …], chunk_size: 4096]` block enables a
+  consistent backfill of pre-existing rows woven into the running stream. It is **additive**:
+  with no `:snapshot` key the pipeline is pure C1, byte-for-byte unchanged. In snapshot mode the
+  sink must implement `c:Capstan.Sink.handle_snapshot/2` (else `:sink_missing_handle_snapshot`),
+  the snapshot tables must be a subset of the capture allowlist (else
+  `:snapshot_table_not_captured`), and a missing/mis-shaped `store` is refused `:config_invalid`.
+  `:current` / `%Capstan.Position{}` start positions stay refused fail-closed (no C1b).
   """
 
   alias Capstan.Config
@@ -82,8 +93,10 @@ defmodule Capstan do
          :ok <- Pipeline.validate_sink(opts),
          :ok <- require_lib_mode(opts),
          :ok <- validate_checkpoint_store(opts),
-         :ok <- validate_start_position(opts) do
-      Capstan.Supervisor.start_link(wiring(config, opts))
+         :ok <- validate_start_position(opts),
+         {:ok, snapshot} <- Config.validate_snapshot(opts),
+         :ok <- Pipeline.validate_snapshot_tables(opts, snapshot) do
+      Capstan.Supervisor.start_link(wiring(config, opts, snapshot))
     end
   end
 
@@ -143,8 +156,11 @@ defmodule Capstan do
     end
   end
 
-  defp wiring(config, opts) do
-    [
+  # Threads the validated wiring to the supervisor. When `snapshot` is `nil` (pure C1) the
+  # keyword is IDENTICAL to C1's — byte-for-byte unchanged; the `:snapshot` key is appended
+  # only in snapshot mode, so the C1 supervisor sees exactly what it always saw.
+  defp wiring(config, opts, snapshot) do
+    base = [
       sink: Keyword.fetch!(opts, :sink),
       checkpoint_store: Keyword.fetch!(opts, :checkpoint_store),
       connection: config.connection,
@@ -153,5 +169,10 @@ defmodule Capstan do
       start_position: Keyword.get(opts, :start_position, :checkpoint),
       tables: Keyword.get(opts, :tables, :all)
     ]
+
+    case snapshot do
+      nil -> base
+      %{} = snapshot_config -> base ++ [snapshot: snapshot_config]
+    end
   end
 end

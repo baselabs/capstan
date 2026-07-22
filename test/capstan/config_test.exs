@@ -293,6 +293,147 @@ defmodule Capstan.ConfigTest do
   end
 
   ## ---------------------------------------------------------------------------
+  ## Snapshot config normalization (C2) — additive; absent :snapshot ⇒ pure C1
+  ## ---------------------------------------------------------------------------
+
+  describe "validate_snapshot/1 — snapshot block normalization" do
+    test "an absent :snapshot key normalizes to {:ok, nil} (pure C1, byte-for-byte)" do
+      assert {:ok, nil} = Config.validate_snapshot(opts())
+    end
+
+    test "a full snapshot block normalizes tables / store / chunk_size" do
+      o =
+        opts(
+          tables: [{"orders", "orders"}, {"orders", "customers"}],
+          snapshot: [
+            tables: [{"orders", "orders"}],
+            store: [module: MyApp.SnapStore, options: [name: :snap]],
+            chunk_size: 1000
+          ]
+        )
+
+      assert {:ok, snap} = Config.validate_snapshot(o)
+      assert snap.tables == [{"orders", "orders"}]
+      assert snap.store == {MyApp.SnapStore, [name: :snap]}
+      assert snap.chunk_size == 1000
+    end
+
+    test "snapshot tables default to the captured allowlist when omitted" do
+      o =
+        opts(
+          tables: [{"orders", "orders"}, {"orders", "customers"}],
+          snapshot: [store: [module: MyApp.SnapStore]]
+        )
+
+      assert {:ok, snap} = Config.validate_snapshot(o)
+      assert snap.tables == [{"orders", "orders"}, {"orders", "customers"}]
+    end
+
+    test "snapshot tables default to :all when capture is :all and tables omitted" do
+      o = opts(tables: :all, snapshot: [store: [module: MyApp.SnapStore]])
+      assert {:ok, snap} = Config.validate_snapshot(o)
+      assert snap.tables == :all
+    end
+
+    test "chunk_size defaults to 4096 when omitted" do
+      o = opts(snapshot: [store: [module: MyApp.SnapStore]])
+      assert {:ok, snap} = Config.validate_snapshot(o)
+      assert snap.chunk_size == 4096
+    end
+
+    test "store options default to [] when omitted" do
+      o = opts(snapshot: [store: [module: MyApp.SnapStore]])
+      assert {:ok, snap} = Config.validate_snapshot(o)
+      assert snap.store == {MyApp.SnapStore, []}
+    end
+
+    test "a missing store in snapshot mode fails closed (value-free)" do
+      o = opts(snapshot: [tables: [{"orders", "orders"}]])
+      assert {:error, :config_invalid} = Config.validate_snapshot(o)
+    end
+
+    test "a store without a :module fails closed" do
+      o = opts(snapshot: [store: [options: []]])
+      assert {:error, :config_invalid} = Config.validate_snapshot(o)
+    end
+
+    test "a store with a non-atom :module fails closed" do
+      o = opts(snapshot: [store: [module: "not-a-module"]])
+      assert {:error, :config_invalid} = Config.validate_snapshot(o)
+    end
+
+    test "a non-list :snapshot fails closed" do
+      o = opts(snapshot: :yes)
+      assert {:error, :config_invalid} = Config.validate_snapshot(o)
+    end
+
+    test "a zero chunk_size fails closed" do
+      o = opts(snapshot: [store: [module: MyApp.SnapStore], chunk_size: 0])
+      assert {:error, :config_invalid} = Config.validate_snapshot(o)
+    end
+
+    test "a negative chunk_size fails closed" do
+      o = opts(snapshot: [store: [module: MyApp.SnapStore], chunk_size: -1])
+      assert {:error, :config_invalid} = Config.validate_snapshot(o)
+    end
+
+    test "a non-integer chunk_size fails closed" do
+      o = opts(snapshot: [store: [module: MyApp.SnapStore], chunk_size: "4096"])
+      assert {:error, :config_invalid} = Config.validate_snapshot(o)
+    end
+
+    test "an empty snapshot tables list fails closed" do
+      o = opts(snapshot: [tables: [], store: [module: MyApp.SnapStore]])
+      assert {:error, :config_invalid} = Config.validate_snapshot(o)
+    end
+
+    test "a snapshot tables entry that is not a {schema, table} binary tuple fails closed" do
+      o = opts(snapshot: [tables: [{"orders", :orders}], store: [module: MyApp.SnapStore]])
+      assert {:error, :config_invalid} = Config.validate_snapshot(o)
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## read_server_uuid/1 — source-identity read (Q-src / Ch8), over a mock socket
+  ##
+  ## Fed a CONSTRUCTED single-column text resultset, mirroring the precondition-gate
+  ## idiom above. Every value on the wire is a TEXT STRING (MySQL simple-query results).
+  ## ---------------------------------------------------------------------------
+
+  describe "read_server_uuid/1 — source-identity read" do
+    test "reads @@server_uuid from a single-column text resultset" do
+      assert {:ok, "3f2b0000-uuid"} = uuid_result(["3f2b0000-uuid"])
+    end
+
+    test "a wrong-width resultset fails closed :server_uuid_read_failed" do
+      assert {:error, :server_uuid_read_failed} = uuid_result_ncols(2, ["a", "b"])
+    end
+
+    test "an OK packet (no resultset) fails closed :server_uuid_read_failed" do
+      assert {:error, :server_uuid_read_failed} = uuid_ok_packet_result()
+    end
+
+    test "a server error while reading fails closed, never a spurious :ok" do
+      assert {:error, :server_uuid_read_failed} = uuid_query_error_result(1227)
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## read_server_uuid/1 — live PASS against mysql-cdc-probe (Step 3)
+  ## ---------------------------------------------------------------------------
+
+  describe "read_server_uuid/1 — live against mysql-cdc-probe" do
+    @describetag :live
+
+    test "reads a non-empty @@server_uuid from the substrate" do
+      socket = live_connect()
+      assert {:ok, uuid} = Config.read_server_uuid(socket)
+      assert is_binary(uuid) and uuid != ""
+      close(socket)
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
   ## helpers — option builders
   ## ---------------------------------------------------------------------------
 
@@ -376,6 +517,46 @@ defmodule Capstan.ConfigTest do
   # An empty string encodes as <<0>> and decodes back to "".
   defp encode_text_row(values) do
     Enum.reduce(values, <<>>, fn value, acc -> acc <> <<byte_size(value)::8, value::binary>> end)
+  end
+
+  # Serves a single-row text resultset carrying `values` (one column each), then drives
+  # `read_server_uuid/1` over it (query issuance → text-resultset decode).
+  defp uuid_result(values), do: uuid_result_ncols(length(values), values)
+
+  defp uuid_result_ncols(ncols, values) do
+    socket =
+      mock_client(fn srv ->
+        {0, _request} = t_recv_pkt(srv)
+        t_send(srv, <<ncols>>, 1)
+        Enum.each(1..ncols, fn i -> t_send(srv, "coldef_#{i}", i + 1) end)
+        t_send(srv, encode_text_row(values), ncols + 2)
+        t_send(srv, <<0xFE, 0, 0, 2, 0, 0, 0>>, ncols + 3)
+      end)
+
+    Config.read_server_uuid(socket)
+  end
+
+  # Serves an OK packet (no resultset) — the helper must refuse fail-closed, never treat
+  # "no rows" as a read uuid.
+  defp uuid_ok_packet_result do
+    socket =
+      mock_client(fn srv ->
+        {0, _request} = t_recv_pkt(srv)
+        t_send(srv, <<0x00, 0, 0, 2, 0, 0, 0>>, 1)
+      end)
+
+    Config.read_server_uuid(socket)
+  end
+
+  # Serves an ERR packet in place of the resultset — the helper must surface it fail-closed.
+  defp uuid_query_error_result(code) do
+    socket =
+      mock_client(fn srv ->
+        {0, _request} = t_recv_pkt(srv)
+        t_send(srv, <<0xFF, code::16-little, "#HY000the server_uuid read failed">>, 1)
+      end)
+
+    Config.read_server_uuid(socket)
   end
 
   defp mock_client(server_fun) do

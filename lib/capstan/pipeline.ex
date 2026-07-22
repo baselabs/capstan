@@ -32,8 +32,10 @@ defmodule Capstan.Pipeline do
   """
 
   alias Capstan.AssemblerServer
+  alias Capstan.Config
   alias Capstan.Connection
   alias Capstan.Position
+  alias Capstan.Snapshot.Coordinator
 
   @typedoc "A value-free sink-validation refusal."
   @type sink_error ::
@@ -41,6 +43,7 @@ defmodule Capstan.Pipeline do
           | :sink_missing_handle_transaction
           | :sink_missing_checkpoint
           | :sink_missing_handle_schema_change
+          | :sink_missing_handle_snapshot
 
   @doc """
   Validate the configured `:sink` against its checkpoint mode's required callbacks.
@@ -68,6 +71,12 @@ defmodule Capstan.Pipeline do
       not function_exported?(sink, :handle_schema_change, 2) ->
         {:error, :sink_missing_handle_schema_change}
 
+      # C2: in SNAPSHOT mode the sink must implement handle_snapshot/2 (upsert-by-PK backfill
+      # delivery). Gated on snapshot_mode? so an absent :snapshot block leaves this byte-for-byte
+      # the C1 required-set — a C1 sink is never forced to stub a callback its mode never calls.
+      snapshot_mode?(opts) and not function_exported?(sink, :handle_snapshot, 2) ->
+        {:error, :sink_missing_handle_snapshot}
+
       true ->
         :ok
     end
@@ -79,6 +88,45 @@ defmodule Capstan.Pipeline do
   @spec lib_mode?(keyword()) :: boolean()
   def lib_mode?(opts) when is_list(opts) do
     Keyword.has_key?(opts, :checkpoint_store) and Keyword.get(opts, :checkpoint_store) != nil
+  end
+
+  @doc """
+  Is this an initial-snapshot pipeline? True iff a non-nil `:snapshot` block is configured
+  (mirrors `lib_mode?/1`). An absent (or `nil`) `:snapshot` key ⇒ pure C1.
+  """
+  @spec snapshot_mode?(keyword()) :: boolean()
+  def snapshot_mode?(opts) when is_list(opts) do
+    Keyword.has_key?(opts, :snapshot) and Keyword.get(opts, :snapshot) != nil
+  end
+
+  @doc """
+  Refuse a snapshot table outside the capture allowlist (`:snapshot_table_not_captured`).
+
+  Every snapshot table MUST be captured by the stream: the stream is what delivers the
+  `gtid > G` changes the cursor-gate suppresses from the chunk, so a snapshot table the stream
+  does not carry would silently gap. `:all` capture trivially includes every snapshot table.
+  `snapshot` is the normalised `Capstan.Config.snapshot_config()` (or `nil` in pure C1 — a
+  no-op `:ok`).
+  """
+  @spec validate_snapshot_tables(keyword(), Config.snapshot_config() | nil) ::
+          :ok | {:error, :snapshot_table_not_captured}
+  def validate_snapshot_tables(_opts, nil), do: :ok
+
+  def validate_snapshot_tables(opts, %{tables: snapshot_tables}) when is_list(opts) do
+    subset?(snapshot_tables, Keyword.get(opts, :tables, :all))
+  end
+
+  # An `:all` capture is a superset of every snapshot table. A concrete capture list demands a
+  # concrete snapshot list that is a subset; an `:all` snapshot set against a concrete capture
+  # cannot be proven captured, so it fails closed.
+  defp subset?(_snapshot_tables, :all), do: :ok
+  defp subset?(:all, _captured_list), do: {:error, :snapshot_table_not_captured}
+
+  defp subset?(snapshot_tables, captured)
+       when is_list(snapshot_tables) and is_list(captured) do
+    if MapSet.subset?(MapSet.new(snapshot_tables), MapSet.new(captured)),
+      do: :ok,
+      else: {:error, :snapshot_table_not_captured}
   end
 
   @doc """
@@ -124,6 +172,59 @@ defmodule Capstan.Pipeline do
   @spec store_spec(module(), keyword()) :: Supervisor.child_spec()
   def store_spec(impl, store_options) when is_atom(impl) and is_list(store_options) do
     %{id: :store, start: {impl, :start_link, [store_options]}, restart: :temporary}
+  end
+
+  @doc """
+  The durable `Capstan.SnapshotStore` child spec (snapshot mode only), mirroring `store_spec/2`.
+
+  A `:temporary` child — a snapshot-store fault halts fail-closed, never restarts into a
+  re-scan-from-zero livelock.
+  """
+  @spec snapshot_store_spec(module(), keyword()) :: Supervisor.child_spec()
+  def snapshot_store_spec(impl, store_options) when is_atom(impl) and is_list(store_options) do
+    %{id: :snapshot_store, start: {impl, :start_link, [store_options]}, restart: :temporary}
+  end
+
+  @typedoc """
+  The bootstrap-provided coordinator wiring (Task 10's supervisor supplies these AFTER the
+  assembler + snapshot-store children are up): the started `AssemblerServer` pid the coordinator
+  sends `{:capstan_halt, _}` to and observes the watermark from, the started `{impl, handle}`
+  snapshot store, the initial `%Capstan.Snapshot.State{}`, the per-table opened `ChunkReader`
+  handles, and the initial processed-watermark string (default `""`).
+  """
+  @type coordinator_wiring :: [
+          assembler: pid() | atom(),
+          snapshot_store: {module(), term()},
+          snapshot_state: Capstan.Snapshot.State.t(),
+          readers: %{optional({String.t(), String.t()}) => term()},
+          processed_set: String.t()
+        ]
+
+  @doc """
+  The `Capstan.Snapshot.Coordinator` child spec (snapshot mode only), mirroring `assembler_spec/2`.
+
+  The real (downstream) sink + the retry budget come from the pipeline `opts`; `wiring` carries
+  the bootstrap-produced pieces (see `t:coordinator_wiring/0`) — Task 10's supervisor builds it
+  once the assembler + snapshot-store children have started. A `:temporary` child: a fail-closed
+  snapshot halt never restarts.
+  """
+  @spec coordinator_spec(keyword(), coordinator_wiring()) :: Supervisor.child_spec()
+  def coordinator_spec(opts, wiring) when is_list(opts) and is_list(wiring) do
+    coordinator_opts = [
+      sink: Keyword.fetch!(opts, :sink),
+      assembler: Keyword.fetch!(wiring, :assembler),
+      snapshot_store: Keyword.fetch!(wiring, :snapshot_store),
+      snapshot_state: Keyword.fetch!(wiring, :snapshot_state),
+      readers: Keyword.fetch!(wiring, :readers),
+      processed_set: Keyword.get(wiring, :processed_set, ""),
+      max_retries: Keyword.get(opts, :max_command_retries, 5)
+    ]
+
+    %{
+      id: :snapshot_coordinator,
+      start: {Coordinator, :start_link, [coordinator_opts]},
+      restart: :temporary
+    }
   end
 
   @doc "The `AssemblerServer` child spec, wired to the started checkpoint store `{impl, handle}`."
