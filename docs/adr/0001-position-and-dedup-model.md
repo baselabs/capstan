@@ -12,11 +12,11 @@ leading ranges, and multi-source replication interleaves several source UUIDs
 (`uuid1:1-5,uuid2:1-3`). No scalar can represent such a set without lying about the gaps, and
 an ordinal comparison over it silently re-applies or skips transactions across a hole.
 
-An earlier design revision (v1) rejected the GTID-set-only model "because beamline and telemetry
-need a monotonic ordering key" and proposed exporting a convenience ordinal
+An earlier design revision (v1) rejected the GTID-set-only model "because a downstream consumer and
+telemetry need a monotonic ordering key" and proposed exporting a convenience ordinal
 `ordinal = file_seq * 2^32 + pos`. The adversarial pass established that the ordering-key premise
-was false (`beamline`'s `source_coordinate` validates any non-empty scalar map with no ordering
-requirement) and that the ordinal was derived from the very `file`/`pos` the position model
+was false (a downstream consumer's `source_coordinate` validates any non-empty scalar map with no
+ordering requirement) and that the ordinal was derived from the very `file`/`pos` the position model
 rejects as failover-broken: after a promotion or `RESET BINARY LOGS AND GTIDS` it moves **backward**
 while the GTID set moves **forward**.
 

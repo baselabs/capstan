@@ -161,8 +161,7 @@ differences are forced by MySQL and are deliberate:
    membership (`Capstan.Gtid.member?/2`). A `<=` comparison on GTIDs is *wrong*, not merely
    different — it would silently skip or re-apply transactions.
 
-Consumers such as [beamline](https://github.com/baselabs/beamline) stay source-agnostic through
-a thin per-source adapter package, which is that project's existing pattern — not by the two
+Consumers stay source-agnostic through a thin per-source adapter package — not by the two
 libraries presenting one identical type.
 
 ## Substrate requirements
