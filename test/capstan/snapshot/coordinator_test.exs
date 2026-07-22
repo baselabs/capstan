@@ -696,6 +696,39 @@ defmodule Capstan.Snapshot.CoordinatorTest do
     end
   end
 
+  ## ===========================================================================
+  ## terminate/2 — releases the shared query connection (F1: no source-conn leak)
+  ## ===========================================================================
+
+  describe "terminate/2 — closes the readers' shared Capstan.Query on stop" do
+    test "the query socket is closed when the coordinator stops (else the source conn leaks)" do
+      # The bootstrap opens ONE query connection all readers share; the coordinator owns it for
+      # the backfill's life, so it MUST release it on stop (a halt or Supervisor.stop) — else the
+      # authenticated source connection leaks. Uses a real loopback socket (hermetic, no MySQL).
+      {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false])
+      {:ok, port} = :inet.port(listen)
+      {:ok, sock} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+
+      query = %Capstan.Query{socket: {:gen_tcp, sock}}
+      reader = %Capstan.Snapshot.ChunkReader{query: query}
+      state = %Coordinator{readers: %{table() => reader}}
+
+      # Sanity: the socket is open before terminate.
+      assert :ok = :gen_tcp.send(sock, "x")
+
+      assert :ok = Coordinator.terminate(:shutdown, state)
+
+      # RED: without close_query in terminate/2, the send below still succeeds (socket alive).
+      assert {:error, :closed} = :gen_tcp.send(sock, "x")
+
+      :gen_tcp.close(listen)
+    end
+
+    test "an empty readers map (no snapshot tables) terminates cleanly" do
+      assert :ok = Coordinator.terminate(:shutdown, %Coordinator{readers: %{}})
+    end
+  end
+
   ## ---------------------------------------------------------------------------
   ## helpers
   ## ---------------------------------------------------------------------------

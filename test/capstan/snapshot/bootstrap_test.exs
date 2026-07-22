@@ -233,6 +233,30 @@ defmodule Capstan.Snapshot.BootstrapTest do
                )
     end
 
+    test "a fresh :all snapshot set fails closed :config_invalid (explicit tables required)" do
+      # `:all` (which arises when the capture allowlist is itself `:all`) is DELIBERATELY refused
+      # at bootstrap: "snapshot every table on the server" is ambiguous/dangerous, so C2 requires an
+      # explicit snapshot table list. Fail CLOSED (loud), never a silent no-op. Identity + establish
+      # + P0 read all succeed; `open_tables` refuses the `:all` set before introspecting anything.
+      # RED: accepting `:all` (e.g. defaulting to `[]`) would silently backfill nothing.
+      connect_fun =
+        scripted_connect_fun([
+          [uuid_result(@uuid_a)],
+          [@good_precond, uuid_result(@uuid_a), {1, [[gt("1-100")]]}]
+        ])
+
+      {:ok, cstore} = CheckpointInMemory.start_link([])
+      {:ok, sstore} = SnapshotInMemory.start_link([])
+
+      assert {:error, :config_invalid} =
+               Snapshot.bootstrap(
+                 [connection: fake_conn(), connect_fun: connect_fun],
+                 %{snapshot_config() | tables: :all},
+                 {CheckpointInMemory, cstore},
+                 {SnapshotInMemory, sstore}
+               )
+    end
+
     test "a stream-identity connect failure halts :snapshot_query_connect_failed" do
       connect_fun = fn _connection -> {:error, :econnrefused} end
 

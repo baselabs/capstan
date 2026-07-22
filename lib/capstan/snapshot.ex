@@ -262,9 +262,13 @@ defmodule Capstan.Snapshot do
   ## ---------------------------------------------------------------------------
 
   # FRESH: introspect every snapshot table (via ChunkReader.open) and build the durable %State{}
-  # with `pk_cursor: :start`. An `:all` snapshot set is not resolvable to a concrete table list at
-  # bootstrap (it would need an information_schema enumeration — a Task 11 follow-up), so it fails
-  # closed rather than silently backfilling nothing.
+  # with `pk_cursor: :start`. An `:all` snapshot set (which arises when the CAPTURE allowlist is
+  # itself `:all`) is DELIBERATELY refused: "snapshot every table on the server" is ambiguous and
+  # dangerous (it would backfill unrelated/system tables), so C2 requires an EXPLICIT snapshot
+  # table list whenever capture is `:all`. This is a fail-closed capability boundary (loud, not a
+  # silent no-op) — a concrete `snapshot: [tables: [...]]` (or a concrete capture allowlist, from
+  # which snapshot defaults) works. Resolving `:all` to a scoped enumeration is a named backlog
+  # follow-up, not part of C2.
   defp open_tables(query, %{tables: tables, chunk_size: chunk_size}, nil, p0)
        when is_list(tables) do
     open_fresh(query, tables, chunk_size, p0)

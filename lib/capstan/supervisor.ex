@@ -28,6 +28,7 @@ defmodule Capstan.Supervisor do
   alias Capstan.AssemblerServer
   alias Capstan.CheckpointStore
   alias Capstan.Pipeline
+  alias Capstan.Query
   alias Capstan.Snapshot
   alias Capstan.Snapshot.Coordinator
 
@@ -107,7 +108,35 @@ defmodule Capstan.Supervisor do
     {:error, reason}
   end
 
-  defp continue_wire(sup, opts, boot, {impl, store} = checkpoint_store, snapshot_store) do
+  # A fresh/mid-snapshot boot holds the bootstrap's open query connection (in `readers`). If the
+  # now-seeded checkpoint read (or start-position resolve) faults here, the coordinator never
+  # starts — and a coordinator that never runs gets no `terminate/2` — so the query would leak;
+  # close it before aborting (F1). Once `finish_wire` starts the coordinator, the coordinator
+  # owns and closes the query.
+  defp continue_wire(
+         sup,
+         opts,
+         {:snapshot, _state, readers, _processed} = boot,
+         {impl, store} = checkpoint_store,
+         snapshot_store
+       ) do
+    with {:ok, resumed} <- CheckpointStore.read_position(impl, store),
+         {:ok, start_position} <- Pipeline.resolve_start_position(opts, resumed) do
+      finish_wire(sup, opts, boot, checkpoint_store, snapshot_store, start_position)
+    else
+      {:error, reason} ->
+        close_readers_query(readers)
+        {:error, reason}
+    end
+  end
+
+  defp continue_wire(
+         sup,
+         opts,
+         :complete = boot,
+         {impl, store} = checkpoint_store,
+         snapshot_store
+       ) do
     with {:ok, resumed} <- CheckpointStore.read_position(impl, store),
          {:ok, start_position} <- Pipeline.resolve_start_position(opts, resumed) do
       finish_wire(sup, opts, boot, checkpoint_store, snapshot_store, start_position)
@@ -150,14 +179,33 @@ defmodule Capstan.Supervisor do
                readers: readers,
                processed_set: processed_set
              )
-           ),
-         :ok <- AssemblerServer.attach_coordinator(assembler, coordinator),
-         {:ok, _connection} <-
-           add_child(
-             sup,
-             Pipeline.connection_spec(opts, assembler, start_position, {impl, store})
            ) do
-      :ok
+      # The coordinator is up and OWNS the query (its `terminate/2` closes it under
+      # `Supervisor.stop`), so a failure below is released by the coordinator — not here.
+      with :ok <- AssemblerServer.attach_coordinator(assembler, coordinator),
+           {:ok, _connection} <-
+             add_child(
+               sup,
+               Pipeline.connection_spec(opts, assembler, start_position, {impl, store})
+             ) do
+        :ok
+      end
+    else
+      # The assembler/coordinator failed to start (a failed init gets no `terminate/2`), so the
+      # query the coordinator would have owned leaks unless closed here (F1).
+      {:error, reason} ->
+        close_readers_query(readers)
+        {:error, reason}
+    end
+  end
+
+  # Close the shared `Capstan.Query` connection the bootstrap opened (all `readers` share it),
+  # on a wiring abort BEFORE the coordinator started to own it. A `Query.close` on an
+  # already-closed socket is a harmless no-op.
+  defp close_readers_query(readers) do
+    case Map.values(readers) do
+      [%{query: %Query{} = query} | _] -> Query.close(query)
+      _ -> :ok
     end
   end
 

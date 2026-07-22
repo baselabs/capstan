@@ -258,6 +258,30 @@ defmodule Capstan.Snapshot.Coordinator do
 
   def handle_info(_message, state), do: {:noreply, state}
 
+  # Release the shared `Capstan.Query` connection the readers hold. The bootstrap opens ONE query
+  # connection (all readers share it, `chunk_reader.ex`); the coordinator owns it for the
+  # backfill's life, so it must be closed when the coordinator stops — a fail-closed halt or a
+  # `Supervisor.stop` — else the authenticated source connection leaks. Called for every stop
+  # reason (a `:temporary` coordinator's `terminate/2` still runs on a `{:shutdown, _}` exit).
+  # `Query.close` on an already-closed socket is a harmless no-op, so a double-close (the
+  # supervisor also closes on a pre-start wiring abort) is safe.
+  @impl GenServer
+  def terminate(_reason, %__MODULE__{readers: readers}) do
+    close_query(readers)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  defp close_query(readers) when is_map(readers) do
+    case Map.values(readers) do
+      [%{query: %Capstan.Query{} = query} | _] -> Capstan.Query.close(query)
+      _ -> :ok
+    end
+  end
+
+  defp close_query(_readers), do: :ok
+
   ## ---------------------------------------------------------------------------
   ## the cursor-gate (per streamed change)
   ## ---------------------------------------------------------------------------
