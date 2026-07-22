@@ -23,7 +23,7 @@ defmodule Capstan.Snapshot.ChunkReader do
       (iv)  START TRANSACTION WITH CONSISTENT SNAPSHOT   -- pins the read view V; for T, V == state as-of G
       (v)   UNLOCK TABLES                                -- release; the pinned view V survives the unlock
       (vi)  SELECT <projected cols> FROM `T`             -- as-of V, lock-free
-              WHERE pk > cursor ORDER BY pk LIMIT chunk_size
+              WHERE pk > cursor ORDER BY pk LIMIT chunk_size + 1   -- +1 = finality look-ahead
       (vii) COMMIT
 
   Step (iii) uses `@@global.gtid_executed`; `gtid_executed` is a global-scoped variable, so
@@ -125,10 +125,14 @@ defmodule Capstan.Snapshot.ChunkReader do
   The result of `read_chunk/2`:
 
     * `{:ok, chunk, final?, reader}` — a chunk of 1..chunk_size rows; `final?` is `true` when
-      it held fewer than `chunk_size` rows (no further chunk exists). `reader` carries the
-      incremented sequence number.
-    * `{:done, reader}` — the previous chunk was exactly `chunk_size` rows and this page is
-      empty; the table is fully paged.
+      the one-row look-ahead (the chunk SELECT reads `LIMIT chunk_size + 1`) proved no further
+      chunk exists — i.e. the read returned at most `chunk_size` rows. `final?` is derived from
+      the look-ahead, NOT a `length < chunk_size` count, so a table whose row count is an exact
+      multiple of `chunk_size` still gets a `final?: true` last chunk (closeout F6). `reader`
+      carries the incremented sequence number.
+    * `{:done, reader}` — the page from `cursor` is empty; the table is fully paged. Under the
+      look-ahead a NON-empty table's last chunk is already `final?: true`, so this arises only
+      for an empty table (a `:start` read that returns no rows).
     * `{:error, reason}` — a value-free halt atom.
   """
   @type read_result ::
@@ -226,11 +230,10 @@ defmodule Capstan.Snapshot.ChunkReader do
   @spec read_chunk(t(), cursor()) :: read_result()
   def read_chunk(%__MODULE__{} = reader, cursor) do
     case attempt_with_budget(reader, cursor, 0) do
-      {:ok, %Chunk{rows: []}} ->
+      {:ok, %Chunk{rows: []}, _final?} ->
         {:done, reader}
 
-      {:ok, %Chunk{} = chunk} ->
-        final? = length(chunk.rows) < reader.chunk_size
+      {:ok, %Chunk{} = chunk, final?} ->
         {:ok, chunk, final?, %{reader | seq: reader.seq + 1}}
 
       {:error, reason} ->
@@ -246,8 +249,8 @@ defmodule Capstan.Snapshot.ChunkReader do
   # the WHOLE capture (a partial capture is cleaned up first) until the shared counter halts.
   defp attempt_with_budget(reader, cursor, attempt) do
     case attempt(reader, cursor) do
-      {:ok, chunk} ->
-        {:ok, chunk}
+      {:ok, chunk, final?} ->
+        {:ok, chunk, final?}
 
       {:permanent, reason} ->
         {:error, reason}
@@ -263,12 +266,28 @@ defmodule Capstan.Snapshot.ChunkReader do
   end
 
   # One capture attempt: the per-chunk fingerprint check (permanent drift halt), then the pinned
-  # brief-lock sequence. Returns `{:ok, chunk}` | `{:permanent, reason}` | `{:fault, phase}`.
+  # brief-lock sequence, then the finality look-ahead split. Returns `{:ok, chunk, final?}` |
+  # `{:permanent, reason}` | `{:fault, phase}`.
   defp attempt(reader, cursor) do
     with :ok <- check_fingerprint(reader),
          {:ok, g, rows} <- run_capture(reader, cursor) do
-      {:ok, build_chunk(reader, g, rows)}
+      {kept, final?} = split_lookahead(rows, reader.chunk_size)
+      {:ok, build_chunk(reader, g, kept), final?}
     end
+  end
+
+  # The chunk SELECT reads one extra look-ahead row (`LIMIT chunk_size + 1`, `chunk_sql/2`). MORE
+  # than `chunk_size` rows back ⇒ a further chunk exists: drop the look-ahead row, `final?: false`.
+  # At most `chunk_size` back ⇒ this is the table's LAST chunk, `final?: true`. Deriving finality
+  # from a `length < chunk_size` count is WRONG for a table whose row count is an exact multiple of
+  # `chunk_size` — its last full page would never be `final?` and the sink would never learn the
+  # table completed (closeout F6). The dropped look-ahead row (`pk >` the kept chunk's `max_pk`) is
+  # re-read as the first row of the NEXT chunk — identical to any chunk boundary, no row skipped or
+  # duplicated within the snapshot, and `build_chunk/3` computes `max_pk` from the KEPT rows.
+  defp split_lookahead(rows, chunk_size) do
+    if length(rows) > chunk_size,
+      do: {Enum.take(rows, chunk_size), false},
+      else: {rows, true}
   end
 
   # Re-read the ordinal column list and compare its fingerprint to the baseline (per-chunk drift
@@ -352,11 +371,14 @@ defmodule Capstan.Snapshot.ChunkReader do
 
   defp lock_sql(reader), do: "LOCK TABLES #{qualified(reader)} READ"
 
+  # `LIMIT chunk_size + 1`: the +1 is the finality look-ahead (`split_lookahead/2`) — reading one
+  # row past the chunk lets the reader tell "this is the last chunk" from "a further chunk exists"
+  # without a trailing empty page, so an exact-multiple table's last chunk is still `final?: true`.
   defp chunk_sql(reader, cursor) do
     "SELECT #{select_list(reader.projection)} FROM #{qualified(reader)}" <>
       where_clause(reader, cursor) <>
       " ORDER BY #{order_list(reader.pk_columns)}" <>
-      " LIMIT #{reader.chunk_size}"
+      " LIMIT #{reader.chunk_size + 1}"
   end
 
   # `:start` reads from the beginning (no lower bound); else a keyset predicate `pk > cursor`.

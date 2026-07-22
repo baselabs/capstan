@@ -51,7 +51,7 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
                "SELECT @@global.gtid_executed",
                "START TRANSACTION WITH CONSISTENT SNAPSHOT",
                "UNLOCK TABLES",
-               "SELECT `id`, `v` FROM `test`.`t` ORDER BY `id` LIMIT 4096",
+               "SELECT `id`, `v` FROM `test`.`t` ORDER BY `id` LIMIT 4097",
                "COMMIT"
              ]
     end
@@ -107,16 +107,35 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
       assert reader2.seq == 1
     end
 
-    test "a full chunk (== chunk_size rows) is NOT final; the next empty page returns :done" do
-      cfg = default_cfg(chunk_size: 2, chunk_rows: [["1", "10"], ["2", "20"]])
+    test "an exact-multiple table's last full chunk is final? via the look-ahead (closeout F6)" do
+      # A table whose row count is an exact multiple of chunk_size: every page is a FULL chunk_size
+      # rows, so a `length < chunk_size` finality test would NEVER mark the last page final and the
+      # sink would never learn the table completed. The `LIMIT chunk_size + 1` look-ahead fixes it:
+      # a full page WITH a further look-ahead row is not final; the last page (no further row) IS.
+      cfg = default_cfg(chunk_size: 2, chunk_rows: [["1", "10"], ["2", "20"], ["3", "30"]])
       {reader, agent} = open_reader(cfg)
 
-      assert {:ok, chunk, false, reader2} = ChunkReader.read_chunk(reader, :start)
-      assert chunk.max_pk == 2
+      # Page 1: the look-ahead read returns 3 rows (chunk_size + 1) ⇒ a further chunk exists. Keep 2,
+      # NOT final; the cursor advances to the 2nd row (id 2) — the look-ahead row (id 3) is dropped,
+      # re-read as the head of page 2.
+      assert {:ok, chunk1, false, reader2} = ChunkReader.read_chunk(reader, :start)
+      assert Enum.map(chunk1.rows, & &1["id"]) == ["1", "2"]
+      assert chunk1.max_pk == 2
 
-      # Page past the end: the mock now serves an empty resultset.
-      set_chunk_rows(agent, [])
-      assert {:done, ^reader2} = ChunkReader.read_chunk(reader2, chunk.max_pk)
+      # Page 2: only 2 rows exist beyond id 2 (== chunk_size, no look-ahead row) ⇒ this IS the final
+      # chunk. RED (the pre-fix `length < chunk_size`): 2 rows == chunk_size ⇒ final?=false, so the
+      # sink only ever saw a silent {:done} next — never final_chunk?: true for this table.
+      set_chunk_rows(agent, [["3", "30"], ["4", "40"]])
+      assert {:ok, chunk2, true, _reader3} = ChunkReader.read_chunk(reader2, chunk1.max_pk)
+      assert Enum.map(chunk2.rows, & &1["id"]) == ["3", "4"]
+      assert chunk2.max_pk == 4
+    end
+
+    test "an empty page returns :done (an empty table, or a fully-drained cursor)" do
+      cfg = default_cfg(chunk_size: 2, chunk_rows: [])
+      {reader, _agent} = open_reader(cfg)
+
+      assert {:done, ^reader} = ChunkReader.read_chunk(reader, :start)
     end
 
     test "the WHERE keyset predicate uses `pk > cursor` for a non-:start cursor" do
@@ -127,7 +146,7 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
       chunk_select = Enum.find(recorded(agent), &String.starts_with?(&1, "SELECT `id`, `v` FROM"))
 
       assert chunk_select ==
-               "SELECT `id`, `v` FROM `test`.`t` WHERE `id` > 41 ORDER BY `id` LIMIT 4096"
+               "SELECT `id`, `v` FROM `test`.`t` WHERE `id` > 41 ORDER BY `id` LIMIT 4097"
     end
   end
 
@@ -146,7 +165,7 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
 
       assert chunk_select ==
                "SELECT `a`, `b` FROM `test`.`t` WHERE (`a`, `b`) > (3, X'0102') " <>
-                 "ORDER BY `a`, `b` LIMIT 4096"
+                 "ORDER BY `a`, `b` LIMIT 4097"
 
       # max_pk canonicalizes the composite last row: {7, <<0xAB, 0xCD>>}.
       assert chunk.max_pk == {7, <<0xAB, 0xCD>>}
