@@ -54,9 +54,13 @@ defmodule Capstan.Snapshot.ChunkReader do
       `%Capstan.SchemaChange{}` on the table — is the coordinator's, Task 8; the reader owns the
       fingerprint arm.)
 
-  Budgeted faults reuse `Capstan.CheckpointStore.retry_decision/2` + `permanent_reason?/1` — the
-  shared counter, never re-derived — so retry semantics cannot drift from C1. The reader retries
-  the whole capture on its OWN connection; it does NOT reconnect (a reconnect re-verifies source
+  Budgeted faults reuse `Capstan.CheckpointStore.retry_decision/2` — the shared counter, never
+  re-derived — so retry semantics cannot drift from C1. Permanence is classified POSITIONALLY,
+  not via `CheckpointStore.permanent_reason?/1`: that helper only recognizes a store-config
+  fault (`:config_invalid`) and would misclassify a code-scrubbed reader fault, so schema drift
+  is marked permanent by construction (`check_fingerprint/1` returns `{:permanent, _}` directly)
+  and every lock/read fault is budgeted. The reader retries the whole capture on its OWN
+  connection; it does NOT reconnect (a reconnect re-verifies source
   identity, Ch8, and is the coordinator's lifecycle concern) — a dead connection burns the budget
   and halts fail-closed, which the coordinator then propagates.
 
