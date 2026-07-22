@@ -60,8 +60,12 @@ defmodule Capstan.Integration.EffectOnceTest do
     assert MapSet.disjoint?(MapSet.new(phase1), MapSet.new(phase2))
 
     # No skip + exclusive bound: phase2 begins at the checkpoint's SUCCESSOR, and the full
-    # delivered run is contiguous with no gap at the restart boundary.
-    checkpoint_max = result.checkpoint1_gnos |> Enum.max()
+    # delivered run is contiguous with no gap at the restart boundary. Scope the checkpoint's max to
+    # the SERVER's OWN source UUID (the one the batch transactions committed under, named by any
+    # delivered GTID) — the shared substrate also carries FOREIGN GTIDs planted by other tests (the
+    # live exact-`G` proof's fabricated UUIDs reach far higher gnos), and those must not set this bound.
+    server_uuid = result.phase1 |> hd() |> uuid_of()
+    checkpoint_max = result.checkpoint1_set |> gnos_for_uuid(server_uuid) |> Enum.max()
     assert Enum.min(phase2) == checkpoint_max + 1
     combined = phase1 ++ phase2
     assert combined == Enum.to_list(Enum.min(combined)..Enum.max(combined))
@@ -122,7 +126,7 @@ defmodule Capstan.Integration.EffectOnceTest do
       phase1: phase1,
       phase2: phase2,
       ledger: :ets.tab2list(ledger) |> Enum.map(fn {:gtid, g} -> g end),
-      checkpoint1_gnos: checkpoint1 |> gnos_of()
+      checkpoint1_set: checkpoint1
     }
   end
 
@@ -166,15 +170,24 @@ defmodule Capstan.Integration.EffectOnceTest do
     end
   end
 
+  # The UUID component of a single "uuid:gno" GTID string.
+  defp uuid_of(gtid), do: gtid |> String.split(":") |> hd()
+
   # The trailing numeric component of a single "uuid:gno" GTID string.
   defp gno(gtid), do: gtid |> String.split(":") |> List.last() |> String.to_integer()
 
-  # Every GNO present in a whole gtid_set string (a single UUID's interval band expanded).
-  defp gnos_of(gtid_set) do
+  # Every GNO of ONE source UUID in a gtid_set string (that UUID's interval band expanded). Other
+  # source UUIDs in the set — e.g. the fabricated UUIDs another test planted on the shared substrate —
+  # are ignored, so foreign GTIDs cannot pollute the caller's max/min reasoning. Matches the UUID
+  # case-insensitively, per `Capstan.Gtid.member?/2`'s convention (ADR-0001).
+  defp gnos_for_uuid(gtid_set, uuid) do
+    target = String.downcase(uuid)
+
     gtid_set
     |> Capstan.Gtid.parse()
     |> Capstan.Gtid.sources()
-    |> Enum.flat_map(fn {_uuid, intervals} ->
+    |> Enum.filter(fn {u, _intervals} -> String.downcase(u) == target end)
+    |> Enum.flat_map(fn {_u, intervals} ->
       Enum.flat_map(intervals, fn {low, high} -> Enum.to_list(low..high) end)
     end)
   end
