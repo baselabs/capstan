@@ -63,7 +63,11 @@ fail-closed).
    delivers it). A fully-suppressed transaction advances the watermark with no sink call (a filtered
    transaction, ADR-0003). A PK-changing UPDATE is split into `delete(k_old)` + `upsert(k_new)`, each
    gated on its own key. The advance gate emits a buffered chunk (as `%Change{op: :snapshot}`) once
-   `Gtid.subset?(G, processed_set)`, then advances the cursor and persists it.
+   `Gtid.subset?(G, processed_set)`, then advances the cursor and persists it. The chunk read uses
+   `LIMIT chunk_size + 1` (a one-row finality look-ahead) so the last chunk carries
+   `final_chunk?: true` even when a table's row count is an exact multiple of `chunk_size` (closeout
+   F6); the look-ahead row is dropped and re-read as the head of the next chunk, so no row is skipped
+   or duplicated.
 
 4. **Sink surface.** A new optional `c:Capstan.Sink.handle_snapshot/2` delivers a chunk as a concrete
    list of `%Capstan.Change{op: :snapshot}` with a value-free `Capstan.Snapshot.Meta`. It is distinct
@@ -74,9 +78,17 @@ fail-closed).
    suppression and the bounded crash-window re-emit both rely on it to converge).
 
 5. **Delivery guarantee.** **Strict-once in normal operation** (the cursor-gate, not convergence). The
-   only duplicate window is a crash between the chunk's sink `{:ok, _}` and the cursor persist — the
-   one in-flight chunk re-emits, exactly the bounded window C1 already accepts; an upsert-by-PK sink
-   converges. Effect-once across the crash window is the deferred sink-owned atomic path (C1a).
+   only duplicate window is a crash between the chunk's sink `{:ok, _}` and the `pk_cursor` persist —
+   the one in-flight chunk re-emits, exactly the bounded window C1 already accepts; an upsert-by-PK
+   sink converges. **Crash-window delete backstop (closeout F1):** a second durable high-water,
+   `delivered_pk`, is persisted BEFORE each emit (the `pk_cursor` after). Across that same window it
+   sits ahead of the rolled-back `pk_cursor`, and the cursor-gate gates DELETES on it — a streamed
+   delete of an already-delivered key (`k ≤ delivered_pk`) is forwarded and sweeps the row, instead of
+   being suppressed while the re-read chunk (taken as-of a fresh `G` with the row already gone) omits
+   it, which would leave a permanent phantom. Inserts/updates keep gating on `pk_cursor`, so
+   strict-once is preserved; a forwarded delete of a not-yet-delivered key is a harmless no-op at the
+   upsert/delete-by-PK sink. Effect-once across the crash window is the deferred sink-owned atomic path
+   (C1a).
 
 6. **Choke-point observer.** The `AssemblerServer` gains one optional `:watermark_observer` notified
    at the checkpoint choke point (`do_checkpoint/3` success), which fires on EVERY advance —
@@ -99,6 +111,11 @@ fail-closed).
    - **`tables: :all` snapshot is refused** (`:config_invalid`) — when the capture allowlist is itself
      `:all`, "snapshot every table on the server" is ambiguous and dangerous, so C2 requires an
      explicit snapshot table list. A concrete capture allowlist (from which snapshot defaults) works.
+   - **Config/state table-set reconciliation (closeout F3).** On a `:complete`/mid-snapshot resume the
+     configured `snapshot.tables` are reconciled against the stored `%Snapshot.State{}` table keys; a
+     divergence (a table added or removed after a durable state exists) halts `:snapshot_config_drifted`
+     rather than silently never backfilling an added table — both the `:complete` short-circuit and the
+     resume path key off the STORED set. Dropping the durable snapshot state re-introspects config.
 
 ### Rejected alternatives
 

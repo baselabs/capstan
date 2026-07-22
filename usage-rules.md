@@ -193,11 +193,19 @@ FTWRL. The preflight (`scripts/capstan-preflight.sql`) checks it.
   relies on upsert-by-PK to converge. Return `{:error, term()}` to halt fail-closed.
 
 **Guarantees.** Strict-once in normal operation. The only duplicate window is a crash between the
-chunk's `{:ok}` and the durable cursor persist — the one in-flight chunk re-emits, exactly C1's
-bounded posture; an upsert-by-PK sink converges. **Resumable mid-backfill**: the per-table PK cursor
-lives in `MyApp.SnapshotStore` (implement `read/1`+`write/2` over a `%Capstan.Snapshot.State{}`, same
-durable/idempotent contract as the checkpoint store), and the backfill resumes with `WHERE pk >
-cursor` — never a re-scan from zero. A store whose `status: :complete` never re-snapshots.
+chunk's `{:ok}` and the durable `pk_cursor` persist — the one in-flight chunk re-emits, exactly C1's
+bounded posture; an upsert-by-PK sink converges. A DELETE landing in that same window is swept, not
+left as a phantom: a `delivered_pk` high-water (persisted before each emit) lets the cursor-gate
+forward a streamed delete of an already-delivered key on restart. **Resumable mid-backfill**: the
+per-table PK cursor lives in `MyApp.SnapshotStore` (implement `read/1`+`write/2` over a
+`%Capstan.Snapshot.State{}`, same durable/idempotent contract as the checkpoint store), and the
+backfill resumes with `WHERE pk > cursor` — never a re-scan from zero. A store whose
+`status: :complete` never re-snapshots.
+
+**The snapshot table set is fixed once a durable state exists.** Adding or removing a table in
+`snapshot.tables` after a `:complete`/mid-snapshot state is a config/state divergence and halts
+`:snapshot_config_drifted` — a newly-added table would otherwise be silently never backfilled. To
+re-backfill a changed set, drop the durable snapshot state (a fresh start re-introspects config).
 
 **Supported primary keys (order-faithful only).** Chunking pages by MySQL `ORDER BY pk` while the
 gate compares in Elixir, so the PK type's Elixir order must provably match MySQL's: **integer**
@@ -262,6 +270,10 @@ via `[:capstan, :connection, :halt]` / `[:capstan, :assembler, :halt]` telemetry
   fingerprint change, or an observed DDL on the table).
 - `:snapshot_source_mismatch` — the query connection's `@@server_uuid` differs from the stream's
   (a reconnect to a different replica, at connect or on any query-conn reconnect).
+- `:snapshot_config_drifted` — the configured `snapshot.tables` no longer match the durable
+  `%Capstan.Snapshot.State{}`'s table set (a table added/removed after a `:complete`/mid-snapshot
+  state). Halts rather than silently never backfilling the added table; drop the durable snapshot
+  state to re-backfill a changed set.
 - `:snapshot_chunk_read_failed` / `:snapshot_query_connect_failed` /
   `:snapshot_bootstrap_gtid_read_failed` — a chunk read, query-connect, or `P0` read fault beyond
   the budget.

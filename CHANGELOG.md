@@ -34,12 +34,18 @@ operation, fail-closed on every silent-loss condition, Rule 1 end-to-end. **Addi
   `:snapshot_table_no_primary_key`, `:snapshot_table_not_captured`, `:snapshot_lock_unavailable`,
   `:snapshot_schema_drifted`, `:snapshot_source_mismatch` (`@@server_uuid` across both connections),
   `:snapshot_chunk_read_failed`, `:snapshot_bootstrap_gtid_read_failed`, `:snapshot_coordinator_down`,
-  the `SnapshotStore` faults, and `{:snapshot_sink_error, _}`. A `tables: :all` snapshot is refused
-  `:config_invalid` — an explicit table list is required (ROADMAP C2b).
+  `:snapshot_config_drifted` (the configured `snapshot.tables` no longer match a durable
+  `:complete`/mid-snapshot state — a table added or removed after a state exists halts rather than
+  silently never backfilling it), the `SnapshotStore` faults, and `{:snapshot_sink_error, _}`. A
+  `tables: :all` snapshot is refused `:config_invalid` — an explicit table list is required (ROADMAP
+  C2b).
 - **Delivery guarantee** — strict-once in normal operation; the only duplicate window is a crash
-  between a chunk's `{:ok}` and the durable cursor persist (the one in-flight chunk re-emits, C1's
-  bounded posture; an upsert-by-PK sink converges). Effect-once across the crash window is the
-  deferred sink-owned path (ROADMAP C1a).
+  between a chunk's `{:ok}` and the durable `pk_cursor` persist (the one in-flight chunk re-emits,
+  C1's bounded posture; an upsert-by-PK sink converges). A second durable high-water,
+  `delivered_pk`, is persisted BEFORE each chunk emit and backstops a DELETE that lands in that
+  same window: on restart the cursor-gate forwards a streamed delete of an already-delivered key
+  (`k ≤ delivered_pk`) so the row is swept, never left as a phantom. Effect-once across the crash
+  window is the deferred sink-owned path (ROADMAP C1a).
 
 ## [0.1.0] - 2026-07-21
 
