@@ -23,12 +23,13 @@ Sink-owned checkpoint mode and explicit start positions were scoped in the C1 de
 
 ## Backlog — deferred from C2 (ADR-0005)
 
-Two C2 capability boundaries ship as **loud fail-closed refusals** (ADR-0005 § Consequences), each a separable follow-up. Authored facts only; status is DERIVED.
+Two C2 capability boundaries ship as **loud fail-closed refusals** (ADR-0005 § Consequences), plus one contract-completeness gap surfaced at the C2 closeout cross-vendor review — each a separable follow-up. Authored facts only; status is DERIVED.
 
 | ID | What | Acceptance | Depends | Why |
 |---|---|---|---|---|
 | C2a | **Collation-ordered-string PK** — snapshot a table whose primary key is a collation-ordered `CHAR`/`VARCHAR`/`TEXT` column. Refused today as `:snapshot_pk_unsupported_type`. slug:c2-collation-string-pk | A collation-string-PK table backfills gap-free/dup-free: the cursor-gate's `k ≤ cursor` comparison reproduces the source's collation order (not Elixir byte-order) so no row is mis-classified | C2 | [ADR-0005](adr/0005-initial-snapshot-cursor-gate-brief-lock.md). Order-faithful integer/binary/composite PKs ship; a collation order Elixir cannot reproduce is a silent gap/dup, so it is refused rather than shipped wrong. Needs collation-aware cursor comparison |
 | C2b | **`tables: :all` snapshot resolution** — resolve an `:all` snapshot set (which arises when the capture allowlist is itself `:all`) to a concrete, scoped table list. Refused today as `:config_invalid`. slug:c2-snapshot-tables-all | An `:all` snapshot backfills a well-defined, scoped set of base tables (never accidentally the whole server), enumerated from `information_schema` | C2 | [ADR-0005](adr/0005-initial-snapshot-cursor-gate-brief-lock.md). "Snapshot every table on the server" is ambiguous and dangerous, so C2 requires an explicit snapshot table list when capture is `:all`; a concrete capture allowlist (from which snapshot defaults) already works |
+| C2c | **Zero-row snapshot table completion signal** — a configured snapshot table with no pre-existing rows takes the `{:done}` path and emits NO `handle_snapshot/2` beat, so the sink never receives `final_chunk?: true` for it. slug:c2-empty-table-final-signal | A configured snapshot table with zero rows delivers exactly one completion signal (an empty `final_chunk?: true` chunk, or an equivalent per-table done marker) so a sink gating per-table readiness on `final_chunk?` does not wait forever | C2 | Pre-existing behavior (unchanged by the F6 finality fix, which only corrects the exact-multiple *non-empty* last page). Surfaced by the closeout cross-vendor delta review; a design decision on the empty-table sink contract, deliberately not folded into the C2 closeout blocking-fix pass |
 
 ## C3-forward couplings (implementation notes, not backlog rows).
 
