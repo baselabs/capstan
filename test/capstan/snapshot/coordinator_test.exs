@@ -126,7 +126,7 @@ defmodule Capstan.Snapshot.CoordinatorTest.CountingFaultyStore do
     fail_until = Agent.get(agent, & &1.fail_until)
 
     if fail_until == :always or n <= fail_until do
-      {:error, :store_blip}
+      {:error, Agent.get(agent, &Map.get(&1, :error_reason, :store_blip))}
     else
       Agent.update(agent, &%{&1 | state: state})
       :ok
@@ -647,6 +647,30 @@ defmodule Capstan.Snapshot.CoordinatorTest do
       assert_receive {:capstan_halt, :snapshot_state_write_failed}
       # BUDGET proof: max_retries(2) + 1 = 3 write attempts. RED (no budget / immediate halt): 1.
       assert CountingFaultyStore.count(fstore) == 3
+    end
+
+    test "a PERMANENT store reason (:config_invalid) halts IMMEDIATELY without spending the budget" do
+      # permanent_reason?/1 short-circuits the budget: a mis-shaped store never un-breaks on
+      # retry, so it halts on the first fault. RED (no permanent_reason?/1 check): it retries
+      # max_retries times first (count == 6), wasting the budget on an unrecoverable fault.
+      {:ok, fstore} =
+        CountingFaultyStore.start_link(fail_until: :always, error_reason: :config_invalid)
+
+      g = "#{@uuid}:1-6"
+      c = chunk(0, g, [%{"id" => 42}], 42)
+
+      coord =
+        start_coordinator(
+          {CountingFaultyStore, fstore},
+          snap_state(%{table() => int_table(:start)}),
+          readers: %{table() => %{script: [{:chunk, c, true}]}},
+          max_retries: 5
+        )
+
+      send(coord, {:capstan_watermark, g})
+
+      assert_receive {:capstan_halt, :snapshot_state_write_failed}
+      assert CountingFaultyStore.count(fstore) == 1
     end
 
     test "a TRANSIENT store-write fault (within budget, then succeeds) is survived — no halt" do

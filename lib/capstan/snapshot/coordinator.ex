@@ -392,9 +392,13 @@ defmodule Capstan.Snapshot.Coordinator do
   ## ---------------------------------------------------------------------------
 
   # A store-write fault is BUDGETED (design § Preconditions: "budgeted, then halt") via the
-  # SHARED `CheckpointStore.retry_decision/2` counter — the same posture C1 uses for a
-  # checkpoint-store write (`assembler_server.ex` do_checkpoint), so a transient store blip is
-  # survived rather than tearing down the pipeline; only a persistent fault halts fail-closed.
+  # SHARED `CheckpointStore` retry family — the same posture C1 uses for a checkpoint-store write
+  # (`assembler_server.ex` do_checkpoint), so a transient store blip is survived rather than
+  # tearing down the pipeline. A PERMANENT reason (`permanent_reason?/1`, e.g. `:config_invalid`
+  # — a mis-shaped store) halts IMMEDIATELY without spending the budget; every other fault is
+  # budgeted, then halts fail-closed. The terminal halt is always the value-free
+  # `:snapshot_state_write_failed` (the raw reason is discarded — Rule 1). Mirrors
+  # `assembler_server.ex` do_checkpoint's `cond` exactly.
   defp persist(state), do: persist(state, 0)
 
   defp persist(%__MODULE__{store: {impl, store}} = state, attempt) do
@@ -402,10 +406,16 @@ defmodule Capstan.Snapshot.Coordinator do
       :ok ->
         {:ok, state}
 
-      {:error, _reason} ->
-        case CheckpointStore.retry_decision(attempt, state.max_retries) do
-          :retry -> persist(state, attempt + 1)
-          :halt -> {:halt, :snapshot_state_write_failed}
+      {:error, reason} ->
+        cond do
+          CheckpointStore.permanent_reason?(reason) ->
+            {:halt, :snapshot_state_write_failed}
+
+          CheckpointStore.retry_decision(attempt, state.max_retries) == :retry ->
+            persist(state, attempt + 1)
+
+          true ->
+            {:halt, :snapshot_state_write_failed}
         end
     end
   end
