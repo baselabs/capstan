@@ -235,7 +235,13 @@ defmodule Capstan.Snapshot.CursorGateTest do
     @cursor_sentinel 987_654_321
 
     test "raises ArgumentError, and neither the message nor the stacktrace carries the cursor" do
-      snap = %Change{op: :snapshot, schema: "s", table: "t", record: %{"id" => 1}, old_record: nil}
+      snap = %Change{
+        op: :snapshot,
+        schema: "s",
+        table: "t",
+        record: %{"id" => 1},
+        old_record: nil
+      }
 
       {exception, stacktrace} =
         try do

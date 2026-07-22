@@ -59,7 +59,9 @@ defmodule Capstan.SnapshotStoreTest do
       state = %State{status: :initializing, p0: "#{@uuid}:1-9", tables: %{}}
 
       :ok = SnapshotStore.write(InMemory, store, state)
-      assert {:ok, %State{status: :initializing, p0: "#{@uuid}:1-9"}} = SnapshotStore.read(InMemory, store)
+
+      assert {:ok, %State{status: :initializing, p0: "#{@uuid}:1-9"}} =
+               SnapshotStore.read(InMemory, store)
     end
   end
 
