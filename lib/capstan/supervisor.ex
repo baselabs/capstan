@@ -25,8 +25,11 @@ defmodule Capstan.Supervisor do
   the `AssemblerServer` is running.
   """
 
+  alias Capstan.AssemblerServer
   alias Capstan.CheckpointStore
   alias Capstan.Pipeline
+  alias Capstan.Snapshot
+  alias Capstan.Snapshot.Coordinator
 
   @doc """
   Start a supervised, lib-owned pipeline from an already-validated wiring keyword
@@ -51,13 +54,104 @@ defmodule Capstan.Supervisor do
     end
   end
 
+  # Snapshot mode adds the P0 pre-seed + the coordinator/store children; an absent `:snapshot`
+  # takes the byte-identical C1 path (`wire_c1/2`), so the full existing suite stays green.
   defp wire(sup, opts) do
+    if Pipeline.snapshot_mode?(opts) do
+      wire_snapshot(sup, opts)
+    else
+      wire_c1(sup, opts)
+    end
+  end
+
+  # The C1 wiring — unchanged: store → checkpoint read → assembler → connection.
+  defp wire_c1(sup, opts) do
     {impl, store_options} = Pipeline.checkpoint_store(opts)
 
     with {:ok, store} <- add_child(sup, Pipeline.store_spec(impl, store_options)),
          {:ok, resumed} <- CheckpointStore.read_position(impl, store),
          {:ok, start_position} <- Pipeline.resolve_start_position(opts, resumed),
          {:ok, assembler} <- add_child(sup, Pipeline.assembler_spec(opts, {impl, store})),
+         {:ok, _connection} <-
+           add_child(
+             sup,
+             Pipeline.connection_spec(opts, assembler, start_position, {impl, store})
+           ) do
+      :ok
+    end
+  end
+
+  # The snapshot wiring: start the durable snapshot store, run the bootstrap P0 pre-seed BEFORE
+  # the checkpoint read (so the assembler seeds its watermark from P0), resolve the start
+  # position, then wire the mode-specific tail (`finish_wire/6`). `status: :complete` collapses to
+  # the pure-C1 tail; a fresh/mid-snapshot start wires the coordinator.
+  defp wire_snapshot(sup, opts) do
+    {impl, store_options} = Pipeline.checkpoint_store(opts)
+    snapshot = Keyword.fetch!(opts, :snapshot)
+    {snap_impl, snap_options} = snapshot.store
+
+    with {:ok, store} <- add_child(sup, Pipeline.store_spec(impl, store_options)),
+         {:ok, snap_store} <-
+           add_child(sup, Pipeline.snapshot_store_spec(snap_impl, snap_options)) do
+      # `bootstrap/4` seeds the checkpoint BEFORE the `continue_wire/5` read below (so the
+      # assembler seeds its watermark from P0), and returns `:complete | {:snapshot, ...} |
+      # {:error, reason}` — dispatched by `continue_wire/5`, not the `{:ok, _}` this chain matches.
+      boot = Snapshot.bootstrap(opts, snapshot, {impl, store}, {snap_impl, snap_store})
+      continue_wire(sup, opts, boot, {impl, store}, {snap_impl, snap_store})
+    end
+  end
+
+  # Abort on a bootstrap error; otherwise resolve the (now-seeded) start position and wire the
+  # mode-specific tail.
+  defp continue_wire(_sup, _opts, {:error, reason}, _checkpoint_store, _snapshot_store) do
+    {:error, reason}
+  end
+
+  defp continue_wire(sup, opts, boot, {impl, store} = checkpoint_store, snapshot_store) do
+    with {:ok, resumed} <- CheckpointStore.read_position(impl, store),
+         {:ok, start_position} <- Pipeline.resolve_start_position(opts, resumed) do
+      finish_wire(sup, opts, boot, checkpoint_store, snapshot_store, start_position)
+    end
+  end
+
+  # `status: :complete` ⇒ pure C1: the REAL sink is wired directly, no coordinator, no attach —
+  # observably identical to the C1 stream.
+  defp finish_wire(sup, opts, :complete, {impl, store}, _snapshot_store, start_position) do
+    with {:ok, assembler} <- add_child(sup, Pipeline.assembler_spec(opts, {impl, store})),
+         {:ok, _connection} <-
+           add_child(
+             sup,
+             Pipeline.connection_spec(opts, assembler, start_position, {impl, store})
+           ) do
+      :ok
+    end
+  end
+
+  # Fresh / mid-snapshot: the assembler's sink is the coordinator MODULE (name-resolved at call
+  # time, so the assembler need not hold the coordinator pid at init — design § Pinned #4). The
+  # coordinator starts with `processed_set` = the live watermark (P0, Task-8-F2); once it is up,
+  # `attach_coordinator/2` injects the observer + arms the silent-death monitor. The coordinator
+  # is started BEFORE the connection so the observer is attached before the stream advances the
+  # watermark (no early-advance race; a missed pre-attach advance would recover anyway — the
+  # watermark feed is a cumulative snapshot, not a delta).
+  defp finish_wire(sup, opts, boot, {impl, store}, snapshot_store, start_position) do
+    {:snapshot, snapshot_state, readers, processed_set} = boot
+    assembler_opts = Keyword.put(opts, :sink, Coordinator)
+
+    with {:ok, assembler} <-
+           add_child(sup, Pipeline.assembler_spec(assembler_opts, {impl, store})),
+         {:ok, coordinator} <-
+           add_child(
+             sup,
+             Pipeline.coordinator_spec(opts,
+               assembler: assembler,
+               snapshot_store: snapshot_store,
+               snapshot_state: snapshot_state,
+               readers: readers,
+               processed_set: processed_set
+             )
+           ),
+         :ok <- AssemblerServer.attach_coordinator(assembler, coordinator),
          {:ok, _connection} <-
            add_child(
              sup,

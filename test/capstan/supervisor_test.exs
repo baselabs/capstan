@@ -45,6 +45,31 @@ defmodule Capstan.SupervisorTest.NoSchemaChangeSink do
   def handle_transaction(_txn), do: {:ok, %Capstan.Position{gtid_set: "", file: nil, pos: nil}}
 end
 
+defmodule Capstan.SupervisorTest.SnapshotSink do
+  @moduledoc false
+  # A valid SNAPSHOT-mode sink: the lib-owned trio + handle_snapshot/2.
+  @behaviour Capstan.Sink
+  @impl true
+  def handle_transaction(_txn), do: {:ok, %Capstan.Position{gtid_set: "", file: nil, pos: nil}}
+  @impl true
+  def handle_schema_change(_change, _position), do: :ok
+  @impl true
+  def handle_snapshot(_changes, _meta), do: :ok
+end
+
+defmodule Capstan.SupervisorTest.CompleteSnapStore do
+  @moduledoc false
+  # A SnapshotStore whose durable state is already `status: :complete`, so the bootstrap
+  # short-circuits to pure C1 (no coordinator) WITHOUT opening a source connection.
+  @behaviour Capstan.SnapshotStore
+  def start_link(_opts), do: Agent.start_link(fn -> :complete end)
+
+  def read(_store),
+    do: {:ok, %Capstan.Snapshot.State{status: :complete, p0: "u:1-9", tables: %{}}}
+
+  def write(_store, _state), do: :ok
+end
+
 defmodule Capstan.SupervisorTest do
   use ExUnit.Case, async: false
 
@@ -54,11 +79,13 @@ defmodule Capstan.SupervisorTest do
   alias Capstan.ValueFree
 
   alias Capstan.SupervisorTest.{
+    CompleteSnapStore,
     LibSink,
     NoCheckpointSink,
     NoSchemaChangeSink,
     NoTransactionSink,
-    SinkOwnedSink
+    SinkOwnedSink,
+    SnapshotSink
   }
 
   # A config that validates (pure) but points the connection at a closed port, so a real
@@ -279,6 +306,48 @@ defmodule Capstan.SupervisorTest do
       Process.sleep(100)
       assert Process.alive?(sup)
       assert child_pid(sup, :assembler) in [nil, :undefined]
+    end
+  end
+
+  describe "snapshot wiring — absent :snapshot is byte-identical C1; :complete is pure C1" do
+    test "an absent :snapshot key wires NO snapshot children (byte-identical C1)" do
+      assert {:ok, sup} = Capstan.start_link(lib_opts())
+      on_exit(fn -> stop_supervisor(sup) end)
+
+      ids = sup |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
+      assert :store in ids
+      assert :assembler in ids
+      assert :connection in ids
+      # The snapshot-mode children are NOT wired when :snapshot is absent.
+      refute :snapshot_store in ids
+      refute :snapshot_coordinator in ids
+    end
+
+    test "a :complete snapshot store starts NO coordinator (pure C1, real sink wired directly)" do
+      # The connection points at a closed port (retries), so no live substrate is needed; the
+      # bootstrap reads the :complete store and short-circuits BEFORE any source connection.
+      {:ok, sup} =
+        Capstan.Supervisor.start_link(
+          connection: [host: "127.0.0.1", port: 1, username: "u", password: "p", ssl: false],
+          server_id: 42,
+          sink: SnapshotSink,
+          checkpoint_store: [module: Capstan.CheckpointStore.InMemory],
+          snapshot: %{
+            tables: [{"probe_db", "orders"}],
+            store: {CompleteSnapStore, []},
+            chunk_size: 4096
+          }
+        )
+
+      on_exit(fn -> stop_supervisor(sup) end)
+
+      ids = sup |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
+      assert :assembler in ids
+      assert :connection in ids
+      # :complete ⇒ the coordinator is NOT started; the real sink is wired directly.
+      refute :snapshot_coordinator in ids
+      # The assembler's sink is the REAL sink (not the coordinator module).
+      assert %{sink: SnapshotSink} = :sys.get_state(child_pid(sup, :assembler))
     end
   end
 
