@@ -9,6 +9,8 @@ context, the decision, and the consequences — including what was deliberately 
 | [0002](0002-fail-closed-server-preconditions.md) | Fail-closed server preconditions — the connect-time gate on binlog/GTID configuration |
 | [0003](0003-transaction-shape-and-checkpoint-semantics.md) | Transaction shape and checkpoint semantics — terminators, XA refusal, the processed watermark |
 | [0004](0004-c1-scope-lib-owned-checkpoint-only.md) | C1 scope — lib-owned checkpoint mode only; sink-owned mode and explicit start positions deferred |
+| [0005](0005-initial-snapshot-cursor-gate-brief-lock.md) | Initial snapshot — cursor-gated suppression + a brief per-chunk lock capturing an exact GTID position |
+| [0006](0006-xa-prepare-commit-tracking.md) | XA prepare/commit tracking via a held-out watermark — supersedes 0003 §2 for opt-in `xa: :track` (implementation pending) |
 
 A note on provenance markers: "Design refs" (`Q1`, `Q5`, `F6`, …) cite the numbered questions
 and findings of the pre-implementation design review, and "Task n" cites rows of the
