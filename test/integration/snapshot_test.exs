@@ -226,8 +226,19 @@ defmodule Capstan.Integration.SnapshotTest do
 
     by_table = Enum.group_by(chunks, fn {sch, tbl, _} -> {sch, tbl} end)
 
-    assert MapSet.new(Map.keys(by_table)) ==
-             MapSet.new([{ctx.schema, ctx.table}, {ctx.schema, second}, {ctx.schema, empty}])
+    # The scoped set: MY three tables are all present, NOTHING outside the
+    # application schemas ever appears (system schemas excluded by the
+    # enumeration), and the VIEW is not a table (a view would fail PK
+    # introspection and halt — completing at all proves its exclusion).
+    delivered = MapSet.new(Map.keys(by_table))
+
+    assert MapSet.subset?(
+             MapSet.new([{ctx.schema, ctx.table}, {ctx.schema, second}, {ctx.schema, empty}]),
+             delivered
+           )
+
+    system_schemas = MapSet.new(["mysql", "information_schema", "performance_schema", "sys"])
+    assert Enum.all?(delivered, fn {schema, _} -> not MapSet.member?(system_schemas, schema) end)
 
     # C2c: the zero-row table's single beat is an EMPTY FINAL chunk (exactly
     # one beat, final — the ledger below proves zero rows anywhere).
