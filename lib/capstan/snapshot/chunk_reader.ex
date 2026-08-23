@@ -231,7 +231,14 @@ defmodule Capstan.Snapshot.ChunkReader do
   @spec read_chunk(t(), cursor()) :: read_result()
   def read_chunk(%__MODULE__{} = reader, cursor) do
     case attempt_with_budget(reader, cursor, 0) do
-      {:ok, %Chunk{rows: []}, _final?} ->
+      # A zero-row table (empty on its FIRST page, cursor still `:start`) returns
+      # the EMPTY FINAL chunk instead of a silent `{:done}` (C2c): the sink's
+      # per-table completion signal is "a `final_chunk?: true` beat", and a table
+      # with no rows must deliver exactly one — an empty one — or a sink gating
+      # per-table readiness on it waits forever. A mid-table drained cursor (the
+      # empty look-ahead AFTER non-empty pages) still takes `{:done}`: that table
+      # already received its final chunk.
+      {:ok, %Chunk{rows: []}, _final?} when cursor != :start ->
         {:done, reader}
 
       {:ok, %Chunk{} = chunk, final?} ->

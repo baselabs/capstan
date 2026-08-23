@@ -295,6 +295,11 @@ re-backfill a changed set, drop the durable snapshot state (a fresh start re-int
 **Supported primary keys (order-faithful only).** Chunking pages by MySQL `ORDER BY pk` while the
 gate compares in Elixir, so the PK type's Elixir order must provably match MySQL's: **integer**
 (signed/unsigned, incl. `BIGINT UNSIGNED`), **`BINARY`/`VARBINARY`**, and **composites** of those.
+**Zero-row tables complete loudly (C2c).** A configured snapshot table with no
+pre-existing rows delivers exactly ONE snapshot beat — an empty `final_chunk?: true`
+chunk — so a sink gating per-table readiness on the final chunk never waits on an
+empty table. Tables that had rows deliver their final chunk as always.
+
 A collation-ordered STRING PK (`CHAR`/`VARCHAR`/`TEXT`) is refused `:snapshot_pk_unsupported_type`
 (a named follow-up, ROADMAP C2a). A `tables: :all` snapshot — which arises when the capture
 allowlist is itself `:all` — RESOLVES to the server's scoped base tables: the

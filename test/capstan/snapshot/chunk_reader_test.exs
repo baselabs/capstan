@@ -131,11 +131,23 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
       assert chunk2.max_pk == 4
     end
 
-    test "an empty page returns :done (an empty table, or a fully-drained cursor)" do
+    test "an empty page MID-table returns :done (the drained cursor after non-empty pages)" do
       cfg = default_cfg(chunk_size: 2, chunk_rows: [])
       {reader, _agent} = open_reader(cfg)
 
-      assert {:done, ^reader} = ChunkReader.read_chunk(reader, :start)
+      assert {:done, ^reader} = ChunkReader.read_chunk(reader, 5)
+    end
+
+    test "a ZERO-ROW table delivers an EMPTY FINAL chunk on its first read (C2c)" do
+      # The sink's per-table completion signal is a `final_chunk?: true` beat; a
+      # table with no rows must deliver exactly one — empty — or a sink gating
+      # per-table readiness on it waits forever. RED (old behavior): the empty
+      # first read returned a silent {:done} and the sink heard NOTHING.
+      cfg = default_cfg(chunk_size: 2, chunk_rows: [])
+      {reader, _agent} = open_reader(cfg)
+
+      assert {:ok, %Chunk{rows: [], max_pk: nil}, true, _reader2} =
+               ChunkReader.read_chunk(reader, :start)
     end
 
     test "the WHERE keyset predicate uses `pk > cursor` for a non-:start cursor" do

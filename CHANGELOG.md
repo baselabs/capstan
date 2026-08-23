@@ -6,6 +6,16 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — C2c zero-row snapshot completion signal
+
+- A configured snapshot table with ZERO pre-existing rows now delivers exactly
+  one snapshot beat — an empty `final_chunk?: true` chunk — instead of silently
+  taking the done path with no `handle_snapshot/2` call: a sink gating
+  per-table readiness on `final_chunk?` no longer waits forever on empty
+  tables. Mid-table drained cursors (the empty look-ahead after non-empty
+  pages) are unchanged. RED-first unit tripwire + live marquee (the C2b :all
+  set includes a zero-row table; its single beat is the empty final chunk).
+
 ### Added — C2b `tables: :all` snapshot resolution
 
 - An `:all` snapshot set (which arises when the capture allowlist is itself

@@ -180,6 +180,15 @@ defmodule Capstan.Integration.SnapshotTest do
       "INSERT INTO #{q(ctx.schema, second)} (id, v) VALUES (7, 70), (8, 80)"
     )
 
+    # C2c: a configured snapshot table with ZERO rows must still deliver exactly
+    # one completion beat (an empty final_chunk) — the C2b :all set includes it.
+    empty = "t_empty"
+
+    MysqlCase.run!(
+      ctx.qconn,
+      "CREATE TABLE #{q(ctx.schema, empty)} (id INT PRIMARY KEY, v INT NOT NULL) ENGINE=InnoDB"
+    )
+
     w0 = MysqlCase.read_gtid_executed!(ctx.qconn)
     checkpoint = new_durable_checkpoint(ctx, w0)
     snap_store = new_durable_snapshot_store(ctx)
@@ -218,7 +227,11 @@ defmodule Capstan.Integration.SnapshotTest do
     by_table = Enum.group_by(chunks, fn {sch, tbl, _} -> {sch, tbl} end)
 
     assert MapSet.new(Map.keys(by_table)) ==
-             MapSet.new([{ctx.schema, ctx.table}, {ctx.schema, second}])
+             MapSet.new([{ctx.schema, ctx.table}, {ctx.schema, second}, {ctx.schema, empty}])
+
+    # C2c: the zero-row table's single beat is an EMPTY FINAL chunk (exactly
+    # one beat, final — the ledger below proves zero rows anywhere).
+    assert [{_sch, _tbl, true}] = Map.fetch!(by_table, {ctx.schema, empty})
 
     Enum.each(by_table, fn {_k, beats} ->
       assert Enum.any?(beats, fn {_, _, final?} -> final? end),
