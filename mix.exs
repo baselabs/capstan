@@ -1,7 +1,7 @@
 defmodule Capstan.MixProject do
   use Mix.Project
 
-  @version "1.1.0"
+  @version "1.1.1"
   @source_url "https://github.com/baselabs/capstan"
 
   def project do
@@ -73,7 +73,11 @@ defmodule Capstan.MixProject do
   defp package do
     [
       maintainers: ["rjpalermo"],
-      files: ~w(lib .formatter.exs mix.exs README* LICENSE* NOTICE CHANGELOG* usage-rules.md),
+      # The tarball ships the decision record WITH the code it governs (ADRs + the
+      # authored roadmap); contributor-workflow docs (testing.md -> scripts/, compose)
+      # reference repo-only files and stay repo-side.
+      files:
+        ~w(lib .formatter.exs mix.exs README* LICENSE* NOTICE CHANGELOG* usage-rules.md docs/adr/* docs/ROADMAP.md),
       licenses: ["MIT"],
       links: %{
         "GitHub" => @source_url,

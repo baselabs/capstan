@@ -6,6 +6,14 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-23
+
+### Fixed
+
+- The hex tarball now ships the decision record with the code it governs: `docs/adr/*`
+  (0001–0011) and `docs/ROADMAP.md` join the package files. Contributor-workflow docs
+  that reference repo-only files (scripts, docker-compose) remain repository-side.
+
 ## [1.1.0] - 2026-08-23
 
 ### Added

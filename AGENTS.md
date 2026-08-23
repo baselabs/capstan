@@ -15,7 +15,7 @@ in-library and probe-proven (`:gen_tcp`/`:ssl`/`:crypto` only; `decimal` + `jaso
 Elixir `~> 1.15`.
 
 **Current state:** C1 (streaming spine) and C2 (initial snapshot) are implemented
-and released as `capstan` 1.1.0. C2 adds cursor-gated, resumable initial
+and released as `capstan` 1.1.1. C2 adds cursor-gated, resumable initial
 backfill with the brief per-chunk read lock recorded in ADR 0005; omitting
 `:snapshot` preserves the C1 stream. C3–C6 and the named C1/C2 follow-up rows
 remain open in `docs/ROADMAP.md`. The rules below are binding invariants for the
