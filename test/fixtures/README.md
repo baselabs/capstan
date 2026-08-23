@@ -190,3 +190,61 @@ CREATE TABLE frac_probe (
 INSERT INTO frac_probe (id, dt, tm, ts)
 VALUES (1, '2024-01-15 10:30:00.123', '10:30:00.123456', '2024-01-15 10:30:00.654321');
 ```
+
+### (j) `spatial` — `GEOMETRY`/`POINT` columns (raw passthrough, C4a)
+
+```sql
+DROP TABLE IF EXISTS geo_widgets;
+CREATE TABLE geo_widgets (id INT PRIMARY KEY, g GEOMETRY, p POINT) ENGINE=InnoDB;
+INSERT INTO geo_widgets VALUES (1, ST_GeomFromText('POINT(1 2)'), ST_GeomFromText('POINT(3 4)'));
+```
+
+### (k) `xa` — a full two-phase XA: prepare (type 38) + separate resolution transaction (C5)
+
+```sql
+DROP TABLE IF EXISTS xa_widgets;
+CREATE TABLE xa_widgets (id INT PRIMARY KEY, name VARCHAR(50)) ENGINE=InnoDB;
+XA START 'xa-gtrid','xa-bqual',7;
+INSERT INTO xa_widgets (id, name) VALUES (1, 'xa-one');
+XA END 'xa-gtrid','xa-bqual',7;
+XA PREPARE 'xa-gtrid','xa-bqual',7;
+XA COMMIT 'xa-gtrid','xa-bqual',7;
+```
+
+## Compressed-transaction scenarios (`zstd_*`) — a second substrate
+
+The `zstd_*` scenarios are captured from the throwaway `capstan-zstd` container
+(`127.0.0.1:26666`, `--binlog-transaction-compression=ON`, caching_sha2 root/probe),
+NOT the shared substrate — each committed transaction arrives as a bare `GTID`
+followed by a `TRANSACTION_PAYLOAD_EVENT` (type 40) whose body is a
+net_field_length TLV header wrapping one zstd frame. Three files per payload
+event are committed:
+
+- `NN-transaction_payload.bin` — the verbatim type-40 event (header + TLV + frame + CRC);
+- `NN-transaction_payload.zst` — the zstd frame sliced out of the TLV;
+- `NN-transaction_payload.inner` — the same frame inflated by the REFERENCE
+  `zstd` binary at capture time: the byte-exact oracle for `Capstan.Zstd` (never
+  capstan's own decoder). The inner bytes are `QUERY(BEGIN) + TABLE_MAP +
+  ROWS + XID` events WITHOUT per-event CRC trailers — the outer type-40 CRC
+  covers the compressed payload as a whole.
+
+Regenerate with the container up (it is disposable: `docker run --name capstan-zstd
+-e MYSQL_ROOT_PASSWORD=probe -e MYSQL_DATABASE=probe_db -p 26666:3306 mysql:8.0
+--binlog-format=ROW --binlog-row-image=FULL --binlog-row-metadata=FULL
+--binlog-row-value-options= --gtid-mode=ON --enforce-gtid-consistency=ON
+--server-id=9 --binlog-transaction-compression=ON`; a fresh container has a new
+server_uuid — decode tests parse it from the bytes) and a host `zstd` binary on
+PATH for the `.inner` oracles:
+
+```
+MIX_ENV=test mix run -e 'Capstan.FixtureCapture.capture_only!(["zstd_small", "zstd_rows", "zstd_large", "zstd_repetitive", "zstd_multi"])'
+```
+
+- `zstd_small` — one INSERT (3 columns): single small frame.
+- `zstd_rows` — INSERT + UPDATE + DELETE: three payloads across row-event kinds.
+- `zstd_large` — three ~400KB `REPEAT` rows in one transaction: the inflated
+  payload is ~1.18MB, forcing a multi-block frame (multiple 128KB compressed
+  blocks, cross-block matches, larger literal sections).
+- `zstd_repetitive` — highly repetitive rows (RLE-shaped literals and repeat offsets).
+- `zstd_multi` — several transactions in sequence: one frame per payload,
+  exercising frame-to-frame state resets (repeat offsets back to `{1,4,8}`).

@@ -12,7 +12,8 @@ defmodule Capstan.MysqlCase do
       duplicated (forge substrate rule).
     * **A throwaway `mysql:8.0` container** on a fresh ephemeral port — every DESTRUCTIVE
       marquee (`PURGE BINARY LOGS`, a server configured with
-      `binlog_transaction_compression=ON`) spins one via `with_throwaway_mysql/2`, provisions
+      `binlog_transaction_compression=ON` for the compressed-consumption marquee) spins one
+      via `with_throwaway_mysql/2`, provisions
       it, runs, and tears it down with a guaranteed `after`. Those marquees are
       `@moduletag :requires_docker`, so ExUnit EXCLUDES them (a genuine skip, never a spurious
       pass) unless the run selects that tag; `with_throwaway_mysql/2` also raises a clear error
@@ -209,8 +210,8 @@ defmodule Capstan.MysqlCase do
 
   @doc """
   The `:assembler` child pid of a running pipeline supervisor — the process whose exit carries an
-  AssemblerServer-side fail-closed halt (`:compressed_payload_unsupported`,
-  `:unsupported_transaction_shape`) that emits no telemetry and so must be observed by monitor.
+  AssemblerServer-side fail-closed halt (`:unsupported_transaction_shape`, a malformed
+  transaction-payload reason) that emits no telemetry and so must be observed by monitor.
   """
   @spec assembler_pid(pid()) :: pid()
   def assembler_pid(supervisor) do

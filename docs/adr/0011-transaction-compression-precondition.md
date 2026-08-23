@@ -1,6 +1,10 @@
-# ADR-0011 — Binary-log transaction compression is a precondition, not a stream-time surprise
+# ADR-0011 — Binary-log transaction compression: consumed by the in-library zstd decoder
 
-**Status:** Accepted (2026-08-23) · **Extends:** [ADR-0002](0002-fail-closed-server-preconditions.md) (the gate gains a sixth variable) · **Related:** [ADR-0008](0008-pure-elixir-protocol-client.md) (the no-NIF posture that rules out a zstd dependency)
+**Status:** Accepted (2026-08-23; AMENDED same-day — the pure-Elixir decoder landed and the
+refuse gate was removed, exactly as this ADR anticipated) · **Extends:**
+[ADR-0002](0002-fail-closed-server-preconditions.md) · **Related:**
+[ADR-0008](0008-pure-elixir-protocol-client.md) (the no-NIF posture that makes the decoder
+in-library in the first place)
 
 ## Context
 
@@ -15,38 +19,46 @@ MySQL 8.0.20+ can compress row-based transactions into a single zstd-compressed
 - Excluded from compression: GTID/control/heartbeat events, incident events (and their whole
   transactions), non-transactional events (and their whole transactions), statement-based
   events — so a compression-enabled source still delivers some events bare.
+- The type-40 body is a `net_field_length` TLV header (`0`=end mark, `1`=payload size,
+  `2`=compression type — `0`=ZSTD, `255`=NONE, `3`=uncompressed size; server source
+  `libbinlogevents/src/codecs/binary.cpp`) wrapping one zstd frame. The inflated bytes are
+  the transaction's events WITHOUT per-event CRC trailers — the outer event's CRC32 covers
+  the compressed payload as a whole (observed live; inner headers' `event_size` values sum
+  exactly to the inflated length).
 
-capstan cannot inflate zstd payloads in posture: ADR-0008 bans NIFs, and a pure-Elixir zstd
-decoder (FSE + Huffman entropy decoding) is a large, high-blast-radius implementation with no
-current partner need. Until that changes, a compression-enabled source is **unconsumable**.
-Before this ADR, such a pipeline STARTED, streamed the bare events, and halted
-`:compressed_payload_unsupported` at the FIRST compressed transaction — loud, but late: it
-surfaced only after the consumer had wired a checkpoint store and begun streaming.
+## Decision (as first accepted)
 
-## Decision
+While capstan could not inflate zstd, the precondition gate refused compression-ON sources
+at connect (`:binlog_transaction_compression_on`) and the decoder halted loudly on a type-40
+event — the honest posture for the capability capstan had.
 
-`Capstan.Config.check_preconditions/1` gains a sixth variable: `binlog_transaction_compression` must
-be OFF (`"0"` as text) or the connection refuses with the distinct, actionable reason
-`:binlog_transaction_compression_on` — at connect, before the dump, alongside the other
-gate variables (ADR-0002's posture: distinct reason per violation, one query, text-compared).
+## Decision (the amendment — the decoder landed)
 
-The decoder's loud halt on a `TRANSACTION_PAYLOAD` event REMAINS, deliberately: the gate reads
-the variable once per connect, and compression is dynamic — a source can flip it ON after the
-pipeline has connected. The gate converts the common static case into an early start-time
-refusal; the decoder halt is the backstop for the mid-stream flip. Both are fail-closed; no
-compressed payload is ever partially decoded or guessed at.
+`Capstan.Zstd` is a pure-Elixir zstd frame decompressor (RFC 8878, read first-hand):
+literals (raw/RLE/Huffman with FSE-compressed weights, 1- and 4-stream), sequences
+(predefined/RLE/FSE/repeat tables, the three-state bitstream), overlap-safe sequence
+execution with repeat-offset tracking, frame/window/FCS handling, and XXH64 content-checksum
+verification. `Capstan.Binlog.TransactionPayload` decodes the type-40 body: TLV parse →
+inflate → split the inner event stream → the assembler folds the inner events through the
+same transition as bare events (the bare GTID that opened the transaction rode ahead of the
+payload on the wire).
 
-A future pure-Elixir zstd decoder (or a superseding ADR-0008 decision) would REMOVE this gate
-variable and consume payloads instead — the gate is the honest posture for the capability
-capstan actually has.
+Conformance is **byte-exact against reference-inflated frames**: fixtures captured live from
+a `binlog_transaction_compression=ON` MySQL 8.0 substrate, each paired with the same frame
+inflated by the reference `zstd` binary (`.inner` oracles, never capstan's own decoder), plus
+RFC 8878 Appendix A table crosschecks and fail-closed tripwires (tampered bytes, bad magic,
+reserved bits, dictionaries, checksums). The server-declared uncompressed size is verified
+against the inflated length. The precondition gate's sixth variable is REMOVED (five remain,
+ADR-0002); a malformed or non-ZSTD payload halts fail-closed at decode time.
 
 ## Consequences
 
-- Sources that deliberately enable compression are refused at connect with the reason naming
-  the setting — actionable without a capstan-side change (disable compression for the source
-  capstan tails).
-- The gate reads a variable that exists only on MySQL 8.0.20+; on an older server the single
-  precondition query errors and the connection refuses `:precondition_query_failed` —
-  fail-closed either way, and capstan already requires 8.0+.
-- The preflight report (`scripts/capstan-preflight.sql`) folds the check into the precondition
-  table so discovery and the runtime gate agree.
+- Compression-ON sources are consumed transparently; the sink sees the same transactions an
+  uncompressed source would deliver. GTID/control/non-transactional events still arrive bare
+  on such sources — the stream is a mix by construction.
+- A dynamic flip ON after connect needs no gate: the decoder consumes whatever arrives.
+- Fail-closed posture unchanged: any zstd corruption signal, a non-ZSTD compression type, an
+  uncompressed-size mismatch, or a malformed inner header halts with a value-free reason —
+  never a partially decoded or guessed payload.
+- The preflight report (`scripts/capstan-preflight.sql`) carries the setting as
+  informational, so discovery and the runtime posture agree.

@@ -257,6 +257,16 @@ defmodule Capstan.Assembler do
 
   @spec apply_decoded(t(), Event.t(), Decoder.decoded()) :: step_result()
 
+  # A compressed transaction (TRANSACTION_PAYLOAD): the decoder inflated the
+  # payload into the wrapped events; fold each through the same transition in
+  # order. The bare GTID that opened the transaction arrived before the payload,
+  # so the inner QUERY(BEGIN)/rows/terminator fold exactly as bare events. A
+  # failure mid-payload propagates fail-closed with the in-flight buffer
+  # discarded — structurally the same guarantee as a bare-stream failure.
+  defp apply_decoded(state, _event, {:transaction_payload, inner_events}) do
+    fold_inner(inner_events, state, [])
+  end
+
   # A GTID arriving while a transaction is still open is a stream desync — the prior
   # transaction never reached its terminator. Fail closed rather than silently
   # overwrite (and lose) the open buffer, which would be an undetected data loss.
@@ -321,6 +331,18 @@ defmodule Capstan.Assembler do
   defp apply_decoded(state, _event, :heartbeat), do: {:cont, [], state}
   defp apply_decoded(state, _event, :stop), do: {:cont, [], state}
   defp apply_decoded(state, _event, {:rows_query, :discarded}), do: {:cont, [], state}
+
+  # The TRANSACTION_PAYLOAD sub-fold: each inner event steps the same transition
+  # a bare event would; outputs accumulate in order and any halt/error
+  # propagates with the in-flight buffer discarded.
+  defp fold_inner([], state, acc), do: {:cont, acc, state}
+
+  defp fold_inner([inner | rest], state, acc) do
+    case step(state, inner) do
+      {:cont, more, state2} -> fold_inner(rest, state2, acc ++ more)
+      {kind, _} = failure when kind in [:halt, :error] -> failure
+    end
+  end
 
   ## ---------------------------------------------------------------------------
   ## QUERY classification (fixture_capture classify/apply_event precedent)

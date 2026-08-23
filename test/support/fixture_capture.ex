@@ -84,7 +84,9 @@ defmodule Capstan.FixtureCapture do
           name: String.t(),
           server_id: pos_integer(),
           setup: [String.t()],
-          statements: [String.t()]
+          statements: [String.t()],
+          port: pos_integer() | nil,
+          auth_plugins: [atom()] | nil
         }
 
   @doc """
@@ -104,7 +106,7 @@ defmodule Capstan.FixtureCapture do
   @spec capture_scenario!(scenario()) :: :ok
   def capture_scenario!(scenario) do
     IO.puts("[capture] #{scenario.name} — running setup + scenario SQL")
-    query_socket = connect!()
+    query_socket = connect!(scenario)
 
     {checkpoint, expected} =
       try do
@@ -123,7 +125,7 @@ defmodule Capstan.FixtureCapture do
     end
 
     IO.puts("[capture] #{scenario.name} — dumping (server_id=#{scenario.server_id})")
-    events = capture_dump!(scenario.server_id, checkpoint, expected)
+    events = capture_dump!(scenario, checkpoint, expected)
     write_fixtures!(scenario.name, events)
     IO.puts("[capture] #{scenario.name} — wrote #{length(events)} event(s)")
     :ok
@@ -324,6 +326,95 @@ defmodule Capstan.FixtureCapture do
           "INSERT INTO frac_probe (id, dt, tm, ts) VALUES " <>
             "(1, '2024-01-15 10:30:00.123', '10:30:00.123456', '2024-01-15 10:30:00.654321')"
         ]
+      },
+      # ---- TRANSACTION_PAYLOAD (zstd) scenarios — captured from the throwaway
+      # `capstan-zstd` container (port 26666, caching_sha2 root), NOT the shared
+      # substrate: binlog_transaction_compression=ON. Each committed transaction
+      # arrives as a bare GTID + a type-40 payload event; `.zst`/`.inner` oracles
+      # are written alongside (`.inner` = reference `zstd` inflation).
+      %{
+        name: "zstd_small",
+        server_id: 4101,
+        port: 26_666,
+        auth_plugins: [:caching_sha2_password],
+        setup: [
+          "DROP TABLE IF EXISTS zs_small",
+          "CREATE TABLE zs_small (id INT PRIMARY KEY, name VARCHAR(50), qty INT) ENGINE=InnoDB"
+        ],
+        statements: [
+          "INSERT INTO zs_small (id, name, qty) VALUES (1, 'alpha', 10)"
+        ]
+      },
+      %{
+        name: "zstd_rows",
+        server_id: 4102,
+        port: 26_666,
+        auth_plugins: [:caching_sha2_password],
+        setup: [
+          "DROP TABLE IF EXISTS zs_rows",
+          "CREATE TABLE zs_rows (id INT PRIMARY KEY, name VARCHAR(50), qty INT) ENGINE=InnoDB"
+        ],
+        statements: [
+          "INSERT INTO zs_rows (id, name, qty) VALUES (1, 'alpha', 10), (2, 'beta', 20), (3, 'gamma', 30)",
+          "UPDATE zs_rows SET qty = qty + 5 WHERE id >= 2",
+          "DELETE FROM zs_rows WHERE id = 1"
+        ]
+      },
+      %{
+        # ~500KB of row data in ONE transaction: the inflated payload exceeds
+        # the 128KB block maximum, forcing a multi-block frame (multiple
+        # compressed blocks, cross-block match copies, larger literal sections
+        # and 4-stream Huffman).
+        name: "zstd_large",
+        server_id: 4103,
+        port: 26_666,
+        auth_plugins: [:caching_sha2_password],
+        setup: [
+          "DROP TABLE IF EXISTS zs_large",
+          "CREATE TABLE zs_large (id INT PRIMARY KEY, body MEDIUMTEXT) ENGINE=InnoDB"
+        ],
+        statements: [
+          "INSERT INTO zs_large (id, body) VALUES " <>
+            "(1, REPEAT('large-block-literal-', 20000)), " <>
+            "(2, REPEAT('large-block-literal-', 20000)), " <>
+            "(3, REPEAT('other-run-of-bytes-', 20000))"
+        ]
+      },
+      %{
+        # Highly repetitive rows: exercises RLE literals / repeat-offset
+        # handling the small diverse rows never produce.
+        name: "zstd_repetitive",
+        server_id: 4104,
+        port: 26_666,
+        auth_plugins: [:caching_sha2_password],
+        setup: [
+          "DROP TABLE IF EXISTS zs_rep",
+          "CREATE TABLE zs_rep (id INT PRIMARY KEY, pad CHAR(40)) ENGINE=InnoDB"
+        ],
+        statements: [
+          "INSERT INTO zs_rep (id, pad) VALUES " <>
+            "(1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), " <>
+            "(2, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), " <>
+            "(3, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')"
+        ]
+      },
+      %{
+        # Several transactions in sequence: each is its own payload event with
+        # its own frame — exercises frame-to-frame state resets (repeat offsets
+        # {1,4,8}, Huffman/FSE table carry NOT crossing frames).
+        name: "zstd_multi",
+        server_id: 4105,
+        port: 26_666,
+        auth_plugins: [:caching_sha2_password],
+        setup: [
+          "DROP TABLE IF EXISTS zs_multi",
+          "CREATE TABLE zs_multi (id INT PRIMARY KEY, name VARCHAR(50), qty INT) ENGINE=InnoDB"
+        ],
+        statements: [
+          "INSERT INTO zs_multi (id, name, qty) VALUES (1, 'one', 1)",
+          "INSERT INTO zs_multi (id, name, qty) VALUES (2, 'two', 2)",
+          "UPDATE zs_multi SET qty = 9 WHERE id = 1"
+        ]
       }
     ]
   end
@@ -380,8 +471,9 @@ defmodule Capstan.FixtureCapture do
   ## dump connection + event capture
   ## ---------------------------------------------------------------------------
 
-  defp capture_dump!(server_id, checkpoint, expected) do
-    socket = connect!()
+  defp capture_dump!(scenario, checkpoint, expected) do
+    socket = connect!(scenario)
+    server_id = scenario.server_id
 
     try do
       run_query!(socket, "SET @master_binlog_checksum = @@global.binlog_checksum")
@@ -444,6 +536,13 @@ defmodule Capstan.FixtureCapture do
   end
 
   defp apply_event(:xid, _body, state), do: close_current(state)
+
+  # A compressed transaction (TRANSACTION_PAYLOAD, type 40): the GTID rode BARE
+  # immediately before it and the payload carries the whole transaction body, so
+  # the payload event completes the GTID's capture bookkeeping. The payload's own
+  # inner events are not classified here — the capture keeps the raw bytes; the
+  # inner ORACLE (.inner) is derived once below via the reference `zstd` binary.
+  defp apply_event(:transaction_payload, _body, state), do: close_current(state)
   defp apply_event(_other, _body, state), do: state
 
   defp close_current(%{current: nil} = state), do: state
@@ -481,8 +580,58 @@ defmodule Capstan.FixtureCapture do
 
     Enum.each(events, fn {seq, name, event} ->
       dir |> Path.join("#{pad(seq)}-#{name}.bin") |> File.write!(event)
+
+      if name == :transaction_payload do
+        write_payload_oracles!(dir, pad(seq), event)
+      end
     end)
   end
+
+  # For a TRANSACTION_PAYLOAD event, also commit the zstd frame (.zst — the TLV
+  # payload sliced out with the net_field_length walk the MySQL codec defines)
+  # and the reference-inflated inner event stream (.inner — produced by the HOST
+  # `zstd` binary, never by capstan's own decoder: the conformance oracle).
+  defp write_payload_oracles!(dir, seq, event) do
+    <<_header::19-binary, body_ck::binary>> = event
+    body_len = byte_size(body_ck) - 4
+    <<body::binary-size(^body_len), _crc::32-little>> = body_ck
+
+    {zst, _tlv_fields} = walk_tlv(body)
+
+    Path.join(dir, "#{seq}-transaction_payload.zst") |> File.write!(zst)
+
+    tmp = Path.join(System.tmp_dir(), "capstan-fixture-#{seq}.zst")
+    File.write!(tmp, zst)
+
+    case System.cmd("zstd", ["-d", "-c", tmp], stderr_to_stdout: true) do
+      {inner, 0} ->
+        Path.join(dir, "#{seq}-transaction_payload.inner") |> File.write!(inner)
+        File.rm!(tmp)
+
+      {out, code} ->
+        File.rm!(tmp)
+        raise "capstan fixture_capture: reference zstd failed (#{code}): #{out}"
+    end
+  end
+
+  # net_field_length (MySQL protocol): <251 one byte; 252 -> u16 LE; 253 -> u24;
+  # 254 -> u64 LE. Walks the TRANSACTION_PAYLOAD TLV header (type 0 = end mark)
+  # and returns {zstd_frame, [{field_type, value}]}.
+  defp walk_tlv(bin), do: do_walk_tlv(bin, [])
+
+  defp do_walk_tlv(<<0, rest::binary>>, acc), do: {rest, Enum.reverse(acc)}
+
+  defp do_walk_tlv(<<type, rest::binary>>, acc) do
+    {len, rest2} = net_field_length(rest)
+    <<val::binary-size(^len), rest3::binary>> = rest2
+    {v, _} = net_field_length(val)
+    do_walk_tlv(rest3, [{type, v} | acc])
+  end
+
+  defp net_field_length(<<b, rest::binary>>) when b < 251, do: {b, rest}
+  defp net_field_length(<<252, v::16-little, rest::binary>>), do: {v, rest}
+  defp net_field_length(<<253, v::24-little, rest::binary>>), do: {v, rest}
+  defp net_field_length(<<254, v::64-little, rest::binary>>), do: {v, rest}
 
   defp pad(seq), do: seq |> Integer.to_string() |> String.pad_leading(2, "0")
 
@@ -490,16 +639,17 @@ defmodule Capstan.FixtureCapture do
   ## connection lifecycle
   ## ---------------------------------------------------------------------------
 
-  defp connect! do
-    {:ok, raw} =
-      :gen_tcp.connect(
-        @host,
-        Capstan.MysqlCase.shared_port(),
-        [:binary, active: false],
-        @connect_timeout
-      )
+  defp connect!(scenario) do
+    port = Map.get(scenario, :port) || Capstan.MysqlCase.shared_port()
 
-    case Handshake.connect({:gen_tcp, raw}, @connect_opts) do
+    auth_plugins = Map.get(scenario, :auth_plugins) || [:mysql_native_password]
+
+    {:ok, raw} = :gen_tcp.connect(@host, port, [:binary, active: false], @connect_timeout)
+
+    case Handshake.connect(
+           {:gen_tcp, raw},
+           Keyword.put(@connect_opts, :auth_plugins, auth_plugins)
+         ) do
       {:ok, %{socket: socket}} -> socket
       {:error, reason} -> raise "capstan fixture_capture: handshake failed #{inspect(reason)}"
     end

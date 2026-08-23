@@ -221,12 +221,14 @@ end
 
 defmodule Capstan.Integration.FailClosedDockerTest do
   @moduledoc """
-  The THROWAWAY-container fail-closed marquees (plan Task 18) — split from
-  `Capstan.Integration.FailClosedTest` because they require a purpose-configured `mysql:8.0`
-  container the shared substrate cannot provide:
+  The THROWAWAY-container marquees — split from `Capstan.Integration.FailClosedTest`
+  because they require a purpose-configured `mysql:8.0` container the shared substrate
+  cannot provide:
 
-    * **`binlog_transaction_compression=ON`** → a LOUD `:compressed_payload_unsupported` halt,
-      no delivery.
+    * **`binlog_transaction_compression=ON`** → CONSUMED: the pipeline streams the
+      compressed transactions, the pure-Elixir zstd decoder inflates each
+      `TRANSACTION_PAYLOAD`, and the sink receives the full row values (the ADR-0011
+      consume marquee).
     * **`binlog_row_value_options=PARTIAL_JSON`** (the Q5 precondition shape) → refused at the
       precondition gate (`:binlog_row_value_options_not_empty`) before any dump, so a partial-JSON
       row image is never decoded.
@@ -249,20 +251,25 @@ defmodule Capstan.Integration.FailClosedDockerTest do
   end
 
   ## ---------------------------------------------------------------------------
-  ## binlog_transaction_compression=ON → precondition refusal (throwaway container)
+  ## binlog_transaction_compression=ON → compressed transactions CONSUMED
   ## ---------------------------------------------------------------------------
 
-  test "a compression-enabled source is refused at the gate, before the dump" do
-    # Compression is source-unilateral (MySQL 8.0 refman: a consumer cannot opt out), so
-    # an ON source can never be consumed — the precondition gate refuses at establish
-    # with the actionable reason, BEFORE the dump. (Before the gate, this same server
-    # streamed and halted at the FIRST compressed transaction; the decoder's
-    # :compressed_payload_unsupported halt remains the backstop for a dynamic flip
-    # AFTER connect, unit-tripwired in decoder_test.)
+  test "a compression-enabled source streams and delivers inflated transactions" do
+    # Compression is source-unilateral (MySQL 8.0 refman: a consumer cannot opt
+    # out), so consuming such a source is the whole point of the zstd decoder
+    # (ADR-0011's consume arm). The marquee: DML committed under compression is
+    # delivered to the sink with the exact row VALUES — the payload's inflated
+    # inner events fold through the same assembler path as bare ones.
     MysqlCase.with_throwaway_mysql(["--binlog-transaction-compression=ON"], fn port ->
       qconn = MysqlCase.socket!(MysqlCase.query_connection(port))
 
       try do
+        MysqlCase.run!(
+          qconn,
+          "CREATE TABLE IF NOT EXISTS probe_db.zcomp " <>
+            "(id INT PRIMARY KEY, name VARCHAR(50), qty INT) ENGINE=InnoDB"
+        )
+
         watermark = MysqlCase.read_gtid_executed!(qconn)
 
         {:ok, sup} =
@@ -276,16 +283,16 @@ defmodule Capstan.Integration.FailClosedDockerTest do
 
         on_exit(fn -> MysqlCase.stop_pipeline(sup) end)
 
-        # The halt surfaces on the assembler (the Connection forwards {:capstan_halt, _}
-        # before stopping) — observe the process exit directly.
-        ref = Process.monitor(MysqlCase.assembler_pid(sup))
+        MysqlCase.run!(
+          qconn,
+          "INSERT INTO probe_db.zcomp (id, name, qty) VALUES (1, 'zstd-one', 10)"
+        )
 
-        assert_receive {:DOWN, ^ref, :process, _pid,
-                        {:shutdown, {:halt, :binlog_transaction_compression_on}}},
-                       20_000
-
-        # Nothing is delivered — the refusal precedes the dump entirely.
-        refute_receive {:txn, _g, _c, _p}, 200
+        assert_receive {:txn, _gtid, changes, _pos}, 20_000
+        assert [%{record: record} | _] = changes
+        assert record["id"] == 1
+        assert record["name"] == "zstd-one"
+        assert record["qty"] == 10
       after
         MysqlCase.close!(qconn)
       end

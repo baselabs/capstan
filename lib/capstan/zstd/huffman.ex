@@ -33,9 +33,9 @@ defmodule Capstan.Zstd.Huffman do
       <<wbin::binary-size(^weight_bytes), _::binary>> = rest
 
       weights =
-        (for <<b::8 <- wbin>> do
-           [b >>> 4, b &&& 0xF]
-         end)
+        for <<b::8 <- wbin>> do
+          [b >>> 4, b &&& 0xF]
+        end
         |> List.flatten()
         |> Enum.take(n)
 
@@ -73,7 +73,7 @@ defmodule Capstan.Zstd.Huffman do
     else
       rest_power = (1 <<< table_log) - total
 
-      if rest_power <= 0 or (rest_power &&& (rest_power - 1)) != 0 do
+      if rest_power <= 0 or (rest_power &&& rest_power - 1) != 0 do
         {:error, :weights_not_power_of_two}
       else
         last_weight = highbit(rest_power) + 1
@@ -86,12 +86,13 @@ defmodule Capstan.Zstd.Huffman do
 
   # X1 table: symbol with weight w occupies 2^(w-1) consecutive cells, symbols
   # laid in natural order grouped by weight ASCENDING (weight 1 first), nb =
-  # tableLog+1-w. The peek index's first-read bit (MSB) is the code's MSB, so
-  # the table is indexed by the peeked tableLog bits directly.
+  # tableLog+1-w. Weight-0 symbols are REMOVED (RFC 4.2.1.3) — a zero weight
+  # has no cells.
   defp build_table(weights, table_log) do
     {table, _} =
       weights
       |> Enum.with_index()
+      |> Enum.reject(fn {w, _sym} -> w == 0 end)
       |> Enum.sort_by(fn {w, sym} -> {w, sym} end)
       |> Enum.reduce({%{}, 0}, fn {w, sym}, {tbl, pos} ->
         len = 1 <<< (w - 1)
@@ -111,14 +112,13 @@ defmodule Capstan.Zstd.Huffman do
   # -- FSE-compressed weights ---------------------------------------------------
 
   defp fse_weights(bin) do
-    with {:ok, cells, _max_sym, _rest} <- Fse.read_table(bin, 255),
-         {:ok, r} <- BitReader.Reverse.new(bin) do
-      # Re-parse just the description size to slice the bitstream: the
-      # description is at the head; the reverse bitstream is the WHOLE buffer
-      # minus... no — the FSE weight stream is standalone: description (forward
-      # head) + reverse bitstream sharing the same bytes.
-      {al, _} = BitReader.Forward.read(BitReader.Forward.new(bin), 4)
-      accuracy_log = al + 5
+    # RFC 4.2.1.2: weights span 0..12 (tree depth capped at 11 bits) and the
+    # weight FSE table's accuracy log is capped at 6. The reverse bitstream
+    # starts AFTER the table description: the description is read forward from
+    # the head, and read_table's byte-aligned remainder IS the bitstream.
+    with {:ok, cells, _max_sym, bitstream} <- Fse.read_table(bin, 255, 6),
+         {:ok, r} <- BitReader.Reverse.new(bitstream) do
+      accuracy_log = Fse.table_log(map_size(cells))
 
       # Init state1 then state2, alternate; overflow = zero-filled update.
       {s1, r} = BitReader.Reverse.read(r, accuracy_log)
@@ -173,13 +173,23 @@ defmodule Capstan.Zstd.Huffman do
     end
   end
 
-  defp do_stream(_table, _log, _r, 0, acc), do: {:ok, acc |> Enum.reverse() |> IO.iodata_to_binary()}
+  defp do_stream(_table, _log, %Capstan.Zstd.BitReader.Reverse{} = r, 0, acc) do
+    # RFC 4.2.2: a bitstream not entirely and exactly consumed is faulty.
+    if BitReader.Reverse.remaining(r) == 0 do
+      {:ok, acc |> Enum.reverse() |> IO.iodata_to_binary()}
+    else
+      {:error, :huffman_stream_not_consumed}
+    end
+  end
 
   defp do_stream(table, log, r, n, acc) do
-    {peeked, _} = BitReader.Reverse.peek(r, log)
+    peeked = BitReader.Reverse.peek(r, log)
     {sym, nb} = Map.get(table, peeked, @cell_default)
-    {_, r2} = BitReader.Reverse.read(r, nb)
-    do_stream(table, log, r2, n - 1, [sym | acc])
+
+    case BitReader.Reverse.read_exact(r, nb) do
+      {:ok, _, r2} -> do_stream(table, log, r2, n - 1, [sym | acc])
+      {:error, _} = e -> e
+    end
   end
 
   defp table_log(table) do

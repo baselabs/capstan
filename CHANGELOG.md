@@ -6,6 +6,25 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — C4b compressed-transaction consumption (ADR-0011 consume arm)
+
+- `binlog_transaction_compression=ON` sources are now CONSUMED: `Capstan.Zstd` — a
+  pure-Elixir zstd frame decompressor (RFC 8878: literals incl. 4-stream Huffman and
+  FSE-compressed weight tables, sequences incl. predefined/RLE/FSE/repeat modes,
+  overlap-safe match execution with repeat-offset tracking, multi-block frames,
+  XXH64 content-checksum verification) — inflates each `TRANSACTION_PAYLOAD` event,
+  and `Capstan.Binlog.TransactionPayload` splits the inner event stream (no inner CRC
+  trailers; the outer event's CRC32 covers the compressed payload) into the events the
+  assembler folds exactly as bare ones. Byte-exact conformance: live-captured frames
+  from a compression-ON MySQL 8.0 substrate, each asserted equal to the same frame
+  inflated by the reference `zstd` binary; RFC 8878 Appendix A table crosschecks;
+  fail-closed tripwires (tampered bytes, bad magic, reserved bits, dictionaries,
+  checksum mismatch, non-ZSTD compression type, uncompressed-size mismatch).
+- The `binlog_transaction_compression=OFF` precondition is REMOVED (five gate variables
+  remain; ADR-0011 amended) — an ON source no longer refuses
+  `:binlog_transaction_compression_on` at connect. Live marquee: a pipeline against a
+  compression-ON container delivers inflated transactions with full row values.
+
 ### Added — C4a column-type breadth: SET decode + spatial passthrough
 
 - `SET` columns decode to MySQL's text form (selected members comma-joined; empty set is

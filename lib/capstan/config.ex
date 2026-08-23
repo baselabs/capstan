@@ -17,7 +17,7 @@ defmodule Capstan.Config do
 
   ## Server preconditions (ADR-0002)
 
-  `check_preconditions/1` reads six global variables in a single query and refuses
+  `check_preconditions/1` reads five global variables in a single query and refuses
   with a DISTINCT reason per violation — degraded row decoding silently guesses
   column identity, so the gate fails closed rather than proceed:
 
@@ -27,11 +27,12 @@ defmodule Capstan.Config do
     * `binlog_row_value_options` must be empty (`""` = full JSON, not `PARTIAL_JSON`)
       — else `:binlog_row_value_options_not_empty`
     * `gtid_mode` must be `ON` — else `:gtid_mode_not_on`
-    * `binlog_transaction_compression` must be OFF (`"0"`) — else
-      `:binlog_transaction_compression_on`. Compression is source-unilateral (a consumer
-      cannot opt out; MySQL 8.0.20+), so an ON source is unconsumable: refuse at connect,
-      before the dump. The decoder's loud halt on a `TRANSACTION_PAYLOAD` event remains
-      the backstop for a dynamic flip AFTER connect, which the gate cannot observe.
+
+  `binlog_transaction_compression` is deliberately NOT gated: compression is
+  source-unilateral (a consumer cannot opt out; MySQL 8.0.20+) and capstan
+  CONSUMES compressed transactions — the pure-Elixir zstd decoder inflates each
+  `TRANSACTION_PAYLOAD` event (ADR-0011's consume arm; `Capstan.Zstd`). A
+  malformed or non-ZSTD payload still halts fail-closed at decode time.
 
   MySQL simple-query results are **all text strings**, so every value is compared as
   text against the expected literal and never coerced to a typed term — an empty
@@ -75,7 +76,7 @@ defmodule Capstan.Config do
 
   @precondition_query "SELECT @@global.binlog_format, @@global.binlog_row_image, " <>
                         "@@global.binlog_row_metadata, @@global.binlog_row_value_options, " <>
-                        "@@global.gtid_mode, @@global.binlog_transaction_compression"
+                        "@@global.gtid_mode"
 
   @server_uuid_query "SELECT @@server_uuid"
 
@@ -155,7 +156,6 @@ defmodule Capstan.Config do
           | :binlog_row_metadata_not_full
           | :binlog_row_value_options_not_empty
           | :gtid_mode_not_on
-          | :binlog_transaction_compression_on
           | :precondition_query_failed
 
   @typedoc """
@@ -236,8 +236,7 @@ defmodule Capstan.Config do
            binlog_row_image,
            binlog_row_metadata,
            binlog_row_value_options,
-           gtid_mode,
-           binlog_transaction_compression
+           gtid_mode
          ]
        ]} ->
         evaluate(
@@ -245,8 +244,7 @@ defmodule Capstan.Config do
           binlog_row_image,
           binlog_row_metadata,
           binlog_row_value_options,
-          gtid_mode,
-          binlog_transaction_compression
+          gtid_mode
         )
 
       {:ok, _unexpected} ->
@@ -332,8 +330,7 @@ defmodule Capstan.Config do
          binlog_row_image,
          binlog_row_metadata,
          binlog_row_value_options,
-         gtid_mode,
-         binlog_transaction_compression
+         gtid_mode
        ) do
     cond do
       binlog_format != "ROW" -> {:error, :binlog_format_not_row}
@@ -341,7 +338,6 @@ defmodule Capstan.Config do
       binlog_row_metadata != "FULL" -> {:error, :binlog_row_metadata_not_full}
       binlog_row_value_options != "" -> {:error, :binlog_row_value_options_not_empty}
       gtid_mode != "ON" -> {:error, :gtid_mode_not_on}
-      binlog_transaction_compression != "0" -> {:error, :binlog_transaction_compression_on}
       true -> :ok
     end
   end

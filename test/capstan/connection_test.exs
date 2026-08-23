@@ -452,7 +452,7 @@ defmodule Capstan.ConnectionTest do
           start_mock_server(fn sock, _inner ->
             # precondition resultset OK, then a MALFORMED gtid_executed the client will parse.
             {0, _precond} = recv_pkt(sock)
-            serve_resultset(sock, ["ROW", "FULL", "FULL", "", "ON", "0"])
+            serve_resultset(sock, ["ROW", "FULL", "FULL", "", "ON"])
             {0, _gtid} = recv_pkt(sock)
             serve_resultset(sock, ["!!not-a-valid-gtid!!", @purged])
             block_until_closed(sock)
@@ -771,7 +771,7 @@ defmodule Capstan.ConnectionTest do
   defp serve_through_gtid(sock, executed, purged, test) do
     {0, precond_cmd} = recv_pkt(sock)
     send(test, {:server_recv, classify_cmd(precond_cmd)})
-    serve_resultset(sock, ["ROW", "FULL", "FULL", "", "ON", "0"])
+    serve_resultset(sock, ["ROW", "FULL", "FULL", "", "ON"])
     {0, gtid_cmd} = recv_pkt(sock)
     send(test, {:server_recv, classify_cmd(gtid_cmd)})
     serve_resultset(sock, [executed, purged])

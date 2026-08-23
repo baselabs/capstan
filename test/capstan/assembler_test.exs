@@ -165,7 +165,7 @@ defmodule Capstan.AssemblerTest do
       assert change.record["flags"] == "a,c"
     end
 
-    test "a Decoder {:error, _} (compressed payload) aborts fail-closed, no txn" do
+    test "a malformed compressed payload (type 40) aborts fail-closed, no txn" do
       compressed = %Event{
         type: 40,
         timestamp: 0,
@@ -178,7 +178,7 @@ defmodule Capstan.AssemblerTest do
 
       seq = events("simple_dml", ["05-gtid.bin", "06-query.bin"]) ++ [compressed]
 
-      assert {:error, :compressed_payload_unsupported, [], %Position{}} =
+      assert {:error, {:payload_header, :missing_end_mark}, [], %Position{}} =
                Assembler.run(seq, empty_start())
     end
   end

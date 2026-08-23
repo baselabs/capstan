@@ -310,8 +310,17 @@ via `[:capstan, :connection, :halt]` / `[:capstan, :assembler, :halt]` telemetry
 
 **Server preconditions** (checked at every connect; a violation halts without retrying):
 `:binlog_format_not_row`, `:binlog_row_image_not_full`, `:binlog_row_metadata_not_full`,
-`:binlog_row_value_options_not_empty`, `:gtid_mode_not_on`,
-`:binlog_transaction_compression_on`, `:precondition_query_failed`.
+`:binlog_row_value_options_not_empty`, `:gtid_mode_not_on`, `:precondition_query_failed`.
+
+**Compressed transactions are consumed.** `binlog_transaction_compression=ON` sources stream
+normally: each `TRANSACTION_PAYLOAD` event is inflated by capstan's in-library pure-Elixir
+zstd decoder (RFC 8878; byte-exact conformance against reference-inflated frames) and its
+inner events fold through the assembler exactly as bare ones — the sink sees the transactions
+an uncompressed source would deliver. GTID/control/non-transactional events still arrive bare
+on such sources (a mix, by construction). A malformed payload — a non-ZSTD compression type,
+any zstd corruption signal, an uncompressed-size mismatch, a malformed inner header — halts
+with a value-free reason (`{:payload_header, _}` / `{:payload_inflate, _}` /
+`{:payload_inner, _}`); nothing is ever partially decoded.
 
 **Connection** halts:
 
@@ -413,10 +422,12 @@ binlog_row_image              = FULL
 binlog_row_metadata           = FULL
 binlog_row_value_options      = ''   # PARTIAL_JSON is refused — it emits JSON diffs, not values
 gtid_mode                     = ON
-binlog_transaction_compression = OFF  # compression is source-unilateral (no consumer opt-out)
-                                       # and capstan cannot inflate zstd payloads — an ON source
-                                       # is refused before the dump
 ```
+
+`binlog_transaction_compression` may be either OFF or ON: compression is source-unilateral
+(no consumer opt-out), and capstan CONSUMES compressed transactions — the in-library
+pure-Elixir zstd decoder inflates each `TRANSACTION_PAYLOAD` event (ADR-0011), so an ON
+source streams normally instead of being refused before the dump.
 
 `enforce_gtid_consistency = ON` is recommended (implied by `gtid_mode = ON`) but is **not**
 separately checked. Multi-source replication is supported — a GTID set expresses multiple source

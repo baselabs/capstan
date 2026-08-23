@@ -24,7 +24,7 @@ SELECT VERSION() AS mysql_version,
        @@global.super_read_only AS super_read_only,
        NOW() AS report_time;
 
-SELECT '== 1. CAPSTAN PRECONDITIONS (all six must PASS; checked again at every connect) ==' AS section;
+SELECT '== 1. CAPSTAN PRECONDITIONS (all five must PASS; checked again at every connect) ==' AS section;
 SELECT 'binlog_format' AS setting, @@global.binlog_format AS current_value, 'ROW' AS required,
        IF(@@global.binlog_format = 'ROW', 'PASS', 'FAIL') AS verdict
 UNION ALL
@@ -38,11 +38,13 @@ SELECT 'binlog_row_value_options', @@global.binlog_row_value_options, '(empty)',
        IF(@@global.binlog_row_value_options = '', 'PASS', 'FAIL')
 UNION ALL
 SELECT 'gtid_mode', @@global.gtid_mode, 'ON',
-       IF(@@global.gtid_mode = 'ON', 'PASS', 'FAIL')
-UNION ALL
-SELECT 'binlog_transaction_compression', @@global.binlog_transaction_compression, 'OFF',
-       IF(@@global.binlog_transaction_compression = 0, 'PASS',
-          'FAIL — source-unilateral, capstan cannot consume compressed payloads');
+       IF(@@global.gtid_mode = 'ON', 'PASS', 'FAIL');
+
+-- Informational (NOT a precondition): compressed transactions are CONSUMED —
+-- capstan inflates TRANSACTION_PAYLOAD events itself (ADR-0011).
+SELECT 'binlog_transaction_compression (informational — consumed by capstan)' AS setting,
+       @@global.binlog_transaction_compression AS current_value,
+       'consumed either way' AS note;
 
 SELECT '== 2. GTID POSTURE ==' AS section;
 SELECT @@global.enforce_gtid_consistency AS enforce_gtid_consistency;

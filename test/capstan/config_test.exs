@@ -361,41 +361,32 @@ defmodule Capstan.ConfigTest do
   ## ---------------------------------------------------------------------------
 
   describe "check_preconditions/1 — fail-closed gate (Q5)" do
-    test "all six correct → :ok (empty binlog_row_value_options and compression OFF accepted as text)" do
-      assert :ok = check_result(["ROW", "FULL", "FULL", "", "ON", "0"])
+    test "all five correct → :ok (empty binlog_row_value_options accepted as text)" do
+      assert :ok = check_result(["ROW", "FULL", "FULL", "", "ON"])
     end
 
     test "binlog_format ≠ ROW → :binlog_format_not_row" do
       assert {:error, :binlog_format_not_row} =
-               check_result(["STATEMENT", "FULL", "FULL", "", "ON", "0"])
+               check_result(["STATEMENT", "FULL", "FULL", "", "ON"])
     end
 
     test "binlog_row_image ≠ FULL → :binlog_row_image_not_full" do
       assert {:error, :binlog_row_image_not_full} =
-               check_result(["ROW", "MINIMAL", "FULL", "", "ON", "0"])
+               check_result(["ROW", "MINIMAL", "FULL", "", "ON"])
     end
 
     test "binlog_row_metadata ≠ FULL → :binlog_row_metadata_not_full" do
       assert {:error, :binlog_row_metadata_not_full} =
-               check_result(["ROW", "FULL", "MINIMAL", "", "ON", "0"])
+               check_result(["ROW", "FULL", "MINIMAL", "", "ON"])
     end
 
     test "binlog_row_value_options non-empty (PARTIAL_JSON) → :binlog_row_value_options_not_empty" do
       assert {:error, :binlog_row_value_options_not_empty} =
-               check_result(["ROW", "FULL", "FULL", "PARTIAL_JSON", "ON", "0"])
-    end
-
-    test "binlog_transaction_compression ON → :binlog_transaction_compression_on (a compressed source can never be consumed)" do
-      # Compression is source-unilateral (MySQL 8.0 refman: a consumer cannot opt out),
-      # so an ON source is unconsumable — refuse at the gate, before the dump, with the
-      # actionable reason. The decoder halt remains the backstop for a dynamic flip
-      # AFTER connect (the gate cannot observe those).
-      assert {:error, :binlog_transaction_compression_on} =
-               check_result(["ROW", "FULL", "FULL", "", "ON", "1"])
+               check_result(["ROW", "FULL", "FULL", "PARTIAL_JSON", "ON"])
     end
 
     test "gtid_mode ≠ ON → :gtid_mode_not_on" do
-      assert {:error, :gtid_mode_not_on} = check_result(["ROW", "FULL", "FULL", "", "OFF", "0"])
+      assert {:error, :gtid_mode_not_on} = check_result(["ROW", "FULL", "FULL", "", "OFF"])
     end
 
     test "a server error while reading the variables propagates fail-closed, never :ok" do

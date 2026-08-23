@@ -30,9 +30,9 @@ defmodule Capstan.QueryTest do
 
   # A correct five-variable precondition row (ADR-0002: all text; empty binlog_row_value_options
   # is "" not nil) and its resultset shape.
-  @good_precond {6, [["ROW", "FULL", "FULL", "", "ON", "0"]]}
+  @good_precond {5, [["ROW", "FULL", "FULL", "", "ON"]]}
 
-  defp precond_row(image), do: {6, [["ROW", image, "FULL", "", "ON", "0"]]}
+  defp precond_row(image), do: {5, [["ROW", image, "FULL", "", "ON"]]}
   defp uuid_result(uuid), do: {1, [[uuid]]}
 
   # A full successful-establish sequence: the precondition query, then the @@server_uuid read.

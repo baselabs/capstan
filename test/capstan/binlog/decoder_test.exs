@@ -252,8 +252,17 @@ defmodule Capstan.Binlog.DecoderTest do
   end
 
   describe "refusals" do
-    test "TRANSACTION_PAYLOAD (40) is refused loudly (compressed txn unsupported in C1)" do
-      assert Decoder.decode(event(40)) == {:error, :compressed_payload_unsupported}
+    test "TRANSACTION_PAYLOAD (40) inflates to its inner event stream (real fixture)" do
+      path =
+        Path.join([
+          @fixtures_root,
+          "zstd_small",
+          "06-transaction_payload.bin"
+        ])
+
+      {:ok, parsed} = Event.parse(File.read!(path))
+      assert {:ok, {:transaction_payload, inner}} = Decoder.decode(parsed)
+      assert Enum.map(inner, & &1.type) == [2, 19, 30, 16]
     end
 
     test "an unknown event type fails closed, never a silent skip" do

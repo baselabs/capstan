@@ -20,17 +20,22 @@ defmodule Capstan.Zstd.Fse do
   Parses an FSE table description from the head of `bin`. Returns
   `{:ok, cells, max_symbol, rest}` where `cells` maps state (0..tableSize-1)
   to `{symbol, nb_bits, new_state_base}` and `rest` is the unconsumed,
-  byte-aligned remainder.
+  byte-aligned remainder. `max_accuracy_log` is the context's cap (RFC 8878:
+  9 for LL/ML tables, 8 for offset tables, 6 for Huffman-weight tables).
   """
-  @spec read_table(binary(), non_neg_integer()) ::
-          {:ok, %{optional(non_neg_integer()) => {non_neg_integer(), non_neg_integer(), non_neg_integer()}}, non_neg_integer(), binary()}
+  @spec read_table(binary(), non_neg_integer(), non_neg_integer()) ::
+          {:ok,
+           %{
+             optional(non_neg_integer()) =>
+               {non_neg_integer(), non_neg_integer(), non_neg_integer()}
+           }, non_neg_integer(), binary()}
           | {:error, term()}
-  def read_table(bin, max_symbol_value) when is_binary(bin) do
+  def read_table(bin, max_symbol_value, max_accuracy_log \\ 9) when is_binary(bin) do
     reader = BitReader.Forward.new(bin)
 
-    with {:ok, accuracy_log} <- accuracy(reader, 4),
+    with {:ok, accuracy_log, r1} <- accuracy(reader, 4, max_accuracy_log),
          {:ok, counts, max_sym, r2} <-
-           counts(%{r: reader, al: accuracy_log, ts: 1 <<< accuracy_log}, max_symbol_value),
+           counts(%{r: r1, al: accuracy_log, ts: 1 <<< accuracy_log}, max_symbol_value),
          {:ok, cells} <- build(counts, accuracy_log) do
       # The description consumes a round number of bytes.
       used = BitReader.Forward.remaining(reader) - BitReader.Forward.remaining(r2)
@@ -38,14 +43,17 @@ defmodule Capstan.Zstd.Fse do
     end
   end
 
-  defp byte_align_drop(bin, bits_used), do: binary_part(bin, div(bits_used + 7, 8), byte_size(bin) - div(bits_used + 7, 8))
+  defp byte_align_drop(bin, bits_used),
+    do: binary_part(bin, div(bits_used + 7, 8), byte_size(bin) - div(bits_used + 7, 8))
 
-  defp accuracy(reader, n) do
-    {v, _r} = BitReader.Forward.read(reader, n)
+  # Consumes the 4 accuracy bits and hands the ADVANCED reader back — the
+  # probability loop must not re-read them as its first count.
+  defp accuracy(reader, n, max_al) do
+    {v, r} = BitReader.Forward.read(reader, n)
 
     al = v + 5
 
-    if al in 5..9, do: {:ok, al}, else: {:error, :bad_accuracy_log}
+    if al in 5..max_al, do: {:ok, al, r}, else: {:error, :bad_accuracy_log}
   end
 
   # The probability loop (RFC §4.1.1): remaining starts tableSize+1, threshold
@@ -57,9 +65,14 @@ defmodule Capstan.Zstd.Fse do
     parse(st, 0, st.ts + 1, st.ts, st.al + 1, max_sym, [], false)
   end
 
+  # Zero-run flags: each 2-bit flag (0-3) skips that many ZERO-probability
+  # symbols — every skipped symbol still needs its 0 entry in the counts list,
+  # or every later symbol's index shifts (a silent table corruption). A flag
+  # of 3 skips 3 AND another flag follows.
   defp parse(%{r: r} = st, symbol, remaining, threshold, nb, max_sym, acc, true) do
     {flags, r2} = BitReader.Forward.read(r, 2)
     symbol = symbol + flags
+    acc = if flags > 0, do: Enum.map(1..flags, fn _ -> 0 end) ++ acc, else: acc
 
     if flags == 3 do
       parse(%{st | r: r2}, symbol, remaining, threshold, nb, max_sym, acc, true)
@@ -68,7 +81,18 @@ defmodule Capstan.Zstd.Fse do
     end
   end
 
-  defp parse(%{r: r} = st, symbol, remaining, threshold, nb, max_sym, acc, false) do
+  defp parse(%{r: _r} = st, symbol, remaining, threshold, nb, max_sym, acc, false) do
+    if symbol > max_sym do
+      # "The context in which the table is to be used specifies an expected
+      # number of symbols. If the number of symbols decoded is not equal to
+      # the expected, the header should be considered corrupt." (RFC 4.1.1)
+      {:error, {:too_many_symbols, symbol}}
+    else
+      parse_symbol(st, symbol, remaining, threshold, nb, max_sym, acc)
+    end
+  end
+
+  defp parse_symbol(%{r: r} = st, symbol, remaining, threshold, nb, max_sym, acc) do
     max = 2 * threshold - 1 - remaining
 
     {partial, r2} = BitReader.Forward.read(r, nb - 1)
@@ -94,13 +118,24 @@ defmodule Capstan.Zstd.Fse do
 
       true ->
         {threshold2, nb2} = shrink(remaining, threshold, nb)
-        parse(%{st | r: r3}, symbol + 1, remaining, threshold2, nb2, max_sym, [count | acc],
-          count == 0)
+
+        parse(
+          %{st | r: r3},
+          symbol + 1,
+          remaining,
+          threshold2,
+          nb2,
+          max_sym,
+          [count | acc],
+          count == 0
+        )
     end
   end
 
   defp shrink(remaining, threshold, nb) do
-    if remaining < threshold, do: shrink(remaining, threshold >>> 1, nb - 1), else: {threshold, nb}
+    if remaining < threshold,
+      do: shrink(remaining, threshold >>> 1, nb - 1),
+      else: {threshold, nb}
   end
 
   # -- table construction -------------------------------------------------------
@@ -115,7 +150,11 @@ defmodule Capstan.Zstd.Fse do
   counter (count, count+1, ... in position order).
   """
   @spec build([integer()], non_neg_integer()) ::
-          {:ok, %{optional(non_neg_integer()) => {non_neg_integer(), non_neg_integer(), non_neg_integer()}}}
+          {:ok,
+           %{
+             optional(non_neg_integer()) =>
+               {non_neg_integer(), non_neg_integer(), non_neg_integer()}
+           }}
           | {:error, term()}
   def build(counts, accuracy_log) do
     table_size = 1 <<< accuracy_log
@@ -138,11 +177,7 @@ defmodule Capstan.Zstd.Fse do
       counts
       |> Enum.with_index()
       |> Enum.reduce({%{}, 0}, fn {count, sym}, {cells, pos} ->
-        Enum.reduce(1..max(count, 0), {cells, pos}, fn _, {c, p} ->
-          c = Map.put(c, p, sym)
-          p = advance(p, step, mask, high)
-          {c, p}
-        end)
+        spread_symbol(count, sym, {cells, pos}, {step, mask, high})
       end)
 
     cells = Map.merge(spread, lowprob_cells)
@@ -165,8 +200,21 @@ defmodule Capstan.Zstd.Fse do
     end
   end
 
+  # Elixir ranges infer a DESCENDING step when first > last (`1..0` is
+  # [1, 0]), so a `1..max(count, 0)` "empty" spread is not empty — a negative
+  # count would place phantom cells over regular ones. Guard the count.
+  defp spread_symbol(count, _sym, {cells, pos}, _step) when count <= 0, do: {cells, pos}
+
+  defp spread_symbol(count, sym, {cells, pos}, {step, mask, high}) do
+    Enum.reduce(1..count, {cells, pos}, fn _, {c, p} ->
+      c = Map.put(c, p, sym)
+      p = advance(p, step, mask, high)
+      {c, p}
+    end)
+  end
+
   defp advance(p, step, mask, high) do
-    p = (p + step) &&& mask
+    p = p + step &&& mask
     if p > high, do: advance(p, step, mask, high), else: p
   end
 

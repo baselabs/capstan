@@ -90,10 +90,10 @@ defmodule Capstan.Binlog.Decoder do
       This is a **fail-closed control signal**, distinct from both success and a
       decode error, so a consumer that omits a `{:halt, _}` clause crashes loudly
       rather than silently treating XA rows as a normal event (ADR-0003).
-    * `{:error, reason}` — an event C1 refuses: a compressed transaction payload, or
-      an unknown type byte. An unknown type **fails closed** and is never silently
-      skipped — a dropped event of an unrecognised shape could hide a condition
-      capstan must halt on.
+    * `{:error, reason}` — an event C1 refuses: a malformed/unconsumable
+      transaction payload, or an unknown type byte. An unknown type **fails
+      closed** and is never silently skipped — a dropped event of an
+      unrecognised shape could hide a condition capstan must halt on.
 
   ## Two silent-failure safety branches (the reason this module is high-Risk)
 
@@ -115,7 +115,7 @@ defmodule Capstan.Binlog.Decoder do
   boundary (Rule 1), not in this module.
   """
 
-  alias Capstan.Binlog.{Event, TableMap}
+  alias Capstan.Binlog.{Event, TableMap, TransactionPayload}
   alias Capstan.Protocol.Packet
 
   # Event type bytes — ported from probe/mysql_binlog_probe.exs:161, plus the C1
@@ -169,9 +169,10 @@ defmodule Capstan.Binlog.Decoder do
           | :heartbeat
           | {:rows_query, :discarded}
           | {:xa_prepare, Capstan.Xa.Id.xid()}
+          | {:transaction_payload, [Event.t()]}
 
   @typedoc "A reason C1 refuses an event outright."
-  @type error_reason :: :compressed_payload_unsupported | {:unknown_event_type, byte()}
+  @type error_reason :: {:unknown_event_type, byte()} | term()
 
   @doc """
   Decodes one `%Capstan.Binlog.Event{}` body to its per-type term.
@@ -222,7 +223,14 @@ defmodule Capstan.Binlog.Decoder do
     end
   end
 
-  defp do_decode(@transaction_payload, _body), do: {:error, :compressed_payload_unsupported}
+  # A compressed transaction (ADR-0011's consumer arm): inflate and split the
+  # payload into the wrapped events; any corruption signal fails closed here.
+  defp do_decode(@transaction_payload, body) do
+    case TransactionPayload.decode(body) do
+      {:ok, events} -> {:ok, {:transaction_payload, events}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   # Fail closed: an unrecognised event type is refused, never silently skipped.
   defp do_decode(type, _body), do: {:error, {:unknown_event_type, type}}
