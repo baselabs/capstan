@@ -478,7 +478,7 @@ defmodule Capstan.Protocol.Handshake do
         salt2_len = max(13, salt_len - 8) - 1
 
         case rest do
-          <<salt2::binary-size(salt2_len), 0, rest2::binary>> ->
+          <<salt2::binary-size(^salt2_len), 0, rest2::binary>> ->
             [plugin | _] = :binary.split(rest2, <<0>>)
 
             {:ok,

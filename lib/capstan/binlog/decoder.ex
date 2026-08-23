@@ -231,7 +231,7 @@ defmodule Capstan.Binlog.Decoder do
          <<_thread_id::32-little, _exec_time::32-little, schema_len::8, _error_code::16-little,
            status_vars_len::16-little, rest::binary>>
        ) do
-    <<_status_vars::binary-size(status_vars_len), schema::binary-size(schema_len), 0,
+    <<_status_vars::binary-size(^status_vars_len), schema::binary-size(^schema_len), 0,
       sql::binary>> =
       rest
 
@@ -249,14 +249,14 @@ defmodule Capstan.Binlog.Decoder do
          <<table_id::48-little, _flags::16-little, extra_len::16-little, rest::binary>>
        ) do
     extra_size = extra_len - 2
-    <<_extra::binary-size(extra_size), rest::binary>> = rest
+    <<_extra::binary-size(^extra_size), rest::binary>> = rest
     {ncols, rest} = Packet.lenenc_int(rest)
     present_bytes = div(ncols + 7, 8)
     split_row_images(op, table_id, present_bytes, rest)
   end
 
   defp split_row_images(:update_rows, table_id, present_bytes, rest) do
-    <<before_cols::binary-size(present_bytes), after_cols::binary-size(present_bytes),
+    <<before_cols::binary-size(^present_bytes), after_cols::binary-size(^present_bytes),
       rows::binary>> =
       rest
 
@@ -264,7 +264,7 @@ defmodule Capstan.Binlog.Decoder do
   end
 
   defp split_row_images(op, table_id, present_bytes, rest) do
-    <<present::binary-size(present_bytes), rows::binary>> = rest
+    <<present::binary-size(^present_bytes), rows::binary>> = rest
     {op, table_id, present, rows}
   end
 
@@ -275,12 +275,12 @@ defmodule Capstan.Binlog.Decoder do
     {schema, rest} = read_str8_z(rest)
     {table, rest} = read_str8_z(rest)
     {ncols, rest} = Packet.lenenc_int(rest)
-    <<column_types::binary-size(ncols), rest::binary>> = rest
+    <<column_types::binary-size(^ncols), rest::binary>> = rest
     {metadata_len, rest} = Packet.lenenc_int(rest)
     # RAW blob consumed as a single unit — NOT split per-column (that is Task 11).
-    <<column_metadata::binary-size(metadata_len), rest::binary>> = rest
+    <<column_metadata::binary-size(^metadata_len), rest::binary>> = rest
     null_bytes = div(ncols + 7, 8)
-    <<null_bitmap::binary-size(null_bytes), optional_metadata::binary>> = rest
+    <<null_bitmap::binary-size(^null_bytes), optional_metadata::binary>> = rest
 
     tlvs = scan_tlv(optional_metadata, %{})
 
@@ -309,7 +309,7 @@ defmodule Capstan.Binlog.Decoder do
 
   defp scan_tlv(<<type::8, rest::binary>>, acc) do
     {len, rest} = Packet.lenenc_int(rest)
-    <<value::binary-size(len), rest2::binary>> = rest
+    <<value::binary-size(^len), rest2::binary>> = rest
     scan_tlv(rest2, store_tlv(type, value, acc))
   end
 

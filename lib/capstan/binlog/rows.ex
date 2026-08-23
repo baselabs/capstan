@@ -132,7 +132,7 @@ defmodule Capstan.Binlog.Rows do
   @spec decode_image(view(), binary()) :: {:ok, row(), binary()} | {:error, error()}
   defp decode_image({present_plan, null_bytes}, bytes) do
     case bytes do
-      <<null_bitmap::binary-size(null_bytes), value_bytes::binary>> ->
+      <<null_bitmap::binary-size(^null_bytes), value_bytes::binary>> ->
         walk_columns(present_plan, null_bitmap, 0, value_bytes, %{})
 
       _ ->

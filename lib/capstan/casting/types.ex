@@ -222,13 +222,13 @@ defmodule Capstan.Casting.Types do
 
   defp cast_int(width, true, bytes) do
     bits = width * 8
-    <<value::size(bits)-little-signed, rest::binary>> = bytes
+    <<value::size(^bits)-little-signed, rest::binary>> = bytes
     {:ok, value, rest}
   end
 
   defp cast_int(width, false, bytes) do
     bits = width * 8
-    <<value::size(bits)-little-unsigned, rest::binary>> = bytes
+    <<value::size(^bits)-little-unsigned, rest::binary>> = bytes
     {:ok, value, rest}
   end
 
@@ -237,7 +237,7 @@ defmodule Capstan.Casting.Types do
   # `prefix_size` = 1 or 2 (VARCHAR/CHAR) or 1..4 (BLOB) length-prefix bytes, LE.
   defp cast_var_length(prefix_size, bytes) do
     prefix_bits = prefix_size * 8
-    <<length::size(prefix_bits)-little, value::binary-size(length), rest::binary>> = bytes
+    <<length::size(^prefix_bits)-little, value::binary-size(length), rest::binary>> = bytes
     {:ok, value, rest}
   end
 
@@ -250,7 +250,7 @@ defmodule Capstan.Casting.Types do
 
   defp cast_enum(pack_len, str_values, bytes) do
     bits = pack_len * 8
-    <<index::size(bits)-little, rest::binary>> = bytes
+    <<index::size(^bits)-little, rest::binary>> = bytes
     resolve_enum(index, str_values, rest, pack_len)
   end
 
@@ -281,7 +281,7 @@ defmodule Capstan.Casting.Types do
       uncomp_intg * 4 + elem(@dig2bytes, comp_intg) +
         uncomp_frac * 4 + elem(@dig2bytes, comp_frac)
 
-    <<buf::binary-size(bin_size), rest::binary>> = bytes
+    <<buf::binary-size(^bin_size), rest::binary>> = bytes
     <<first, tail::binary>> = buf
     # Sign bit set => positive (mask 0); clear => negative (mask 0xFF, one's complement).
     {sign, mask} = if (first &&& 0x80) != 0, do: {1, 0}, else: {-1, 0xFF}
@@ -411,7 +411,7 @@ defmodule Capstan.Casting.Types do
 
   defp cast_json(length_bytes, bytes) do
     bits = length_bytes * 8
-    <<length::size(bits)-little, doc::binary-size(length), rest::binary>> = bytes
+    <<length::size(^bits)-little, doc::binary-size(length), rest::binary>> = bytes
 
     try do
       {:ok, json_doc(doc), rest}
@@ -448,7 +448,7 @@ defmodule Capstan.Casting.Types do
   # Object binary: element-count, total-size, key-entries, value-entries, keys, values.
   # `offset_size` is 2 (small) or 4 (large); all offsets are relative to `data`'s start.
   defp json_object(data, offset_size) do
-    <<count::little-size(offset_size * 8), _size::little-size(offset_size * 8), body::binary>> =
+    <<count::little-size(^offset_size * 8), _size::little-size(^offset_size * 8), body::binary>> =
       data
 
     {key_entries, body} = json_take(count, body, &json_key_entry(&1, offset_size))
@@ -460,7 +460,7 @@ defmodule Capstan.Casting.Types do
   end
 
   defp json_array(data, offset_size) do
-    <<count::little-size(offset_size * 8), _size::little-size(offset_size * 8), body::binary>> =
+    <<count::little-size(^offset_size * 8), _size::little-size(^offset_size * 8), body::binary>> =
       data
 
     {value_entries, _body} = json_take(count, body, &json_value_entry(&1, offset_size))
@@ -468,12 +468,12 @@ defmodule Capstan.Casting.Types do
   end
 
   defp json_key_entry(bin, offset_size) do
-    <<offset::little-size(offset_size * 8), length::16-little, rest::binary>> = bin
+    <<offset::little-size(^offset_size * 8), length::16-little, rest::binary>> = bin
     {{offset, length}, rest}
   end
 
   defp json_value_entry(bin, offset_size) do
-    <<type, field::binary-size(offset_size), rest::binary>> = bin
+    <<type, field::binary-size(^offset_size), rest::binary>> = bin
     {{type, field}, rest}
   end
 
@@ -486,7 +486,7 @@ defmodule Capstan.Casting.Types do
     do: json_value(type, field)
 
   defp json_resolve({type, field}, data, offset_size) do
-    <<offset::little-size(offset_size * 8)>> = field
+    <<offset::little-size(^offset_size * 8)>> = field
     json_value(type, binary_part(data, offset, byte_size(data) - offset))
   end
 

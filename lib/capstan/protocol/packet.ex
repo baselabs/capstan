@@ -129,7 +129,7 @@ defmodule Capstan.Protocol.Packet do
   @spec lenenc_str(binary()) :: {binary(), binary()}
   def lenenc_str(bin) do
     {n, rest} = lenenc_int(bin)
-    <<s::binary-size(n), rest2::binary>> = rest
+    <<s::binary-size(^n), rest2::binary>> = rest
     {s, rest2}
   end
 

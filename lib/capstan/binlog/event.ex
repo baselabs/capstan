@@ -66,10 +66,10 @@ defmodule Capstan.Binlog.Event do
       log_pos::32-little, flags::16-little, body_with_checksum::binary>> = event
 
     body_size = byte_size(body_with_checksum) - @crc_size
-    <<body::binary-size(body_size), checksum::32-little>> = body_with_checksum
+    <<body::binary-size(^body_size), checksum::32-little>> = body_with_checksum
 
     checked_size = byte_size(event) - @crc_size
-    <<checked::binary-size(checked_size), _checksum_bytes::binary>> = event
+    <<checked::binary-size(^checked_size), _checksum_bytes::binary>> = event
 
     if :erlang.crc32(checked) == checksum do
       {:ok,
