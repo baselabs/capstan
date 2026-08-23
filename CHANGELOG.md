@@ -6,6 +6,37 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-23
+
+First stable release. The public surface — `Capstan.start_link/1` options and
+refusals, the `Sink` / `CheckpointStore` / `SnapshotStore` behaviours, the
+value-free halt catalog, and the telemetry event set — is now covered by the
+semver contract: additive-only changes until 2.0. C3–C6 (batching, compressed
+transactions, XA tracking, the adapter) remain additive roadmap rows.
+
+### Production hardening (since 0.3.0)
+
+- Published source carries zero machine-local provenance markers — every
+  plan/task/closeout identifier across `lib/` rewritten to semantic prose (the
+  hex tarball ships `lib/` verbatim, comments included; verified zero by sweep).
+- Doc truth: "Three callbacks" → four (`handle_snapshot/2` predates the
+  sentence); the C1 memory shape (one transaction buffered whole in pipeline
+  memory; snapshot mode adds one `chunk_size`-bounded chunk per table) now
+  stated in the sink contract; fixture-capture instructions point at the
+  env-driven port; ROADMAP carries no machine-local paths.
+- CI tests the DECLARED Elixir floor (`~> 1.15`; a dedicated 1.15.8/OTP 26 leg)
+  and enforces the coverage threshold on every push (90.91% over the shipped
+  library, test-support harness excluded from the denominator); actions on the
+  node-24 runtime.
+- The live exclusive-end resume tripwire is multi-uuid-correct: the checkpoint
+  is modeled as a real processed watermark, so the tripwire survives a
+  long-lived substrate whose `gtid_executed` carries fabricated foreign-uuid
+  sets (some already in `gtid_purged`) — where a single-uuid checkpoint is
+  refused 1236, the exact `:data_gap` semantics the library implements.
+- The whole project compiles warning-free on Elixir 1.20 (was 11 test-compile
+  warnings); 629 tests green in the combined run (unit + integration + live +
+  docker-gated) against live MySQL 8.0 and 8.4.
+
 ## [0.3.0] - 2026-08-22
 
 ### Changed
