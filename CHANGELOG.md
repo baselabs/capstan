@@ -8,15 +8,16 @@ All notable changes to capstan are documented here. The format follows
 
 ### Added
 
-- Telemetry measurements on both fail-closed channels:  carries
-   + ,  carries ; measurement
-  values must be non-negative numbers (the metadata allowlist gates keys, the measurement gate
-  gates values — Rule 1 closes on both channels).
+- Telemetry measurements on both fail-closed channels: `[:capstan, :transaction, :committed]`
+  carries `change_count` + `sink_ms`; `[:capstan, :connection, :established]` carries
+  `establish_ms`; measurement values must be non-negative numbers (the metadata allowlist
+  gates keys, the measurement gate gates values — Rule 1 closes on both channels).
 - Property-based law suites (stream_data, dev-only dep) for the Gtid set algebra (7 laws,
   including an independent membership oracle at every interval boundary) and the cursor-gate
   (7 laws: the ADR-0005 gating inversion, monotonicity, the PK-changing update split).
 - ADR 0007–0010: the value-free boundary (Rule 1), the pure-Elixir protocol client, fail-closed
-  supervision + streaming liveness, and the exclusive end bound of .
+  supervision + streaming liveness, and the exclusive end bound of
+  `COM_BINLOG_DUMP_GTID`.
 
 ## [1.0.0] - 2026-08-23
 
