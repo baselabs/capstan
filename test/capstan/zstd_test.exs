@@ -420,6 +420,20 @@ defmodule Capstan.ZstdTest do
     out <> copied
   end
 
+  test "the transcribed baseline/extra tables match the RFC's declared lengths" do
+    # Hand-typed tables have been transcribed with a wrong count twice
+    # before — the length tripwires make that loud instead of silent.
+    assert length(ll_baseline()) == @ll_baseline_length
+    assert length(ll_extra()) == @ll_extra_length
+    assert length(ml_baseline()) == @ml_baseline_length
+    assert length(ml_extra()) == @ml_extra_length
+    # Spot rows from RFC Tables 16-17 at the 1-extra-bit boundaries.
+    assert Enum.at(ll_baseline(), 16) == 16 and Enum.at(ll_extra(), 16) == 1
+    assert Enum.at(ll_baseline(), 35) == 65_536 and Enum.at(ll_extra(), 35) == 16
+    assert Enum.at(ml_baseline(), 32) == 35 and Enum.at(ml_extra(), 32) == 1
+    assert Enum.at(ml_baseline(), 52) == 65_539 and Enum.at(ml_extra(), 52) == 16
+  end
+
   describe "crafted VALID sequences sections — RLE tables" do
     # modes 0x54: all three tables in RLE_Mode; symbols ll=4 (ll=4, 0 extra
     # bits), of=1 (1 extra bit: ov = 2 + bit), ml=0 (ml=3, 0 extra bits).
