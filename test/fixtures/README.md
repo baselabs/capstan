@@ -3,7 +3,7 @@
 Real, captured binlog event bytes — never self-signed/synthetic. Every file under
 `test/fixtures/binlog/<scenario>/` is the *verbatim* wire bytes of one binlog event
 (19-byte header + body + 4-byte CRC32 trailer), captured from the live
-`mysql-cdc-probe` substrate (`127.0.0.1:5633`) by `test/support/fixture_capture.ex`.
+`mysql-cdc-probe` substrate (`127.0.0.1:$MYSQL_PORT_80`, default 11619) by `test/support/fixture_capture.ex`.
 Tasks 8–11 decode against these bytes.
 
 ## Regenerating
@@ -14,7 +14,7 @@ Bring the substrate up (idempotent — never restarts a running server):
 scripts/dev-substrate.sh --only-80
 ```
 
-Then, with `mysql-cdc-probe` reachable at `127.0.0.1:5633` (root/probe,
+Then, with `mysql-cdc-probe` reachable at `127.0.0.1:$MYSQL_PORT_80` (root/probe,
 `mysql_native_password`, database `probe_db`):
 
 ```

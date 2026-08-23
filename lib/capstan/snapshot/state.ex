@@ -12,7 +12,7 @@ defmodule Capstan.Snapshot.State do
   key), `pk_cursor` (`:start` before the first chunk, else the canonical PK of the last
   backfilled row), `delivered_pk`, and `done?`.
 
-  ## `pk_cursor` vs `delivered_pk` — the crash-window delete backstop (closeout F1)
+  ## `pk_cursor` vs `delivered_pk` — the crash-window delete backstop
 
   Two monotonic PK high-waters, persisted at DIFFERENT points of a chunk emit:
 

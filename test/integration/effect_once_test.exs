@@ -36,7 +36,7 @@ defmodule Capstan.Integration.EffectOnceTest do
   test "effect-once across a kill/restart: each committed GTID appears exactly once in the ledger" do
     result = run_kill_restart("effect_once_ledger")
 
-    all_delivered = result.phase1 ++ result.phase2
+    all_delivered = result.pre_kill ++ result.post_restart
     ledger_gnos = Enum.map(result.ledger, &gno/1)
 
     # The append-only ledger is the proof surface: a double-delivery shows the same GTID twice.
@@ -52,22 +52,22 @@ defmodule Capstan.Integration.EffectOnceTest do
   test "resume is exclusive-bound: the restart replays no transaction and skips none" do
     result = run_kill_restart("resume_correctness")
 
-    phase1 = Enum.map(result.phase1, &gno/1)
-    phase2 = Enum.map(result.phase2, &gno/1)
+    pre_kill = Enum.map(result.pre_kill, &gno/1)
+    post_restart = Enum.map(result.post_restart, &gno/1)
 
     # No replay: the two phases are disjoint — the restart never re-delivers a checkpointed txn.
-    assert phase1 -- phase2 == phase1
-    assert MapSet.disjoint?(MapSet.new(phase1), MapSet.new(phase2))
+    assert pre_kill -- post_restart == pre_kill
+    assert MapSet.disjoint?(MapSet.new(pre_kill), MapSet.new(post_restart))
 
-    # No skip + exclusive bound: phase2 begins at the checkpoint's SUCCESSOR, and the full
+    # No skip + exclusive bound: post_restart begins at the checkpoint's SUCCESSOR, and the full
     # delivered run is contiguous with no gap at the restart boundary. Scope the checkpoint's max to
     # the SERVER's OWN source UUID (the one the batch transactions committed under, named by any
     # delivered GTID) — the shared substrate also carries FOREIGN GTIDs planted by other tests (the
     # live exact-`G` proof's fabricated UUIDs reach far higher gnos), and those must not set this bound.
-    server_uuid = result.phase1 |> hd() |> uuid_of()
-    checkpoint_max = result.checkpoint1_set |> gnos_for_uuid(server_uuid) |> Enum.max()
-    assert Enum.min(phase2) == checkpoint_max + 1
-    combined = phase1 ++ phase2
+    server_uuid = result.pre_kill |> hd() |> uuid_of()
+    checkpoint_max = result.checkpoint_at_kill |> gnos_for_uuid(server_uuid) |> Enum.max()
+    assert Enum.min(post_restart) == checkpoint_max + 1
+    combined = pre_kill ++ post_restart
     assert combined == Enum.to_list(Enum.min(combined)..Enum.max(combined))
   end
 
@@ -105,11 +105,11 @@ defmodule Capstan.Integration.EffectOnceTest do
     )
 
     sup1 = start_pipeline!(store_table, key)
-    phase1 = collect_txns(3)
+    pre_kill = collect_txns(3)
     # Drain to a clean boundary: the durable checkpoint reflects all three deliveries, so the
     # stop cannot land between a ledger append and its checkpoint write (the at-least-once window).
     wait_checkpoint_at_least(store_table, key, base_count + 3)
-    checkpoint1 = DurableStore.current(store_table, key)
+    checkpoint_at_kill = DurableStore.current(store_table, key)
     MysqlCase.stop_pipeline(sup1)
 
     # batch2 → three more, planted only AFTER the first pipeline is gone (resumed mid-stream).
@@ -119,14 +119,14 @@ defmodule Capstan.Integration.EffectOnceTest do
     )
 
     sup2 = start_pipeline!(store_table, key)
-    phase2 = collect_txns(3)
+    post_restart = collect_txns(3)
     MysqlCase.stop_pipeline(sup2)
 
     %{
-      phase1: phase1,
-      phase2: phase2,
+      pre_kill: pre_kill,
+      post_restart: post_restart,
       ledger: :ets.tab2list(ledger) |> Enum.map(fn {:gtid, g} -> g end),
-      checkpoint1_set: checkpoint1
+      checkpoint_at_kill: checkpoint_at_kill
     }
   end
 

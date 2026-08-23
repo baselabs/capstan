@@ -159,7 +159,7 @@ defmodule Capstan.Supervisor do
 
   # Fresh / mid-snapshot: the assembler's sink is the coordinator MODULE (name-resolved at call
   # time, so the assembler need not hold the coordinator pid at init — design § Pinned #4). The
-  # coordinator starts with `processed_set` = the live watermark (P0, Task-8-F2); once it is up,
+  # coordinator starts with `processed_set` = the live watermark (P0); once it is up,
   # `attach_coordinator/2` injects the observer + arms the silent-death monitor. The coordinator
   # is started BEFORE the connection so the observer is attached before the stream advances the
   # watermark (no early-advance race; a missed pre-attach advance would recover anyway — the

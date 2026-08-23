@@ -23,8 +23,8 @@ defmodule Capstan.Binlog.Event do
   `{:error, :truncated}`.
 
   This module does not interpret the body or map `type` to a name — that is
-  Task 9's decoder, which owns the type-byte → name map and per-type body
-  decode. `type` here is the raw event-type byte (0..255).
+  the decoder's job (`Capstan.Binlog.Decoder`), which owns the type-byte → name map and
+  per-type body decode. `type` here is the raw event-type byte (0..255).
 
   The artificial `ROTATE` that opens every dump (`timestamp=0`, `log_pos=0`) is
   a normal, CRC-valid event and parses like any other — callers decide what to

@@ -407,7 +407,7 @@ defmodule Capstan.Protocol.CommandTest do
 
         if type == 33 do
           body_len = byte_size(body_ck) - 4
-          <<body::binary-size(body_len), _crc::32-little>> = body_ck
+          <<body::binary-size(^body_len), _crc::32-little>> = body_ck
           <<_flags::8, _uuid::binary-size(16), gno::64-little-signed, _::binary>> = body
           gno
         else

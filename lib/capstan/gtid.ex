@@ -37,8 +37,8 @@ defmodule Capstan.Gtid do
   ## Scope
 
   The bounds here are INCLUSIVE and stay inclusive. The `COM_BINLOG_DUMP_GTID` wire
-  encoding uses an EXCLUSIVE end (`uuid:1-11` -> wire end 12); that conversion is
-  Task 3's concern and is deliberately not baked into this module.
+  encoding uses an EXCLUSIVE end (`uuid:1-11` -> wire end 12); that conversion belongs to
+  the dump-side encoder (`Capstan.Protocol.Command`) and is deliberately not baked into this module.
   """
 
   @typedoc "A source-server UUID in canonical lower-case 36-char hyphenated form."

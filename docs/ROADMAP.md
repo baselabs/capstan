@@ -1,7 +1,7 @@
 # capstan ROADMAP
 
 Authored definitions only. Status and evidence are DERIVED by
-`~/.claude/scripts/forge-roadmap.py --repo .` — never hand-edited here.
+`/Users/rp/Developer/forge-archive/scripts/forge-roadmap.py --repo .` — never hand-edited here.
 
 | ID | What | Acceptance | Depends | Why |
 |---|---|---|---|---|

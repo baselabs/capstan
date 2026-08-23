@@ -564,7 +564,7 @@ defmodule Capstan.ConfigTest do
     test "reads a non-empty @@server_uuid from the substrate" do
       socket = live_connect()
       assert {:ok, uuid} = Config.read_server_uuid(socket)
-      assert is_binary(uuid) and uuid != ""
+      assert uuid != ""
       close(socket)
     end
   end

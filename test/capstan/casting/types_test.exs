@@ -20,7 +20,7 @@ defmodule Capstan.Casting.TypesTest do
   # leading NULL bitmap stripped. Lets direct cast/4 checks run over REAL captured bytes.
   defp value_bytes(scenario, filename, null_bytes) do
     {:ok, {:write_rows, _tid, _present, raw}} = decode_fixture(scenario, filename)
-    <<_null::binary-size(null_bytes), values::binary>> = raw
+    <<_null::binary-size(^null_bytes), values::binary>> = raw
     values
   end
 

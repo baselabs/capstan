@@ -1,6 +1,6 @@
 defmodule Capstan.Snapshot.ChunkReader do
   @moduledoc """
-  The brief-lock exact-`G` capture + PK-range paging + structural fingerprint (C2 Task 5,
+  The brief-lock exact-`G` capture + PK-range paging + structural fingerprint (C2,
   design Ch1 — THE linchpin).
 
   A `ChunkReader` owns a `Capstan.Query` connection and, per chunk of a snapshot table `T`,
@@ -34,7 +34,7 @@ defmodule Capstan.Snapshot.ChunkReader do
   ## Halts (value-free atoms; design § Preconditions)
 
   Faults are classified POSITIONALLY, by which phase of the pinned sequence failed — this is
-  how the reader honours the Task-4 forward-finding that `Capstan.Query.query/2` scrubs the
+  how the reader honours the forward-finding that `Capstan.Query.query/2` scrubs the
   MySQL error CODE (so a lock-wait timeout `1205` and a chunk-read fault both return the same
   value-free atom and cannot be told apart from the return value alone). The *statement that
   failed* is the distinct signal instead:
@@ -51,7 +51,7 @@ defmodule Capstan.Snapshot.ChunkReader do
     * **`:snapshot_schema_drifted`** — the per-chunk structural fingerprint changed from the
       baseline (an in-flight DDL). PERMANENT (a drifted schema does not un-drift on retry), so
       it halts immediately without spending the budget. (The other drift arm — an observed
-      `%Capstan.SchemaChange{}` on the table — is the coordinator's, Task 8; the reader owns the
+      `%Capstan.SchemaChange{}` on the table — is the coordinator's; the reader owns the
       fingerprint arm.)
 
   Budgeted faults reuse `Capstan.CheckpointStore.retry_decision/2` — the shared counter, never
@@ -128,7 +128,8 @@ defmodule Capstan.Snapshot.ChunkReader do
       the one-row look-ahead (the chunk SELECT reads `LIMIT chunk_size + 1`) proved no further
       chunk exists — i.e. the read returned at most `chunk_size` rows. `final?` is derived from
       the look-ahead, NOT a `length < chunk_size` count, so a table whose row count is an exact
-      multiple of `chunk_size` still gets a `final?: true` last chunk (closeout F6). `reader`
+      multiple of `chunk_size` still gets a `final?: true` last chunk (the look-ahead proves
+      the table is exhausted). `reader`
       carries the incremented sequence number.
     * `{:done, reader}` — the page from `cursor` is empty; the table is fully paged. Under the
       look-ahead a NON-empty table's last chunk is already `final?: true`, so this arises only
@@ -281,7 +282,7 @@ defmodule Capstan.Snapshot.ChunkReader do
   # At most `chunk_size` back ⇒ this is the table's LAST chunk, `final?: true`. Deriving finality
   # from a `length < chunk_size` count is WRONG for a table whose row count is an exact multiple of
   # `chunk_size` — its last full page would never be `final?` and the sink would never learn the
-  # table completed (closeout F6). The dropped look-ahead row (`pk >` the kept chunk's `max_pk`) is
+  # table completed. The dropped look-ahead row (`pk >` the kept chunk's `max_pk`) is
   # re-read as the first row of the NEXT chunk — identical to any chunk boundary, no row skipped or
   # duplicated within the snapshot, and `build_chunk/3` computes `max_pk` from the KEPT rows.
   defp split_lookahead(rows, chunk_size) do

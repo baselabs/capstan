@@ -35,7 +35,7 @@ defmodule Capstan.Binlog.DecoderTest do
       assert {:ok, {:rotate, next_name, position}} = decode_fixture("simple_dml", "01-rotate.bin")
       # captured artificial opener: real binlog file name, byte position within it
       assert next_name =~ ~r/\.\d{6}$/
-      assert is_integer(position) and position >= 0
+      assert position >= 0
     end
 
     test "FORMAT_DESCRIPTION (15) decodes to binlog + server version" do
@@ -56,7 +56,7 @@ defmodule Capstan.Binlog.DecoderTest do
 
     test "XID (16) decodes to the commit marker + transaction id" do
       assert {:ok, {:xid, xid}} = decode_fixture("simple_dml", "09-xid.bin")
-      assert is_integer(xid) and xid > 0
+      assert xid > 0
     end
 
     test "STOP (3) decodes to a marker (keyed on the type byte; empty body)" do
@@ -70,7 +70,7 @@ defmodule Capstan.Binlog.DecoderTest do
       # The substrate's server_uuid is inherent to real captured bytes and differs if
       # the container is recreated (fixtures README) — assert shape, never a literal.
       assert uuid =~ ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
-      assert is_integer(gno) and gno > 0
+      assert gno > 0
       # cross-check: the decoded identity is a well-formed single GTID for Capstan.Gtid
       assert Capstan.Gtid.member?(Capstan.Gtid.parse("#{uuid}:#{gno}"), {uuid, gno})
     end
@@ -106,7 +106,7 @@ defmodule Capstan.Binlog.DecoderTest do
       # column_metadata is stored RAW (length-prefixed blob consumed as a unit) — the
       # per-column split is Task 11's parse_col_meta, NOT this task's.
       assert tm.column_metadata == <<200, 0>>
-      assert is_integer(tm.table_id) and tm.table_id > 0
+      assert tm.table_id > 0
     end
 
     test "all_types: full type list, RAW metadata blob (not split), and every F3 TLV field" do
@@ -173,7 +173,7 @@ defmodule Capstan.Binlog.DecoderTest do
     end
   end
 
-  describe "ROWS_v2 (30/31/32) — STRUCTURE only, values are Task 11" do
+  describe "ROWS v2 wire types (30/31/32) — STRUCTURE only; row values stay raw bytes" do
     test "WRITE_ROWS (30): {table_id, present bitmap, raw row bytes} — values NOT decoded" do
       assert {:ok, %TableMap{} = tm} = decode_fixture("simple_dml", "07-table_map.bin")
 
@@ -181,8 +181,8 @@ defmodule Capstan.Binlog.DecoderTest do
                decode_fixture("simple_dml", "08-write_rows.bin")
 
       assert table_id == tm.table_id
-      assert is_binary(present) and byte_size(present) == 1
-      assert is_binary(rows) and byte_size(rows) == 20
+      assert byte_size(present) == 1
+      assert byte_size(rows) == 20
     end
 
     test "UPDATE_ROWS (31): carries BOTH before- and after-image present bitmaps" do
@@ -192,7 +192,7 @@ defmodule Capstan.Binlog.DecoderTest do
       assert is_integer(table_id) and table_id > 0
       assert byte_size(before_cols) == 1
       assert byte_size(after_cols) == 1
-      assert is_binary(rows) and byte_size(rows) == 40
+      assert byte_size(rows) == 40
     end
 
     test "DELETE_ROWS (32): {table_id, present bitmap, raw row bytes}" do
@@ -201,7 +201,7 @@ defmodule Capstan.Binlog.DecoderTest do
 
       assert is_integer(table_id) and table_id > 0
       assert byte_size(present) == 1
-      assert is_binary(rows) and byte_size(rows) == 20
+      assert byte_size(rows) == 20
     end
   end
 

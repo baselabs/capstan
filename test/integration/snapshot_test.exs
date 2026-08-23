@@ -11,7 +11,7 @@ defmodule Capstan.Integration.SnapshotTest do
       AND not-yet-backfilled ranges. The upsert-by-PK replay of the ledger (in delivery order)
       must converge to the DB's final state for the fixed PRE-EXISTING PK set, and each surviving
       pre-existing key's FINAL value must appear EXACTLY ONCE (chunk OR stream, never both, never
-      neither). Asserting on the fixed pre-existing PK set is the Task-10 determinism finding: the
+      neither). Assert on the fixed pre-existing PK set (deterministic even under concurrent writes): the
       total delivered count is non-deterministic (a concurrent INSERT may or may not be in the
       consistent-snapshot view), but each pre-existing key's final state is exact.
     * **Tripwire 3 — resume mid-backfill:** kill after a few chunks (cursor persisted in a durable

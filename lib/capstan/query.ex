@@ -1,6 +1,6 @@
 defmodule Capstan.Query do
   @moduledoc """
-  A `COM_QUERY`-only connection for the initial-snapshot path (C2 Task 4).
+  A `COM_QUERY`-only connection for the initial-snapshot path (C2).
 
   `Capstan.Connection` is binlog-dump-only — once it issues `COM_BINLOG_DUMP_GTID` the
   socket carries the replication stream and cannot run a `SELECT`. The snapshot needs a

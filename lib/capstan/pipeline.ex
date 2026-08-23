@@ -186,7 +186,7 @@ defmodule Capstan.Pipeline do
   end
 
   @typedoc """
-  The bootstrap-provided coordinator wiring (Task 10's supervisor supplies these AFTER the
+  The bootstrap-provided coordinator wiring (the supervisor supplies these AFTER the
   assembler + snapshot-store children are up): the started `AssemblerServer` pid the coordinator
   sends `{:capstan_halt, _}` to and observes the watermark from, the started `{impl, handle}`
   snapshot store, the initial `%Capstan.Snapshot.State{}`, the per-table opened `ChunkReader`
@@ -204,7 +204,7 @@ defmodule Capstan.Pipeline do
   The `Capstan.Snapshot.Coordinator` child spec (snapshot mode only), mirroring `assembler_spec/2`.
 
   The real (downstream) sink + the retry budget come from the pipeline `opts`; `wiring` carries
-  the bootstrap-produced pieces (see `t:coordinator_wiring/0`) — Task 10's supervisor builds it
+  the bootstrap-produced pieces (see `t:coordinator_wiring/0`) — the supervisor builds it
   once the assembler + snapshot-store children have started. A `:temporary` child: a fail-closed
   snapshot halt never restarts.
   """

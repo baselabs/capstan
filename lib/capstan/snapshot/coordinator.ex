@@ -1,6 +1,6 @@
 defmodule Capstan.Snapshot.Coordinator do
   @moduledoc """
-  The initial-snapshot orchestration core (C2 Task 8): a GenServer that interposes as the
+  The initial-snapshot orchestration core (C2): a GenServer that interposes as the
   `Capstan.AssemblerServer`'s sink and its `:watermark_observer`, runs the cursor-gate over
   the live stream, drives the `Capstan.Snapshot.ChunkReader`, and emits each backfill chunk
   through the real sink's `c:Capstan.Sink.handle_snapshot/2` once the stream's processed
@@ -13,8 +13,8 @@ defmodule Capstan.Snapshot.Coordinator do
       `state.sink` is this MODULE, so its `handle_transaction/1` and `handle_schema_change/2`
       dispatch here; each is a thin module function that `GenServer.call`s the registered
       coordinator (resolved at call time, not start time — this is what breaks the start-order
-      cycle, design § Pinned decisions #4). The coordinator does NOT edit `assembler_server.ex`;
-      Task 7 supplies the `attach_coordinator/2` injection + the silent-death monitor.
+      cycle, design § Pinned decisions #4). The coordinator does NOT edit `assembler_server.ex`; the
+      `attach_coordinator/2` injection + the silent-death monitor are the AssemblerServer's own.
 
     * **As the `:watermark_observer`.** After a deferred `attach_coordinator/2`, the
       AssemblerServer sends `{:capstan_watermark, gtid_set_string}` on EVERY checkpoint advance
@@ -48,19 +48,18 @@ defmodule Capstan.Snapshot.Coordinator do
 
   The `pk_cursor` (re-read floor) still advances AFTER the emit — the at-least-once boundary
   (tripwire 16): a crash between the sink's `{:ok}` and the `pk_cursor` persist re-emits the one
-  chunk (bounded dup, C1's posture; an upsert-by-PK sink converges). The NEW step 1 persists the
-  DELIVERED high-water first, so in that same crash window `delivered_pk` survives AHEAD of the
+  chunk (bounded dup, C1's posture; an upsert-by-PK sink converges). The delivered-high-water persist comes FIRST, so in that same crash window `delivered_pk` survives AHEAD of the
   rolled-back `pk_cursor`; on restart the cursor-gate forwards a streamed delete of an
   already-delivered key (`k ≤ delivered_pk`) instead of suppressing it, sweeping what would
-  otherwise be a permanent crash-window phantom (closeout F1, `Capstan.Snapshot.CursorGate` and
-  `Capstan.Snapshot.State`). A step-1 persist fault halts fail-closed before any emit.
+  otherwise be a permanent crash-window phantom (`Capstan.Snapshot.CursorGate` and
+  `Capstan.Snapshot.State`). A fault persisting the delivered high-water halts fail-closed before any emit.
 
   ## Fail-closed halts (symmetric with C1)
 
   A coordinator fault sends `{:capstan_halt, reason}` to the AssemblerServer (the LOUD path)
   and stops with `{:shutdown, {:halt, reason}}` (`restart: :temporary`, never restarted). The
   SILENT-death path — a coordinator that dies without messaging — is the AssemblerServer's
-  `Process.monitor` (`:snapshot_coordinator_down`, Task 7). A raise in the emit/reconcile path
+  `Process.monitor` (`:snapshot_coordinator_down`). A raise in the emit/reconcile path
   is scrubbed value-free to `{:snapshot_processing_crashed, Capstan.Error.from(exc)}` exactly
   as the AssemblerServer scrubs a delivery-path raise (`assembler_server.ex:148-158`); a
   `handle_snapshot/2` `{:error, _}` halts `{:snapshot_sink_error, _}` (the outer atom only in
@@ -383,7 +382,7 @@ defmodule Capstan.Snapshot.Coordinator do
   # drive the next chunk. The delivered-`max_pk` persist lands BEFORE the sink emit so that across
   # the emit→cursor-persist crash window it survives AHEAD of the (rolled-back) `pk_cursor` — the
   # cursor-gate then forwards a streamed delete of an already-delivered key on restart instead of
-  # leaving a phantom (closeout F1). A `handle_snapshot/2` `{:error, _}` halts
+  # leaving a phantom. A `handle_snapshot/2` `{:error, _}` halts
   # `{:snapshot_sink_error, _}`; a delivered-persist fault halts before any emit (fail-closed).
   defp emit_chunk(state, %Chunk{} = chunk) do
     {schema, table} = chunk.table
@@ -550,7 +549,7 @@ defmodule Capstan.Snapshot.Coordinator do
 
   # Emit the coordinator's own value-free halt telemetry, then send the LOUD, specific
   # `{:capstan_halt, reason}` to the AssemblerServer (the SILENT-death backstop is the
-  # AssemblerServer's monitor → `:snapshot_coordinator_down`, Task 7). The `{:capstan_halt, _}`
+  # AssemblerServer's monitor → `:snapshot_coordinator_down`). The `{:capstan_halt, _}`
   # message is enqueued before this process terminates, so the AssemblerServer sees the
   # specific reason ahead of any `{:DOWN, _}`.
   defp announce_halt(state, reason) do

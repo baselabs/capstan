@@ -243,7 +243,7 @@ defmodule Capstan.Binlog.Decoder do
   # ROWS_v2 body: table_id(6) flags(2) extra_len(2) extra(extra_len-2) ncols(lenenc)
   # then the present bitmap(s) then the raw row-image bytes. WRITE/DELETE carry one
   # present bitmap; UPDATE carries a before- and an after-image bitmap. Row VALUES are
-  # NOT decoded here — Task 11 casts the raw bytes against the %TableMap{}.
+  # NOT decoded here — row casting applies the raw bytes against the %TableMap{}.
   defp decode_rows(
          op,
          <<table_id::48-little, _flags::16-little, extra_len::16-little, rest::binary>>
@@ -277,7 +277,7 @@ defmodule Capstan.Binlog.Decoder do
     {ncols, rest} = Packet.lenenc_int(rest)
     <<column_types::binary-size(^ncols), rest::binary>> = rest
     {metadata_len, rest} = Packet.lenenc_int(rest)
-    # RAW blob consumed as a single unit — NOT split per-column (that is Task 11).
+    # RAW blob consumed as a single unit — NOT split per-column (row casting owns the split).
     <<column_metadata::binary-size(^metadata_len), rest::binary>> = rest
     null_bytes = div(ncols + 7, 8)
     <<null_bitmap::binary-size(^null_bytes), optional_metadata::binary>> = rest

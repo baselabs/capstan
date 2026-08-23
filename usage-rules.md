@@ -103,7 +103,7 @@ column value, or password ever appears in an error, log line, or telemetry paylo
 
 ## The `Capstan.Sink` behaviour
 
-Three callbacks; every one is `@optional_callbacks` — which are required depends on the mode.
+Four callbacks; every one is `@optional_callbacks` — which are required depends on the mode.
 For C1's lib-owned mode you implement `handle_transaction/1` and `handle_schema_change/2`.
 
 ```elixir
@@ -135,6 +135,11 @@ Three load-bearing rules — each guards a silent-loss class the type signature 
 `handle_schema_change/2` receives only structured `schema`/`table`/`kind` — the raw DDL statement
 text is redacted before it reaches the sink (Rule 1). Return `{:error, term()}` from either
 delivery callback to halt the pipeline fail-closed **without** advancing the checkpoint.
+
+**Memory shape.** A transaction is buffered whole in pipeline memory between assembly and
+delivery, so peak memory scales with the source's largest single transaction; in snapshot mode
+add one fully-materialized chunk per table (bounded by `chunk_size`). Streaming/batched delivery
+of very large transactions is a named roadmap row (C3).
 
 ## Checkpoint store (lib-owned mode)
 

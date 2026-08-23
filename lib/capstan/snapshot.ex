@@ -1,6 +1,6 @@
 defmodule Capstan.Snapshot do
   @moduledoc """
-  Initial-snapshot public config validation + the **bootstrap orchestration** (C2 Task 10 —
+  Initial-snapshot public config validation + the **bootstrap orchestration** (C2 —
   the `P0` pre-seed that avoids C1b, design Q10 / Ch5).
 
   ## What the bootstrap does
@@ -22,7 +22,7 @@ defmodule Capstan.Snapshot do
        independent authenticated socket, and the `Capstan.Query` connection is established
        pinned to it (`:expected_server_uuid`). A query connection that lands on a DIFFERENT
        replica than the stream — a VIP failover between the two connects — is caught
-       `:snapshot_source_mismatch` (the cross-connection check, Task-9-F1 / Task-4).
+       `:snapshot_source_mismatch` (the cross-connection source-identity check).
     3. **Resolve `P0`.** A FRESH start reads `P0 = @@global.gtid_executed` over the query
        connection (a read fault halts `:snapshot_bootstrap_gtid_read_failed`). A mid-snapshot
        RESUME uses the STORED `p0` from the durable `%State{}` — immune to `@@gtid_executed`
@@ -39,7 +39,7 @@ defmodule Capstan.Snapshot do
        fingerprint (a schema drift across the resume is caught on chunk 1).
 
   The supervisor then starts the `Capstan.Snapshot.Coordinator` with `processed_set` = the live
-  watermark (`P0`) so a chunk whose `G ≤ P0` emits immediately (Task-8-F2), wires it as the
+  watermark (`P0`) so a chunk whose `G ≤ P0` emits immediately, wires it as the
   assembler's sink by NAME, and injects the observer + monitor via
   `Capstan.AssemblerServer.attach_coordinator/2`.
 
@@ -423,7 +423,7 @@ defmodule Capstan.Snapshot do
     end
   end
 
-  # The processed watermark the coordinator seeds its advance gate with (Task-8-F2): the
+  # The processed watermark the coordinator seeds its advance gate with: the
   # checkpoint's current value AFTER the seed — `P0` on a fresh start, the advanced watermark on a
   # resume — so a chunk captured at `G ≤` it emits immediately.
   defp current_watermark({impl, store}) do

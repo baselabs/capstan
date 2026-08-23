@@ -24,7 +24,7 @@ defmodule Capstan.Snapshot.CursorGate do
   suppression is unchanged; they diverge only across the emit→cursor-persist crash window, where
   `delivered_pk` sits ahead of the rolled-back `pk_cursor`. Forwarding a delete of an
   already-delivered key (`k ≤ delivered_pk`) then sweeps the row rather than leaving a permanent
-  phantom (closeout F1) — the re-read chunk, taken as-of a fresh `G` with the row already gone,
+  phantom — the re-read chunk, taken as-of a fresh `G` with the row already gone,
   would otherwise omit it while the suppressed delete never reached the sink. See the `table_spec`
   doc; inserts/updates keep gating on `pk_cursor` so strict-once is preserved.
 
@@ -34,7 +34,7 @@ defmodule Capstan.Snapshot.CursorGate do
   the Elixir comparison provably matches MySQL `ORDER BY` (Ch4).
 
   `classify/3` returns the **list of surviving forward-images** (0, 1, or 2), which the
-  coordinator (Task 8) folds into the transaction's `changes` and forwards to the real sink.
+  coordinator folds into the transaction's `changes` and forwards to the real sink.
   A suppressed change yields `[]`.
 
   ## PK-changing UPDATE split (Ch2, tripwire 17)
@@ -169,7 +169,7 @@ defmodule Capstan.Snapshot.CursorGate do
   # emit→cursor-persist crash window, where `delivered_pk` sits AHEAD of the rolled-back
   # `pk_cursor`: a streamed delete of an already-delivered key (`k ≤ delivered_pk`) is then
   # FORWARDED to sweep the row, instead of being suppressed and leaving a permanent phantom
-  # (closeout F1). Gating inserts/updates on `pk_cursor` preserves strict-once (the chunk already
+  # Gating inserts/updates on `pk_cursor` preserves strict-once (the chunk already
   # delivered `≤ pk_cursor`); a delete of a not-yet-delivered key in `(pk_cursor, delivered_pk]`
   # is at worst a harmless no-op at the upsert/delete-by-PK sink.
   defp gate(%Change{op: :delete} = change, k, cursor, table) do
