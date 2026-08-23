@@ -12,6 +12,17 @@ defmodule Capstan.MixProject do
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       consolidate_protocols: Mix.env() != :test,
+      # Coverage measures the SHIPPED library — the test-support harness (the manual fixture
+      # capture tool, the substrate case scaffolding, the value-free sweep) is scaffolding,
+      # not product. The threshold stays Mix's default 90 and is enforced by the CI cover step.
+      test_coverage: [
+        ignore_modules: [
+          Capstan.FixtureCapture,
+          Capstan.MysqlCase,
+          Capstan.MysqlCase.DurableStore,
+          Capstan.ValueFree
+        ]
+      ],
       deps: deps(),
       package: package(),
       docs: docs(),

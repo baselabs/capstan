@@ -149,6 +149,13 @@ jobs:
       - name: Docker-gated marquees (throwaway containers)
         run: mix test --only requires_docker
 
+      # Enforces mix.exs's coverage threshold (Mix default 90) over the FULL exercised
+      # surface — every tag, against the live substrate — with the test-support harness
+      # excluded from the denominator (see test_coverage in mix.exs). A drop below the
+      # threshold fails CI here, so the number stays honest.
+      - name: Coverage (threshold-enforced, all tags)
+        run: mix test --cover --include integration --include live --include requires_docker
+
       - name: Dialyzer
         run: mix dialyzer
 
