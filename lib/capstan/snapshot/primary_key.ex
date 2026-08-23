@@ -18,20 +18,31 @@ defmodule Capstan.Snapshot.PrimaryKey do
       byte-wise (shorter prefix first), and composites order lexicographically as tuples
       (matching MySQL row-value ORDER BY).
 
-  ## The positive allowlist (Ch3.2 / Ch4)
+  ## The positive allowlist (Ch3.2 / Ch4; the string arm is ADR-0012)
 
-  ACCEPT only the types whose Elixir order provably matches MySQL `ORDER BY`:
+  ACCEPT the types whose comparison against MySQL `ORDER BY` is provably faithful:
 
     * signed/unsigned integer — `TINYINT`/`SMALLINT`/`MEDIUMINT`/`INT`/`BIGINT`
     * `BINARY` / `VARBINARY` (byte-ordered)
-    * composites of the above (tuple compare)
+    * `CHAR` / `VARCHAR` — collation-ordered, with **the server as the only collation
+      oracle**: a string PK's canonical form is its collation WEIGHT BYTES (probe-proven:
+      weight-byte order == `ORDER BY` for `ai_ci`, both `_bin` weight forms, PAD SPACE over
+      distinct keys, multi-level `as_cs`, and composites). The chunk read selects
+      `WEIGHT_STRING(pk)` alongside the row; the stream side resolves weights through
+      `resolve_weights/4` (a COLLATE-pinned `CONVERT(X'..' USING charset)` introducer over the
+      binlog's raw column bytes — an unpinned introducer computes the charset-DEFAULT
+      collation's weights, a different order space). Distinct PK values are collation-distinct
+      by the PK constraint itself, so weights are a faithful key identity.
+    * composites of the above (tuple compare; a string position compares by its weight)
 
   REFUSE everything else with `:snapshot_pk_unsupported_type`:
 
-    * the collation-ordered STRING family — `CHAR`/`VARCHAR`/`TEXT` (both a `_bin` and a
-      `_ci` collation report `data_type` `char`/`varchar`, so collation cannot distinguish
-      them; the whole family is refused). A collation order Elixir cannot reproduce would
-      let the cursor-gate mis-classify a change.
+    * the TEXT family — order semantics are consistent, but a TEXT prefix PK pays a measured
+      **filesort per chunk page** (`Using filesort` vs VARCHAR's `Using index`;
+      `probe/collation_weight_probe.exs` Q6b) — superlinear backfill.
+    * `ENUM`/`SET` — the column's `ORDER BY` is member-position order and its column weights
+      are position-based, while any stream-side introducer computes STRING weights — two
+      disagreeing order spaces, no uniform mechanism (probe Q13).
     * `DECIMAL`/`DOUBLE`/`FLOAT`/`DATE`/`DATETIME`/temporal and any other type — their
       Elixir term-order diverges from MySQL.
 
@@ -74,7 +85,13 @@ defmodule Capstan.Snapshot.PrimaryKey do
 
   @integer_data_types ~w(tinyint smallint mediumint int bigint)
 
-  @typedoc "An order-faithful PK column type atom (integer family, `:binary`, `:varbinary`)."
+  # The stream-side weight resolution is CHUNK-BOUNDED: one SELECT-list term per distinct raw
+  # value, at most this many per statement, so a bulk-load transaction cannot exceed
+  # max_allowed_packet and deterministically burn the retry budget (ADR-0012, adversarial
+  # review finding 3).
+  @weight_batch_size 128
+
+  @typedoc "An order-faithful PK column type atom (integer family, `:binary`, `:varbinary`, `:char`, `:varchar`)."
   @type pk_type ::
           :tinyint
           | :tinyint_unsigned
@@ -88,9 +105,22 @@ defmodule Capstan.Snapshot.PrimaryKey do
           | :bigint_unsigned
           | :binary
           | :varbinary
+          | :char
+          | :varchar
 
-  @typedoc "The introspected key: the ordered PK columns and their order-faithful types."
-  @type key :: %{pk_columns: [String.t()], pk_types: [pk_type()]}
+  @typedoc """
+  The introspected key: the ordered PK columns, their order-faithful types, and — for the
+  string columns — the charset/collation pair that pins every weight and cursor literal
+  (ADR-0012). A non-string column's charset/collation entry is `nil` (mirroring
+  `information_schema.COLUMNS`, where `CHARACTER_SET_NAME`/`COLLATION_NAME` are NULL for
+  non-string columns).
+  """
+  @type key :: %{
+          pk_columns: [String.t()],
+          pk_types: [pk_type()],
+          pk_charsets: [nil | String.t()],
+          pk_collations: [nil | String.t()]
+        }
 
   @typedoc "A canonical PK: a single value (single-column PK) or a tuple (composite PK)."
   @type canonical_pk :: integer() | binary() | tuple()
@@ -124,9 +154,11 @@ defmodule Capstan.Snapshot.PrimaryKey do
   provable without a live server).
 
     * `index_rows` — `STATISTICS` rows `[INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME, NON_UNIQUE]`
-    * `column_rows` — `COLUMNS` rows `[COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE]`
+    * `column_rows` — `COLUMNS` rows
+      `[COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, CHARACTER_SET_NAME, COLLATION_NAME]`
 
-  (all columns are `NOT NULL` in `information_schema`, so no cell is `nil`). Returns the same
+  (the four `STATISTICS` cells are `NOT NULL`; the charset/collation cells are NULL for
+  non-string columns, so those two cells may be `nil`). Returns the same
   `{:ok, key()} | {:error, reason}` contract as `introspect/2`.
   """
   @spec resolve_key([[binary() | nil]], [[binary() | nil]]) :: {:ok, key()} | {:error, atom()}
@@ -148,8 +180,10 @@ defmodule Capstan.Snapshot.PrimaryKey do
   or refuses `:snapshot_pk_unsupported_type`.
 
   Signedness rides `COLUMN_TYPE` (which carries the `unsigned` attribute); `DATA_TYPE` alone
-  cannot distinguish it. The whole string family (`char`/`varchar`/`text`/`enum`/…) and every
-  non-integer, non-binary type are refused (their Elixir order diverges from MySQL).
+  cannot distinguish it. `CHAR`/`VARCHAR` accept (ADR-0012 — the weight path carries their
+  ordering); the TEXT family (measured per-page filesort) and `ENUM`/`SET` (position-based
+  order no introducer weight path reproduces) refuse, as does every non-integer, non-binary,
+  non-char/varchar type (its Elixir order diverges from MySQL).
   """
   @spec resolve_pk_type(binary(), binary()) ::
           {:ok, pk_type()} | {:error, :snapshot_pk_unsupported_type}
@@ -161,6 +195,8 @@ defmodule Capstan.Snapshot.PrimaryKey do
       dt in @integer_data_types -> {:ok, integer_type(dt, unsigned?(column_type))}
       dt == "binary" -> {:ok, :binary}
       dt == "varbinary" -> {:ok, :varbinary}
+      dt == "char" -> {:ok, :char}
+      dt == "varchar" -> {:ok, :varchar}
       true -> {:error, :snapshot_pk_unsupported_type}
     end
   end
@@ -176,8 +212,11 @@ defmodule Capstan.Snapshot.PrimaryKey do
   A raw value is either a text-protocol string (a chunk read) or a binlog-decoded term (a
   streamed change); both forms of the SAME PK canonicalize equal. Integers normalize to
   their true value (an unsigned column's signed-wrapped negative is unwrapped into
-  `[0, 2^width)`); binaries pass through their bytes. A single-column PK returns a bare value;
-  a composite returns a tuple in column order.
+  `[0, 2^width)`); binaries pass through their bytes; a string column's value is the
+  `{raw, weight}` pair its caller assembled (the weight being the canonical bytes —
+  ADR-0012; a bare binary for a string column raises, value-free, rather than silently
+  comparing raws). A single-column PK returns a bare value; a composite returns a tuple in
+  column order.
   """
   @spec canonical([pk_type()], [binary() | integer()]) :: canonical_pk()
   def canonical(pk_types, raw_values)
@@ -186,6 +225,64 @@ defmodule Capstan.Snapshot.PrimaryKey do
       [single] -> single
       many -> List.to_tuple(many)
     end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## weight resolution (ADR-0012) — the server as the only collation oracle
+  ## ---------------------------------------------------------------------------
+
+  @doc """
+  Builds the COLLATE-pinned weight-resolution SQL for a batch of raw column values.
+
+  One `WEIGHT_STRING(CONVERT(X'<hex>' USING charset) COLLATE collation)` term per raw, in
+  order — the result row's columns pair positionally with `raws`. The `COLLATE` pin is
+  LOAD-BEARING: without it the `CONVERT` result carries the charset-DEFAULT collation, whose
+  weights are a different order space (probed: a column's `as_cs` multi-level weight vs the
+  unpinned `ai_ci` primary-only weight), and the unpinned form in a `WHERE` additionally
+  raises ERROR 1267 on non-default collations. Hex literals carry arbitrary bytes (NULs,
+  quotes, backslashes, empty) with no string-literal escaping surface.
+  """
+  @spec weight_sql(String.t(), String.t(), [binary()]) :: String.t()
+  def weight_sql(charset, collation, raws)
+      when is_binary(charset) and is_binary(collation) and is_list(raws) do
+    terms =
+      Enum.map_join(raws, ", ", fn raw ->
+        "WEIGHT_STRING(CONVERT(X'#{Base.encode16(raw)}' USING #{charset}) COLLATE #{collation})"
+      end)
+
+    "SELECT #{terms}"
+  end
+
+  @doc """
+  Resolves the collation weight bytes for a batch of raw PK-column values over a
+  `Capstan.Query` handle — `{:ok, %{raw => weight}}`, or a value-free `{:error, reason}`.
+
+  The stream-side arm of ADR-0012: a binlog-decoded string PK arrives as the column's raw
+  bytes (the row event carries no charset), and its canonical form is the weight the SERVER
+  computes for those bytes under the column's charset + collation. The batch is chunk-bounded
+  (#{@weight_batch_size} values per statement) so one bulk-load transaction cannot exceed
+  `max_allowed_packet`; a query fault surfaces as the scrubbed `Capstan.Query` atom for the
+  caller to budget and halt on.
+  """
+  @spec resolve_weights(Query.t(), String.t(), String.t(), [binary()]) ::
+          {:ok, %{binary() => binary()}} | {:error, atom()}
+  def resolve_weights(%Query{} = query, charset, collation, raws) do
+    raws
+    |> Enum.chunk_every(@weight_batch_size)
+    |> Enum.reduce_while({:ok, %{}}, fn batch, {:ok, acc} ->
+      case Query.query(query, weight_sql(charset, collation, batch)) do
+        {:ok, [row]} when length(row) == length(batch) ->
+          {:cont, {:ok, Map.merge(acc, Map.new(Enum.zip(batch, row)))}}
+
+        {:ok, _malformed} ->
+          # A weight row must have exactly one column per raw — anything else is a broken
+          # resultset shape, classified with the query faults (value-free).
+          {:halt, {:error, :snapshot_pk_weight_failed}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
   end
 
   ## ---------------------------------------------------------------------------
@@ -245,6 +342,19 @@ defmodule Capstan.Snapshot.PrimaryKey do
     end)
   end
 
+  defp columns_by_name(column_rows) do
+    Map.new(column_rows, fn [name, data_type, column_type, is_nullable, charset, collation] ->
+      {name,
+       %{
+         data_type: data_type,
+         column_type: column_type,
+         nullable?: is_nullable == "YES",
+         charset: charset,
+         collation: collation
+       }}
+    end)
+  end
+
   # The unique (NON_UNIQUE = "0") non-PRIMARY indexes, each as `{name, ordered_columns}`,
   # sorted by index name for a deterministic pick.
   defp unique_keys(index_rows) do
@@ -264,12 +374,6 @@ defmodule Capstan.Snapshot.PrimaryKey do
     |> Enum.map(fn [_name, _seq, col | _] -> col end)
   end
 
-  defp columns_by_name(column_rows) do
-    Map.new(column_rows, fn [name, data_type, column_type, is_nullable] ->
-      {name, %{data_type: data_type, column_type: column_type, nullable?: is_nullable == "YES"}}
-    end)
-  end
-
   # A column is NOT NULL only when it is present and IS_NULLABLE = "NO"; an absent column
   # (a key referencing a column the COLUMNS resultset lacks) fails closed as "nullable" so
   # the key is not accepted.
@@ -281,21 +385,56 @@ defmodule Capstan.Snapshot.PrimaryKey do
   end
 
   # Resolve every key column's type through the allowlist; any unsupported (or missing)
-  # column refuses the whole key.
+  # column refuses the whole key. A string column additionally requires its charset AND
+  # collation from the resultset — the pin every weight/cursor literal is built from — and a
+  # nil one (a broken introspection shape) refuses the key fail-closed.
   defp build_key(cols, columns) do
     cols
     |> Enum.reduce_while({:ok, []}, fn col, {:ok, acc} ->
-      with %{data_type: dt, column_type: ct} <- Map.get(columns, col),
-           {:ok, type} <- resolve_pk_type(dt, ct) do
-        {:cont, {:ok, [type | acc]}}
+      with %{data_type: dt, column_type: ct, charset: cs, collation: coll} <-
+             Map.get(columns, col),
+           {:ok, type} <- resolve_pk_type(dt, ct),
+           :ok <- string_pin_ok?(type, cs, coll) do
+        {:cont, {:ok, [{type, cs, coll} | acc]}}
       else
         _ -> {:halt, {:error, :snapshot_pk_unsupported_type}}
       end
     end)
     |> case do
-      {:ok, rev_types} -> {:ok, %{pk_columns: cols, pk_types: Enum.reverse(rev_types)}}
-      {:error, _} = error -> error
+      {:ok, rev} ->
+        {types, charsets, collations} = unzip_key(rev)
+
+        {:ok,
+         %{
+           pk_columns: cols,
+           pk_types: types,
+           pk_charsets: charsets,
+           pk_collations: collations
+         }}
+
+      {:error, _} = error ->
+        error
     end
+  end
+
+  # A string PK column must carry both a charset and a collation; anything else is a broken
+  # introspection shape and refuses the key (never an unpinnable literal).
+  defp string_pin_ok?(type, charset, collation) when type in [:char, :varchar] do
+    if is_binary(charset) and charset != "" and is_binary(collation) and collation != "",
+      do: :ok,
+      else: {:error, :snapshot_pk_unsupported_type}
+  end
+
+  defp string_pin_ok?(_type, _charset, _collation), do: :ok
+
+  defp unzip_key(rev) do
+    entries = Enum.reverse(rev)
+
+    {
+      Enum.map(entries, fn {type, _cs, _coll} -> type end),
+      Enum.map(entries, fn {_type, cs, _coll} -> cs end),
+      Enum.map(entries, fn {_type, _cs, coll} -> coll end)
+    }
   end
 
   ## ---------------------------------------------------------------------------
@@ -318,6 +457,22 @@ defmodule Capstan.Snapshot.PrimaryKey do
 
   defp canonical_one(:binary, value) when is_binary(value), do: value
   defp canonical_one(:varbinary, value) when is_binary(value), do: value
+
+  # A string PK column's canonical form is its WEIGHT BYTES — the server-computed collation
+  # sort key (ADR-0012). Callers that hold both halves pass the {raw, weight} pair (the
+  # cursor-gate via its spec-carried weights; the chunk reader via the appended
+  # WEIGHT_STRING columns). A bare binary here means the weight was never resolved — a
+  # caller bug, not a data condition: fail LOUD and VALUE-FREE (Rule 1 — the message carries
+  # no value), never silently fall back to comparing raws (that is exactly the byte-order
+  # divergence C2a retires).
+  defp canonical_one(type, {_raw, weight}) when type in [:char, :varchar] and is_binary(weight),
+    do: weight
+
+  defp canonical_one(type, _raw_without_weight) when type in [:char, :varchar] do
+    raise ArgumentError,
+          "capstan: #{type} primary-key column canonicalized without a collation weight " <>
+            "(the server-computed weight must be resolved before canonicalization)"
+  end
 
   defp canonical_one(type, value) do
     cond do
@@ -351,7 +506,7 @@ defmodule Capstan.Snapshot.PrimaryKey do
   end
 
   defp column_sql(schema, table) do
-    "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE " <>
+    "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, CHARACTER_SET_NAME, COLLATION_NAME " <>
       "FROM information_schema.COLUMNS " <>
       "WHERE TABLE_SCHEMA = #{literal(schema)} AND TABLE_NAME = #{literal(table)}"
   end

@@ -16,6 +16,7 @@ context, the decision, and the consequences — including what was deliberately 
 | [0009](0009-fail-closed-supervision-and-streaming-liveness.md) | Fail-closed supervision and streaming liveness — `:temporary` children, halt-is-not-a-crash, heartbeat + epoch-guarded timeout, the two budgets |
 | [0010](0010-exclusive-end-bound-of-com-binlog-dump-gtid.md) | The exclusive end bound of `COM_BINLOG_DUMP_GTID` — `high + 1` on the wire, probe-proven, tripwired live |
 | [0011](0011-transaction-compression-precondition.md) | Binary-log transaction compression is a precondition — source-unilateral and unconsumable in posture; refused at the gate, decoder halt kept as the dynamic-flip backstop |
+| [0012](0012-collation-string-pk-weight-cursor.md) | Collation-ordered string PKs — the server as the only collation oracle; canonical weight bytes, a COLLATE-pinned dual cursor, resume-time weight recompute |
 
 A note on provenance markers: "Design refs" (`Q1`, `Q5`, `F6`, …) cite the numbered questions
 and findings of the pre-implementation design review, and "Task n" cites rows of the

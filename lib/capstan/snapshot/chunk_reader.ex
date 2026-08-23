@@ -88,8 +88,21 @@ defmodule Capstan.Snapshot.ChunkReader do
   @commit_sql "COMMIT"
   @rollback_sql "ROLLBACK"
 
-  @typedoc "The paging cursor: a canonical PK (the previous chunk's `max_pk`) or `:start`."
-  @type cursor :: PrimaryKey.canonical_pk() | :start
+  @typedoc """
+  The paging cursor: `:start`, or the previous chunk's `max_pk`.
+
+  For a table with NO string PK column the cursor is the bare canonical PK (integer /
+  binary / tuple). For a table WITH a string PK column it is the ADR-0012 DUAL form
+  `%{raw: page_form, weight: gate_form}` — `raw` carries the column bytes that build the
+  `WHERE pk > CONVERT(X'..' …) COLLATE …` literal (and is exactly what the binlog delivers
+  for the same column), `weight` carries the server-computed collation weights the
+  cursor-gate compares. At resume the `weight` half is RECOMPUTED from `raw`
+  (`coordinator.ex`), so both halves always come from the same server.
+  """
+  @type cursor ::
+          PrimaryKey.canonical_pk()
+          | %{raw: PrimaryKey.canonical_pk(), weight: PrimaryKey.canonical_pk()}
+          | :start
 
   @type t :: %__MODULE__{
           query: Query.t(),
@@ -97,6 +110,8 @@ defmodule Capstan.Snapshot.ChunkReader do
           table: String.t(),
           pk_columns: [String.t()],
           pk_types: [PrimaryKey.pk_type()],
+          pk_charsets: [nil | String.t()],
+          pk_collations: [nil | String.t()],
           pk_indices: [non_neg_integer()],
           projection: [String.t()],
           fingerprint: String.t(),
@@ -112,6 +127,8 @@ defmodule Capstan.Snapshot.ChunkReader do
     :table,
     :pk_columns,
     :pk_types,
+    :pk_charsets,
+    :pk_collations,
     :pk_indices,
     :projection,
     :fingerprint,
@@ -180,6 +197,8 @@ defmodule Capstan.Snapshot.ChunkReader do
          table: table,
          pk_columns: key.pk_columns,
          pk_types: key.pk_types,
+         pk_charsets: Map.get(key, :pk_charsets),
+         pk_collations: Map.get(key, :pk_collations),
          pk_indices: pk_indices(key.pk_columns, projection),
          projection: projection,
          fingerprint: Keyword.get(opts, :fingerprint) || fingerprint_of(column_rows),
@@ -359,15 +378,83 @@ defmodule Capstan.Snapshot.ChunkReader do
     }
   end
 
-  # A full row image as a `column_name => value` map (the projection zipped with the row values).
-  defp row_record(reader, row), do: Map.new(Enum.zip(reader.projection, row))
+  # A full row image as a `column_name => value` map — over EXACTLY the table's projection.
+  # The appended WEIGHT_STRING cursor columns ride the chunk SELECT but are dropped here:
+  # a delivered record's keys are the table's columns, exactly as a streamed change's would
+  # be (ADR-0012 finding 6 — weight bytes are cursor-internal and never delivered).
+  defp row_record(reader, row) do
+    projection = Enum.take(row, length(reader.projection))
+    Map.new(Enum.zip(reader.projection, projection))
+  end
 
   defp max_pk(_reader, []), do: nil
 
+  # The cursor the next page resumes from. A table with NO string PK column keeps the bare
+  # canonical PK (pre-ADR-0012 shape). A string-PK table gets the DUAL cursor: `raw` is the
+  # page form (the pk columns' wire values — the string columns' CAST-AS-BINARY column bytes)
+  # and `weight` the gate form (canonical, with each string column's appended
+  # WEIGHT_STRING value in place of its raw).
   defp max_pk(reader, rows) do
     last = List.last(rows)
-    pk_values = Enum.map(reader.pk_indices, &Enum.at(last, &1))
-    PrimaryKey.canonical(reader.pk_types, pk_values)
+    raws = Enum.map(reader.pk_indices, &Enum.at(last, &1))
+
+    if string_pk?(reader) do
+      # The appended weight cells sit AFTER the projection, POSITIONALLY paired with the
+      # string pk columns in ordinal order (never matched by value — two string columns
+      # can carry the same raw bytes).
+      weight_cells = Enum.drop(last, length(reader.projection))
+      string_ordinals = string_pk_ordinals(reader)
+      weight_by_ordinal = Map.new(Enum.zip(string_ordinals, weight_cells))
+
+      paired =
+        reader.pk_types
+        |> Enum.with_index()
+        |> Enum.map(fn
+          {type, i} when type in [:char, :varchar] ->
+            weight = Map.fetch!(weight_by_ordinal, i)
+            {Enum.at(raws, i), weight}
+
+          {_type, i} ->
+            Enum.at(raws, i)
+        end)
+
+      %{raw: page_form(reader, raws), weight: PrimaryKey.canonical(reader.pk_types, paired)}
+    else
+      PrimaryKey.canonical(reader.pk_types, raws)
+    end
+  end
+
+  # The pk positions (0-based, in ordinal order) whose columns are string-typed.
+  defp string_pk_ordinals(reader) do
+    reader.pk_types
+    |> Enum.with_index()
+    |> Enum.filter(fn {type, _i} -> type in [:char, :varchar] end)
+    |> Enum.map(fn {_type, i} -> i end)
+  end
+
+  # The page form over the pk columns' wire values: string columns contribute their raw
+  # column bytes, integer columns their canonical value (identical to the pre-0012 cursor
+  # for integer tables, where raw == canonical).
+  defp page_form(reader, raws) do
+    values =
+      reader.pk_types
+      |> Enum.zip(raws)
+      |> Enum.map(fn
+        {type, raw} when type in [:char, :varchar] -> raw
+        {type, raw} -> PrimaryKey.canonical([type], [raw])
+      end)
+
+    case values do
+      [single] -> single
+      many -> List.to_tuple(many)
+    end
+  end
+
+  defp string_pk?(reader), do: Enum.any?(reader.pk_types, &(&1 in [:char, :varchar]))
+
+  # The string PK columns in ordinal order (their WEIGHT_STRING columns append in this order).
+  defp string_pk_columns(reader) do
+    string_pk_ordinals(reader) |> Enum.map(&Enum.at(reader.pk_columns, &1))
   end
 
   ## ---------------------------------------------------------------------------
@@ -382,8 +469,12 @@ defmodule Capstan.Snapshot.ChunkReader do
   # `LIMIT chunk_size + 1`: the +1 is the finality look-ahead (`split_lookahead/2`) — reading one
   # row past the chunk lets the reader tell "this is the last chunk" from "a further chunk exists"
   # without a trailing empty page, so an exact-multiple table's last chunk is still `final?: true`.
+  # A string-PK table's select list carries the pk column's RAW COLUMN BYTES (`CAST(col AS
+  # BINARY)` — identical to the binlog-delivered form; utf8mb4 is byte-identical to the previous
+  # text-protocol projection) plus one appended `WEIGHT_STRING(pk)` column per string pk column
+  # (ADR-0012) — the cursor's weight half, never a delivered-row key.
   defp chunk_sql(reader, cursor) do
-    "SELECT #{select_list(reader.projection)} FROM #{qualified(reader)}" <>
+    "SELECT #{select_list(reader)} FROM #{qualified(reader)}" <>
       where_clause(reader, cursor) <>
       " ORDER BY #{order_list(reader.pk_columns)}" <>
       " LIMIT #{reader.chunk_size + 1}"
@@ -391,34 +482,77 @@ defmodule Capstan.Snapshot.ChunkReader do
 
   # `:start` reads from the beginning (no lower bound); else a keyset predicate `pk > cursor`.
   # For a composite PK the row-value form `(c1, c2) > (v1, v2)` matches MySQL row-value ORDER BY
-  # (and hence `PrimaryKey.compare/2`'s tuple order).
+  # (and hence `PrimaryKey.compare/2`'s tuple order). A string-PK table's cursor is the ADR-0012
+  # dual form — the literal is built from its `raw` half.
   defp where_clause(_reader, :start), do: ""
 
-  defp where_clause(%{pk_columns: [col], pk_types: [type]}, cursor),
-    do: " WHERE #{ident(col)} > #{scalar_literal(type, cursor)}"
+  defp where_clause(reader, cursor) do
+    values = cursor_values(reader, cursor)
+    cols = reader.pk_columns
 
-  defp where_clause(%{pk_columns: cols, pk_types: types}, cursor) do
-    values = Tuple.to_list(cursor)
-    lhs = "(" <> Enum.map_join(cols, ", ", &ident/1) <> ")"
+    literal =
+      reader.pk_types
+      |> Enum.zip(values)
+      |> Enum.with_index()
+      |> Enum.map_join(", ", fn {{type, value}, i} ->
+        scalar_literal(type, value, pin(reader, i))
+      end)
 
-    rhs =
-      "(" <>
-        (types
-         |> Enum.zip(values)
-         |> Enum.map_join(", ", fn {type, value} -> scalar_literal(type, value) end)) <>
-        ")"
-
-    " WHERE #{lhs} > #{rhs}"
+    if length(cols) == 1,
+      do: " WHERE #{ident(hd(cols))} > #{literal}",
+      else: " WHERE (#{Enum.map_join(cols, ", ", &ident/1)}) > (#{literal})"
   end
 
+  # The cursor's PAGE-form values as a list: the dual cursor contributes `.raw`; a bare cursor
+  # (a non-string table — where raw == canonical) list-ifies directly.
+  defp cursor_values(_reader, %{raw: raw}), do: form_values(raw)
+  defp cursor_values(_reader, cursor), do: form_values(cursor)
+
+  defp form_values(value) when is_tuple(value), do: Tuple.to_list(value)
+  defp form_values(value), do: [value]
+
   # Integer PKs → a decimal literal; BINARY/VARBINARY → a hex string literal `X'..'` (byte-wise,
-  # matching MySQL binary comparison). These are the only allowlisted PK value shapes.
-  defp scalar_literal(type, value) when type in [:binary, :varbinary] and is_binary(value),
-    do: "X'" <> Base.encode16(value) <> "'"
+  # matching MySQL binary comparison). A string PK → the COLLATE-pinned CONVERT form over the
+  # raw column bytes: the pin is LOAD-BEARING (an unpinned CONVERT carries the charset-DEFAULT
+  # collation — a different order space — and raises ERROR 1267 on non-default collations).
+  defp scalar_literal(type, value, _pin)
+       when type in [:binary, :varbinary] and is_binary(value),
+       do: "X'" <> Base.encode16(value) <> "'"
 
-  defp scalar_literal(_type, value) when is_integer(value), do: Integer.to_string(value)
+  defp scalar_literal(_type, value, _pin) when is_integer(value), do: Integer.to_string(value)
 
-  defp select_list(columns), do: Enum.map_join(columns, ", ", &ident/1)
+  defp scalar_literal(type, raw, {charset, collation})
+       when type in [:char, :varchar] and is_binary(raw) do
+    "CONVERT(X'#{Base.encode16(raw)}' USING #{charset}) COLLATE #{collation}"
+  end
+
+  # The per-column (charset, collation) pin for a string pk column; nil for others.
+  defp pin(%{pk_charsets: charsets, pk_collations: collations}, i) do
+    case {Enum.at(charsets || [], i), Enum.at(collations || [], i)} do
+      {charset, collation} when is_binary(charset) and is_binary(collation) ->
+        {charset, collation}
+
+      _ ->
+        nil
+    end
+  end
+
+  # The select list: each projection column as its identifier, except a string PK column which
+  # projects its raw column bytes, plus the appended WEIGHT_STRING columns (string pk columns
+  # in ordinal order).
+  defp select_list(reader) do
+    columns =
+      reader.projection
+      |> Enum.map(fn col ->
+        if col in string_pk_columns(reader),
+          do: "CAST(#{ident(col)} AS BINARY)",
+          else: ident(col)
+      end)
+
+    weights = Enum.map(string_pk_columns(reader), &"WEIGHT_STRING(#{ident(&1)})")
+    Enum.join(columns ++ weights, ", ")
+  end
+
   defp order_list(columns), do: Enum.map_join(columns, ", ", &ident/1)
 
   defp qualified(reader), do: "#{ident(reader.schema)}.#{ident(reader.table)}"

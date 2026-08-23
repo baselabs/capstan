@@ -118,7 +118,11 @@ snapshot: [
 ```
 
 Every table gets exactly one completion signal — a `final_chunk?: true` beat to
-`handle_snapshot/2` (empty tables get exactly one empty final chunk).
+`handle_snapshot/2` (empty tables get exactly one empty final chunk). Primary keys
+may be integers, `BINARY`/`VARBINARY`, `CHAR`/`VARCHAR` (any charset and collation —
+the gate compares the server's own collation sort keys, not string bytes), or
+composites of those; the TEXT family and `ENUM`/`SET` keys are refused with a named
+halt rather than backfilled in a wrong order.
 
 ## Fail-closed, everywhere
 

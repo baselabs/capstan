@@ -8,8 +8,11 @@ defmodule Capstan.Snapshot.CoordinatorTest.StubReader do
   #   * `{:chunk, %Chunk{}, final?}` -> `{:ok, chunk, final?, next_reader}`
   #   * `:done`                       -> `{:done, next_reader}`
   #   * `{:error, reason}`            -> `{:error, reason}`
-  def read_chunk(%{script: [step | rest]}, _cursor) do
-    next = %{script: rest}
+  # The next-reader state PRESERVES the handle's other keys (a real ChunkReader is a struct
+  # update keeping pk_types/charsets/collations — the coordinator's weight resolution reads
+  # them from the CURRENT reader, so a stub that dropped them would stop resolving mid-test).
+  def read_chunk(%{script: [step | rest]} = reader, _cursor) do
+    next = %{reader | script: rest}
 
     case step do
       {:chunk, chunk, final?} -> {:ok, chunk, final?, next}
@@ -134,6 +137,40 @@ defmodule Capstan.Snapshot.CoordinatorTest.CountingFaultyStore do
   end
 end
 
+defmodule Capstan.Snapshot.CoordinatorTest.StubWeightResolver do
+  @moduledoc false
+  # A stubbed `PrimaryKey.resolve_weights/4` (the ADR-0012 stream-side collation oracle) —
+  # the injectable seam that lets the coordinator's weight-resolution behavior be unit-proven
+  # without a live query connection, exactly as `chunk_reader` is injectable. Config lives in
+  # `:persistent_term` (the tests are `async: false`):
+  #
+  #   * `:weights` — `%{raw => weight}` returned for the requested raws
+  #   * `:fault`   — `nil` | `:always` | `n` (fail n calls, then succeed)
+  #   * every call RECORDS `{charset, collation, raws}` for call-count/argument assertions
+  @key {__MODULE__, :config}
+
+  def configure(config), do: :persistent_term.put(@key, Map.new(config))
+  def clear, do: :persistent_term.erase(@key)
+  def reset_calls, do: :persistent_term.put({__MODULE__, :calls}, [])
+  def calls, do: :persistent_term.get({__MODULE__, :calls}, [])
+
+  defp record(call), do: :persistent_term.put({__MODULE__, :calls}, [call | calls()])
+
+  def resolve_weights(_query, charset, collation, raws) do
+    record({charset, collation, raws})
+    cfg = :persistent_term.get(@key, %{})
+
+    n = length(calls())
+
+    if Map.get(cfg, :fault) == :always or (is_integer(Map.get(cfg, :fault)) and n <= cfg.fault) do
+      {:error, :weight_blip}
+    else
+      weights = Map.get(cfg, :weights, %{})
+      {:ok, Map.new(raws, fn raw -> {raw, Map.fetch!(weights, raw)} end)}
+    end
+  end
+end
+
 defmodule Capstan.Snapshot.CoordinatorTest.BlockingReader do
   @moduledoc false
   # A stubbed ChunkReader whose FIRST `read_chunk/2` BLOCKS (announcing itself, then waiting for
@@ -164,6 +201,8 @@ defmodule Capstan.Snapshot.CoordinatorTest do
   """
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Capstan.Change
   alias Capstan.Position
   alias Capstan.SchemaChange
@@ -177,17 +216,167 @@ defmodule Capstan.Snapshot.CoordinatorTest do
     GatedStore,
     RecordingSink,
     ReportingStore,
-    StubReader
+    StubReader,
+    StubWeightResolver
   }
 
   @uuid "3e11fa47-71ca-11e1-9e33-c80aa9429562"
   @p0 "#{@uuid}:1-100"
   @in_memory SnapshotStore.InMemory
 
+  # String-PK fixtures (ADR-0012): live-probed utf8mb4_0900_ai_ci weights
+  # ('a' -> 1C47, 'Z' -> 1F21, 'zed' -> 1F31) and the coordinator's injectable resolver.
+  # (Module attributes are order-sensitive — these live BEFORE their first use.)
+  @w_a <<0x1C, 0x47>>
+  @w_z <<0x1F, 0x21>>
+  @w_zed <<0x1F, 0x31>>
+  @charset "utf8mb4"
+  @collation "utf8mb4_0900_ai_ci"
+  @stub_weights %{"a" => @w_a, "Z" => @w_z, "zed" => @w_zed}
+  @dual_z %{raw: "Z", weight: @w_z}
+  @sentinel "sentinel-cursor-raw"
+
   setup do
     RecordingSink.configure(report_to: self())
     on_exit(&RecordingSink.clear/0)
     :ok
+  end
+
+  ## ===========================================================================
+  ## handle_transaction/1 — string-PK weight resolution (ADR-0012)
+  ##
+  ## The coordinator resolves the collation WEIGHTS for an active string-PK table's streamed
+  ## raws (batched, COLLATE-pinned, over the readers' shared query connection) BEFORE gating,
+  ## with a bounded cache; a resolution fault is budgeted then halts fail-closed; and a resume
+  ## RECOMPUTES the dual cursor's `.weight` half from `.raw` (a server upgrade between run and
+  ## resume could change weight forms — both halves must be same-server).
+  ## ===========================================================================
+
+  describe "handle_transaction/1 — string-PK weight resolution (ADR-0012)" do
+    setup do
+      StubWeightResolver.configure(weights: @stub_weights)
+      StubWeightResolver.reset_calls()
+      on_exit(fn -> StubWeightResolver.clear() end)
+    end
+
+    test "gates by the RESOLVED weight: 'a' (byte-greater, collation-less) forwards at cursor 'Z'" do
+      _coord = string_gate_coordinator(%{raw: "Z", weight: @w_z})
+
+      t = txn([s_insert("a"), s_insert("zed")])
+
+      assert Coordinator.handle_transaction(t) == {:ok, t.position}
+      assert_receive {:handle_transaction, forwarded}
+      assert Enum.map(forwarded.changes, & &1.record["code"]) == ["a"]
+
+      # The resolver saw the raws under the column's charset + collation (the pin). The
+      # bootstrap recompute of the dual cursor (pk_cursor + delivered_pk) recorded two ["Z"]
+      # calls first; the GATE call carries the txn's raws.
+      [{@charset, @collation, ["Z"]}, {@charset, @collation, ["Z"]}, {@charset, @collation, raws}] =
+        Enum.reverse(StubWeightResolver.calls())
+
+      assert Enum.sort(raws) == ["a", "zed"]
+    end
+
+    test "the :start cursor resolves NO weights (the bootstrap-window short-circuit)" do
+      _coord = string_gate_coordinator(:start)
+
+      assert Coordinator.handle_transaction(txn([s_insert("a")])) == {:ok, pos()}
+      assert StubWeightResolver.calls() == []
+    end
+
+    test "a PK-changing UPDATE resolves weights even at :start (the split's k_old/k_new compare needs them)" do
+      _coord = string_gate_coordinator(:start)
+
+      assert Coordinator.handle_transaction(txn([s_update("Z", "a")])) == {:ok, pos()}
+
+      assert [{@charset, @collation, raws}] = Enum.reverse(StubWeightResolver.calls())
+      assert Enum.sort(raws) == ["Z", "a"]
+    end
+
+    test "the cache collapses a repeated raw across transactions (one resolution per distinct key)" do
+      _coord = string_gate_coordinator(%{raw: "Z", weight: @w_z})
+
+      assert Coordinator.handle_transaction(txn([s_insert("a")])) == {:ok, pos()}
+      assert Coordinator.handle_transaction(txn([s_insert("a")])) == {:ok, pos()}
+
+      # Two bootstrap recompute calls (pk_cursor + delivered_pk, both "Z") + exactly ONE
+      # gate resolution for the repeated "a" — the second txn hit the cache.
+      gate_calls = StubWeightResolver.calls() |> Enum.reverse() |> Enum.drop(2)
+      assert [{@charset, @collation, ["a"]}] = gate_calls
+    end
+
+    test "a resolution fault is budgeted, then halts :snapshot_pk_weight_failed fail-closed" do
+      # A :start cursor (no bootstrap recompute) + a PK-changing UPDATE (resolution is needed
+      # even at :start) — the fault lands deterministically on the GATE path.
+      StubWeightResolver.configure(%{weights: @stub_weights, fault: :always})
+
+      _coord =
+        start_coordinator(store_backed(), snap_state(%{table() => string_table(:start)}),
+          readers: %{table() => string_reader()},
+          weight_resolver: StubWeightResolver,
+          max_retries: 2
+        )
+
+      assert Coordinator.handle_transaction(txn([s_update("Z", "a")])) ==
+               {:error, :snapshot_pk_weight_failed}
+
+      assert_receive {:capstan_halt, :snapshot_pk_weight_failed}
+      # Budget: max_retries 2 ⇒ 3 resolution attempts.
+      assert length(StubWeightResolver.calls()) == 3
+    end
+
+    test "a value-free halt — no raw value rides the halt reason or a log" do
+      # The sentinel raw would leak through a naive error/inspect path. (:start cursor + an
+      # UPDATE — the fault lands on the gate path, not a bootstrap recompute.)
+      StubWeightResolver.configure(%{
+        weights: Map.put(@stub_weights, @sentinel, @w_a),
+        fault: :always
+      })
+
+      _coord =
+        start_coordinator(store_backed(), snap_state(%{table() => string_table(:start)}),
+          readers: %{table() => string_reader()},
+          weight_resolver: StubWeightResolver,
+          max_retries: 0
+        )
+
+      {result, log} =
+        with_log(fn -> Coordinator.handle_transaction(txn([s_update(@sentinel, "a")])) end)
+
+      assert {:error, :snapshot_pk_weight_failed} = result
+      refute log =~ @sentinel
+    end
+
+    test "RESUME recomputes the dual cursor's .weight from .raw (a tampered weight is replaced)" do
+      # A tampered/stale .weight (as a server-version form change would produce): the gate
+      # must use the RECOMPUTED weight for the same .raw. Recompute makes 'Z' → w_z; a change
+      # to 'a' (w_a < w_z) then FORWARDS. Under the tampered weight (<<0x00>>) 'a' would
+      # suppress — the forwarded change proves the recompute actually ran.
+      tampered = %{raw: "Z", weight: <<0x00, 0x01>>}
+
+      _coord =
+        start_coordinator(store_backed(), snap_state(%{table() => string_table(tampered)}),
+          readers: %{table() => string_reader()},
+          weight_resolver: StubWeightResolver
+        )
+
+      # The handle_transaction call SYNC with the coordinator also flushes handle_continue —
+      # assert the recompute AFTER it: two calls (pk_cursor + delivered_pk), both the raw "Z".
+      change = s_insert("a")
+      assert Coordinator.handle_transaction(txn([change])) == {:ok, pos()}
+
+      [
+        {@charset, @collation, ["Z"]},
+        {@charset, @collation, ["Z"]},
+        {@charset, @collation, ["a"]}
+      ] =
+        Enum.reverse(StubWeightResolver.calls())
+
+      # The gate used the RECOMPUTED weight (w_z): 'a' (w_a < w_z) FORWARDED — under the
+      # tampered weight (<<0x00, 0x01>>) 'a' would have suppressed.
+      assert_receive {:handle_transaction, forwarded}
+      assert forwarded.changes == [change]
+    end
   end
 
   ## ===========================================================================
@@ -867,6 +1056,52 @@ defmodule Capstan.Snapshot.CoordinatorTest do
 
   defp table, do: {"s", "t"}
 
+  defp s_insert(code),
+    do: %Change{op: :insert, schema: "s", table: "t", record: %{"code" => code}, old_record: nil}
+
+  defp s_update(old, new) do
+    %Change{
+      op: :update,
+      schema: "s",
+      table: "t",
+      record: %{"code" => new},
+      old_record: %{"code" => old}
+    }
+  end
+
+  defp string_table(cursor, done? \\ false, delivered \\ nil) do
+    %{
+      fingerprint: "fp",
+      pk_columns: ["code"],
+      pk_types: [:varchar],
+      pk_cursor: cursor,
+      delivered_pk: delivered || cursor,
+      done?: done?
+    }
+  end
+
+  # A string-PK reader stub carrying the introspected charset/collation + a never-covered
+  # buffered chunk (mirrors gate_coordinator — the table stays ACTIVE with a fixed cursor).
+  defp string_reader do
+    buffered = chunk(0, "#{@uuid}:9000-9001", [%{"code" => "zzz"}], %{raw: "zzz", weight: <<>>})
+
+    %{
+      script: [{:chunk, buffered, false}],
+      pk_columns: ["code"],
+      pk_types: [:varchar],
+      pk_charsets: [@charset],
+      pk_collations: [@collation],
+      query: :stub_query
+    }
+  end
+
+  defp string_gate_coordinator(cursor) do
+    start_coordinator(store_backed(), snap_state(%{table() => string_table(cursor)}),
+      readers: %{table() => string_reader()},
+      weight_resolver: StubWeightResolver
+    )
+  end
+
   # `delivered` defaults to `cursor` (steady state: the delivered high-water == the re-read floor);
   # a crash-window test passes `delivered` AHEAD of `cursor` to exercise the F1 delete backstop.
   defp int_table(cursor, done? \\ false, delivered \\ nil) do
@@ -944,6 +1179,7 @@ defmodule Capstan.Snapshot.CoordinatorTest do
         snapshot_store: snapshot_store,
         snapshot_state: snapshot_state,
         chunk_reader: Keyword.get(opts, :chunk_reader, StubReader),
+        weight_resolver: Keyword.get(opts, :weight_resolver, Capstan.Snapshot.PrimaryKey),
         processed_set: Keyword.get(opts, :processed_set, ""),
         readers: Keyword.fetch!(opts, :readers)
       ] ++ table_order_opt(opts) ++ Keyword.take(opts, [:max_retries])

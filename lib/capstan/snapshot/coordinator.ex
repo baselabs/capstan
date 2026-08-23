@@ -88,6 +88,7 @@ defmodule Capstan.Snapshot.Coordinator do
   alias Capstan.Snapshot.Chunk
   alias Capstan.Snapshot.CursorGate
   alias Capstan.Snapshot.Meta
+  alias Capstan.Snapshot.PrimaryKey
   alias Capstan.Snapshot.State, as: SnapState
   alias Capstan.SnapshotStore
   alias Capstan.Telemetry
@@ -98,6 +99,10 @@ defmodule Capstan.Snapshot.Coordinator do
   @typedoc "A durable snapshot store as `{callback_module, store_handle}`."
   @type store :: {module(), term()}
 
+  # The weight-resolution cache cap (ADR-0012): `%{{table, col, raw} => weight}` entries,
+  # reset to the latest batch on overflow — a full reset re-resolves cold, never grows unbounded.
+  @weight_cache_cap 65_536
+
   defstruct [
     # the real (downstream) sink module the coordinator forwards to / emits chunks through
     :sink,
@@ -107,6 +112,8 @@ defmodule Capstan.Snapshot.Coordinator do
     :store,
     # the ChunkReader module (injectable so unit tests can stub the reader/query)
     :chunk_reader,
+    # the weight-resolution module (injectable; `resolve_weights/4` — ADR-0012)
+    :weight_resolver,
     # per-table opened reader handles: `%{table_key => reader}`
     :readers,
     # the durable `%Capstan.Snapshot.State{}` (per-table cursor / PK shape / done flag)
@@ -120,7 +127,9 @@ defmodule Capstan.Snapshot.Coordinator do
     # whether the buffered chunk is its table's final chunk
     :buffered_final?,
     # the budgeted-fault retry ceiling for a SnapshotStore write (shared C1 counter)
-    :max_retries
+    :max_retries,
+    # the bounded raw→weight cache (`%{{table_key, col, raw} => weight}`)
+    :weight_cache
   ]
 
   ## ---------------------------------------------------------------------------
@@ -198,42 +207,55 @@ defmodule Capstan.Snapshot.Coordinator do
       snapshot_state: snapshot_state,
       readers: Keyword.fetch!(opts, :readers),
       chunk_reader: Keyword.get(opts, :chunk_reader, Capstan.Snapshot.ChunkReader),
+      weight_resolver: Keyword.get(opts, :weight_resolver, PrimaryKey),
       processed_set: Keyword.get(opts, :processed_set, ""),
       pending: Keyword.get(opts, :table_order) || default_pending(snapshot_state),
       buffered: nil,
       buffered_final?: false,
-      max_retries: Keyword.get(opts, :max_retries, CheckpointStore.default_max_retries())
+      max_retries: Keyword.get(opts, :max_retries, CheckpointStore.default_max_retries()),
+      weight_cache: %{}
     }
 
     {:ok, state, {:continue, :bootstrap}}
   end
 
-  # Emit the value-free `:started` event, then drive the first chunk. Wrapped so a raise while
-  # opening the first chunk halts value-free rather than crashing (Rule 1).
+  # Emit the value-free `:started` event, RECOMPUTE the string tables' dual-cursor weight
+  # halves (ADR-0012: a resume across a server change must not compare old-form cursor
+  # weights against fresh keys), then drive the first chunk. Wrapped so a raise halts
+  # value-free rather than crashing (Rule 1).
   @impl GenServer
   def handle_continue(:bootstrap, state) do
     emit_started(state)
-    drive(state)
+
+    case recompute_resume_weights(state) do
+      {:ok, state} -> drive(state)
+      {:halt, reason} -> coordinator_halt(state, reason)
+    end
   rescue
     exception -> crash_halt(state, exception)
   catch
     _kind, _reason -> crash_halt(state, :unknown)
   end
 
-  # The cursor-gate. Forward the surviving subset (or nothing when fully suppressed); always
-  # return the txn's own position so the watermark advances (no advance-gate deadlock). A raise
-  # in gating/forwarding is scrubbed value-free — the in-flight txn (row values) never leaks.
+  # The cursor-gate. Resolve the active string tables' collation weights (ADR-0012) FIRST —
+  # an ungated change is a silent gap/dup, so a resolution fault halts fail-closed rather
+  # than gating weight-less. Forward the surviving subset (or nothing when fully suppressed);
+  # always return the txn's own position so the watermark advances (no advance-gate deadlock).
+  # A raise in gating/forwarding is scrubbed value-free — the in-flight txn never leaks.
   @impl GenServer
   def handle_call({:handle_transaction, txn}, _from, state) do
     case gate_changes(txn.changes, state) do
-      [] ->
-        {:reply, {:ok, txn.position}, state}
+      {:ok, [], state2} ->
+        {:reply, {:ok, txn.position}, state2}
 
-      surviving ->
+      {:ok, surviving, state2} ->
         case state.sink.handle_transaction(%{txn | changes: surviving}) do
-          {:ok, _position} -> {:reply, {:ok, txn.position}, state}
-          {:error, reason} -> {:reply, {:error, reason}, state}
+          {:ok, _position} -> {:reply, {:ok, txn.position}, state2}
+          {:error, reason} -> {:reply, {:error, reason}, state2}
         end
+
+      {:halt, reason} ->
+        halt_reply(state, reason, {:error, reason})
     end
   rescue
     exception -> crash_halt_call(state, exception)
@@ -305,20 +327,40 @@ defmodule Capstan.Snapshot.Coordinator do
   # Classify each streamed change: an ACTIVE snapshot table (in the set, not done) routes
   # through `CursorGate.classify/3` (which suppresses `k > cursor` and splits a PK-changing
   # update); a non-snapshot table OR a done table (the stream is authoritative) passes through
-  # unchanged. `Enum.flat_map/2` consumes `changes` exactly once (never `length/1`).
+  # unchanged. FIRST the active string tables' raws are weight-resolved (ADR-0012) —
+  # `resolve_table_weights/2` returns the per-table weights maps (and the cache-updated state)
+  # or a halt. `Enum.flat_map/2` consumes `changes` exactly once (never `length/1`).
   defp gate_changes(changes, state) do
-    Enum.flat_map(changes, fn change ->
-      case Map.get(state.snapshot_state.tables, {change.schema, change.table}) do
-        %{done?: false} = progress ->
-          CursorGate.classify(change, progress.pk_cursor, table_spec(progress))
+    with {:ok, weights_by_table, state2} <- resolve_table_weights(changes, state) do
+      surviving =
+        Enum.flat_map(changes, fn change ->
+          classify_one(change, state, weights_by_table)
+        end)
 
-        _done_or_absent ->
-          [change]
-      end
-    end)
+      {:ok, surviving, state2}
+    end
   end
 
-  defp table_spec(progress) do
+  # One change against its table's gate context: an ACTIVE snapshot table (in the set, not
+  # done) routes through `CursorGate.classify/3`; a non-snapshot table OR a done table (the
+  # stream is authoritative) passes through unchanged.
+  defp classify_one(change, state, weights_by_table) do
+    key = {change.schema, change.table}
+
+    case Map.get(state.snapshot_state.tables, key) do
+      %{done?: false} = progress ->
+        CursorGate.classify(
+          change,
+          gate_form(progress.pk_cursor),
+          table_spec(progress, weights_by_table[key])
+        )
+
+      _done_or_absent ->
+        [change]
+    end
+  end
+
+  defp table_spec(progress, weights) do
     %{
       pk_columns: progress.pk_columns,
       pk_types: progress.pk_types,
@@ -326,9 +368,276 @@ defmodule Capstan.Snapshot.Coordinator do
       # the DELETE threshold — the high-water the sink has RECEIVED (crash-window backstop, F1). A
       # durable state predating F1 has no `delivered_pk`; fall back to `pk_cursor` (the pre-F1
       # steady-state equality) so a resume across the F1 upgrade never KeyErrors — mirrors the
-      # gate's own `Map.get(table, :delivered_pk, cursor)` fallback.
-      delivered_pk: Map.get(progress, :delivered_pk, progress.pk_cursor)
+      # gate's own `Map.get(table, :delivered_pk, cursor)` fallback. A dual (string-PK) cursor
+      # contributes its WEIGHT half — the gate compares in weight space (ADR-0012).
+      delivered_pk: progress |> Map.get(:delivered_pk, progress.pk_cursor) |> gate_form(),
+      weights: weights
     }
+  end
+
+  # The GATE form of a cursor: a dual cursor contributes `.weight`; a bare cursor (an
+  # integer/binary/tuple table — where raw == canonical) is itself.
+  defp gate_form(%{weight: weight}), do: weight
+  defp gate_form(bare), do: bare
+
+  ## ---------------------------------------------------------------------------
+  ## weight resolution (ADR-0012) — the stream-side collation oracle
+  ## ---------------------------------------------------------------------------
+
+  # Resolve the collation weights for every ACTIVE string-PK table the txn touches, with a
+  # `:start`-cursor short-circuit (inserts/deletes need no comparison before the first chunk)
+  # EXCEPT for PK-changing updates (whose split compares k_old/k_new unconditionally). Returns
+  # `{:ok, %{table_key => %{col => %{raw => weight}}}, state}` (cache updated) or
+  # `{:halt, :snapshot_pk_weight_failed}` (budgeted, value-free).
+  defp resolve_table_weights(changes, state) do
+    changes
+    |> tables_needing_weights(state)
+    |> Enum.reduce_while({:ok, %{}, state}, fn key, {:ok, acc, state2} ->
+      case resolve_one_table(key, changes, state2) do
+        {:ok, weights, state3} -> {:cont, {:ok, Map.put(acc, key, weights), state3}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, _weights, _state} = ok -> ok
+      {:error, reason} -> {:halt, reason}
+    end
+  end
+
+  # The active string-PK tables among the txn's changes that cannot be classified
+  # weight-free.
+  defp tables_needing_weights(changes, state) do
+    changes
+    |> Enum.flat_map(fn change ->
+      change_needs_weights(change, state)
+    end)
+    |> Enum.uniq()
+  end
+
+  defp change_needs_weights(change, state) do
+    key = {change.schema, change.table}
+
+    case Map.get(state.snapshot_state.tables, key) do
+      %{done?: false} = progress ->
+        if weight_free?(change, progress, Map.get(state.readers, key)), do: [], else: [key]
+
+      _done_or_absent ->
+        []
+    end
+  end
+
+  # A change is decidable without weights ONLY when every threshold it could gate on is
+  # `:start` and it is not a PK-changing update (whose split compares k_old/k_new — a
+  # collation compare). The F1 crash window (`delivered_pk` ahead of a rolled-back
+  # `pk_cursor`) makes deletes gate on `delivered_pk`, so they need weights there.
+  defp weight_free?(change, progress, reader) do
+    delivered = Map.get(progress, :delivered_pk, :start)
+
+    not string_reader?(reader) or
+      (progress.pk_cursor == :start and delivered == :start and change.op != :update)
+  end
+
+  defp string_reader?(reader) when is_map(reader),
+    do: Enum.any?(Map.get(reader, :pk_types, []), &(&1 in [:char, :varchar]))
+
+  defp string_reader?(_reader), do: false
+
+  # One table's resolution: per STRING pk column, the txn's distinct raws minus the cache,
+  # resolved in one batched (item-capped) COLLATE-pinned query with the shared budget.
+  defp resolve_one_table(key, changes, state) do
+    reader = Map.fetch!(state.readers, key)
+    table_changes = Enum.filter(changes, &({&1.schema, &1.table} == key))
+
+    columns =
+      reader.pk_columns
+      |> Enum.zip(reader.pk_types)
+      |> Enum.filter(fn {_col, type} -> type in [:char, :varchar] end)
+
+    columns
+    |> Enum.reduce_while({:ok, %{}, state}, fn {col, _type}, {:ok, acc, state2} ->
+      charset = column_pin(reader, col, :pk_charsets)
+      collation = column_pin(reader, col, :pk_collations)
+      raws = distinct_raws(table_changes, col)
+
+      case resolve_column(key, col, charset, collation, raws, state2) do
+        {:ok, weights, state3} -> {:cont, {:ok, Map.put(acc, col, weights), state3}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, _per_column, _state} = ok -> ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Cached hits short-circuit; the uncached batch resolves with the shared retry budget
+  # (`CheckpointStore.retry_decision/2`), then merges into the (cap-bounded) cache.
+  defp resolve_column(key, col, charset, collation, raws, state) do
+    {schema, table} = key
+
+    cached =
+      Map.new(raws, fn raw ->
+        {raw, Map.get(state.weight_cache, {schema, table, col, raw})}
+      end)
+
+    uncached = cached |> Enum.reject(fn {_raw, weight} -> weight end) |> Enum.map(&elem(&1, 0))
+
+    case resolve_with_budget(state, charset, collation, uncached, 0) do
+      {:ok, fresh} ->
+        entries = Map.new(fresh, fn {raw, weight} -> {{schema, table, col, raw}, weight} end)
+        state = %{state | weight_cache: cache_put(state.weight_cache, entries)}
+        weights = Map.merge(Map.new(cached), fresh)
+        {:ok, weights, state}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp resolve_with_budget(_state, _charset, _collation, [], _attempt), do: {:ok, %{}}
+
+  defp resolve_with_budget(state, charset, collation, raws, attempt) do
+    query = resolution_query(state)
+
+    case state.weight_resolver.resolve_weights(query, charset, collation, raws) do
+      {:ok, weights} ->
+        {:ok, weights}
+
+      {:error, _reason} ->
+        if CheckpointStore.retry_decision(attempt, state.max_retries) == :retry,
+          do: resolve_with_budget(state, charset, collation, raws, attempt + 1),
+          else: {:error, :snapshot_pk_weight_failed}
+    end
+  end
+
+  # The readers' shared query connection — the coordinator serializes gate and chunk-read
+  # traffic in one process, so a weight query can never interleave with an open capture.
+  defp resolution_query(state) do
+    case Map.values(state.readers) do
+      [%{query: query} | _] -> query
+      [] -> nil
+    end
+  end
+
+  # A full cache resets to the fresh batch: re-resolving cold beats growing unbounded.
+  defp cache_put(cache, entries) do
+    merged = Map.merge(cache, entries)
+    if map_size(merged) > @weight_cache_cap, do: entries, else: merged
+  end
+
+  defp distinct_raws(changes, col) do
+    changes
+    |> Enum.flat_map(fn change ->
+      [change.record && change.record[col], change.old_record && change.old_record[col]]
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  # A pk column's charset/collation from the reader's introspected lists.
+  defp column_pin(reader, col, field) do
+    reader.pk_columns
+    |> Enum.zip(Map.get(reader, field) || [])
+    |> List.keyfind(col, 0)
+    |> case do
+      {_col, pin} -> pin
+      nil -> nil
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## resume recompute (ADR-0012, adversarial finding 2)
+  ## ---------------------------------------------------------------------------
+
+  # At bootstrap, every ACTIVE string table with a dual cursor has its `.weight` half
+  # RECOMPUTED from the persisted `.raw` (one pinned batch per pk column): a server change
+  # between run and resume could alter weight forms, and an old-form cursor compared against
+  # fresh keys would mis-order silently. `pk_cursor` and `delivered_pk` both recompute.
+  defp recompute_resume_weights(state) do
+    state.snapshot_state.tables
+    |> Enum.filter(fn {_key, progress} ->
+      progress.done? == false and is_map_key(progress, :pk_cursor) and
+        match?(%{raw: _}, progress.pk_cursor)
+    end)
+    |> Enum.reduce_while({:ok, state}, fn {key, progress}, {:ok, state2} ->
+      case recompute_table_weights(key, progress, state2) do
+        {:ok, progress2, state3} ->
+          tables = Map.put(state3.snapshot_state.tables, key, progress2)
+          {:cont, {:ok, %{state3 | snapshot_state: %{state3.snapshot_state | tables: tables}}}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, _state} = ok -> ok
+      {:error, reason} -> {:halt, reason}
+    end
+  end
+
+  defp recompute_table_weights(key, progress, state) do
+    with {:ok, cursor2, state2} <- recompute_dual(key, progress.pk_cursor, state),
+         {:ok, delivered2, state3} <-
+           recompute_dual(key, Map.get(progress, :delivered_pk, :start), state2) do
+      {:ok, %{progress | pk_cursor: cursor2, delivered_pk: delivered2}, state3}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Recompute ONE dual cursor's weight half from its raw half. `:start` and bare cursors
+  # pass through unchanged.
+  defp recompute_dual(_key, :start, state), do: {:ok, :start, state}
+  defp recompute_dual(_key, bare, state) when not is_map(bare), do: {:ok, bare, state}
+
+  defp recompute_dual(key, %{raw: raw} = dual, state) do
+    reader = Map.fetch!(state.readers, key)
+    raw_list = form_values(raw)
+
+    # Each STRING pk position's raw resolves under that column's own charset + collation pin.
+    string_pk_positions(reader)
+    |> Enum.reduce_while({:ok, %{}, state}, fn position, {:ok, acc, state2} ->
+      charset = Enum.at(Map.get(reader, :pk_charsets) || [], position)
+      collation = Enum.at(Map.get(reader, :pk_collations) || [], position)
+      raw_i = Enum.at(raw_list, position)
+
+      case resolve_with_budget(state2, charset, collation, [raw_i], 0) do
+        {:ok, %{^raw_i => weight}} ->
+          {:cont, {:ok, Map.put(acc, position, weight), state2}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, weight_by_position, state2} ->
+        paired =
+          reader.pk_types
+          |> Enum.with_index()
+          |> Enum.map(fn
+            {type, i} when type in [:char, :varchar] ->
+              {Enum.at(raw_list, i), Map.fetch!(weight_by_position, i)}
+
+            {_type, i} ->
+              Enum.at(raw_list, i)
+          end)
+
+        {:ok, %{dual | weight: PrimaryKey.canonical(reader.pk_types, paired)}, state2}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp form_values(value) when is_tuple(value), do: Tuple.to_list(value)
+  defp form_values(value), do: [value]
+
+  # The pk positions (0-based, ordinal order) whose columns are string-typed.
+  defp string_pk_positions(reader) do
+    reader.pk_types
+    |> Enum.with_index()
+    |> Enum.filter(fn {type, _i} -> type in [:char, :varchar] end)
+    |> Enum.map(fn {_type, i} -> i end)
   end
 
   # A table is snapshot-active — DDL on it is a drift — iff it is in the snapshot set AND its

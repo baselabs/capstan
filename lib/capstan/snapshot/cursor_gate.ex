@@ -82,17 +82,20 @@ defmodule Capstan.Snapshot.CursorGate do
 
   @typedoc """
   The per-table gate context: the introspected PK shape (`pk_columns` in ordinal order and
-  their order-faithful `pk_types`), whether the table's backfill is `complete?`, and the
+  their order-faithful `pk_types`), whether the table's backfill is `complete?`, the
   optional `delivered_pk` — the high-water the sink has RECEIVED, used as the DELETE threshold
-  (see the module doc's crash-window section). When `delivered_pk` is absent, deletes gate on
-  the `cursor` argument (pre-F1 behaviour). Extra keys are ignored, so the coordinator may pass
-  a richer per-table state map.
+  (see the module doc's crash-window section) — and the optional `weights` —
+  `%{column_name => %{raw => weight_bytes}}` for the STRING pk columns (ADR-0012), resolved
+  by the coordinator over the shared query connection before gating. When `delivered_pk` is
+  absent, deletes gate on the `cursor` argument (pre-F1 behaviour). Extra keys are ignored, so
+  the coordinator may pass a richer per-table state map.
   """
   @type table_spec :: %{
           required(:pk_columns) => [String.t()],
           required(:pk_types) => [PrimaryKey.pk_type()],
           required(:complete?) => boolean(),
           optional(:delivered_pk) => cursor(),
+          optional(:weights) => %{optional(String.t()) => %{optional(binary()) => binary()}},
           optional(atom()) => term()
         }
 
@@ -126,12 +129,17 @@ defmodule Capstan.Snapshot.CursorGate do
     end
   end
 
+  # The single-key ops take the WEIGHT-FREE short-circuits BEFORE canonicalizing (ADR-0012):
+  # a complete table forwards and a `:start` cursor suppresses without ever consulting `k`,
+  # so the coordinator resolves no weights for them (the bootstrap window and completed
+  # tables stay round-trip-free). The `:update` arm canonicalizes unconditionally — the
+  # PK-split's `k_old ≠ k_new` compare is a collation compare for string keys.
   def classify(%Change{op: :insert, record: rec} = change, cursor, table) do
-    gate(change, key(rec, table), cursor, table)
+    single_key(change, rec, cursor, table)
   end
 
   def classify(%Change{op: :delete, old_record: old_rec} = change, cursor, table) do
-    gate(change, key(old_rec, table), cursor, table)
+    single_key(change, old_rec, cursor, table)
   end
 
   # A :snapshot image never reaches the gate — it classifies STREAMED images only. Fail loud,
@@ -143,6 +151,21 @@ defmodule Capstan.Snapshot.CursorGate do
           "Capstan.Snapshot.CursorGate.classify/3 received an op: :snapshot image; " <>
             "the gate classifies streamed :insert/:update/:delete images only"
   end
+
+  # The single-key weight-free short-circuits key on the APPLICABLE threshold: a `:start`
+  # cursor suppresses inserts, but a DELETE in the crash window (`delivered_pk` ahead of the
+  # rolled-back `pk_cursor`) still gates on `delivered_pk` — a `:start` short-circuit there
+  # would strand the phantom the F1 backstop exists to sweep.
+  defp single_key(change, rec, cursor, table) do
+    cond do
+      table.complete? -> [change]
+      threshold(change, cursor, table) == :start -> []
+      true -> gate(change, key(rec, table), cursor, table)
+    end
+  end
+
+  defp threshold(%Change{op: :delete}, cursor, table), do: Map.get(table, :delivered_pk, cursor)
+  defp threshold(_change, cursor, _table), do: cursor
 
   @doc """
   The advance-gate predicate: is the chunk's exact GTID position `g` covered by
@@ -195,8 +218,41 @@ defmodule Capstan.Snapshot.CursorGate do
 
   # The change's canonical PK: the raw PK column values in ordinal order, canonicalized so a
   # text-form chunk read and a binlog-decoded streamed change to the same key compare equal.
+  # A STRING pk column contributes the {raw, weight} pair — the weight from the spec-carried
+  # `weights` map (`%{column => %{raw => weight}}`, resolved by the coordinator over the
+  # shared query connection — ADR-0012); canonical/2 then yields the weight bytes the gate
+  # compares. A missing weight is a caller bug (the coordinator resolves every string pk raw
+  # before gating): `canonical/2` raises LOUD and VALUE-FREE rather than silently comparing
+  # raws — a raw-byte compare is exactly the collation divergence C2a retires.
   defp key(record, table) do
-    raw = Enum.map(table.pk_columns, &record[&1])
+    weights = Map.get(table, :weights, %{})
+
+    raw =
+      table.pk_columns
+      |> Enum.zip(table.pk_types)
+      |> Enum.map(fn
+        {col, type} when type in [:char, :varchar] ->
+          value = record[col]
+          {value, fetch_weight(table, weights, col, value)}
+
+        {col, _type} ->
+          record[col]
+      end)
+
     PrimaryKey.canonical(table.pk_types, raw)
+  end
+
+  defp fetch_weight(table, weights, col, value) do
+    case weights do
+      %{^col => %{^value => weight}} -> weight
+      _ -> raise_unresolved_weight(table)
+    end
+  end
+
+  # Value-free by construction: the message names the mechanism, never the raw value.
+  defp raise_unresolved_weight(_table) do
+    raise ArgumentError,
+          "Capstan.Snapshot.CursorGate classified a string primary-key change without a " <>
+            "resolved collation weight (the coordinator must resolve weights before gating)"
   end
 end

@@ -59,6 +59,125 @@ defmodule Capstan.Snapshot.CursorGateTest do
   end
 
   ## ---------------------------------------------------------------------------
+  ## classify/3 — string PK gating (ADR-0012): the gate compares WEIGHT BYTES, not raw
+  ## bytes. A string PK table's spec carries `weights` (`%{column => %{raw => weight}}`,
+  ## resolved by the coordinator over the shared query connection), and the cursor
+  ## argument is the DUAL cursor's `.weight` half. The core case: `'a'` is byte-GREATER
+  ## than `'Z'` but collation-LESS — the gate must follow the collation or it silently
+  ## double-delivers / gaps exactly the straddling keys (probe Q1b/Q2b).
+  ## ---------------------------------------------------------------------------
+
+  describe "classify/3 — string PK gates by weight, not bytes (ADR-0012)" do
+    # Live-probed weights under utf8mb4_0900_ai_ci: 'a' -> 1C47, 'Z' -> 1F21, 'zed' -> 1F31.
+    @w_a <<0x1C, 0x47>>
+    @w_z <<0x1F, 0x21>>
+    @w_zed <<0x1F, 0x31>>
+    @weights %{"code" => %{"a" => @w_a, "Z" => @w_z, "zed" => @w_zed}}
+    @varchar_pk %{pk_columns: ["code"], pk_types: [:varchar], complete?: false, weights: @weights}
+
+    defp s_insert(code),
+      do: %Change{
+        op: :insert,
+        schema: "s",
+        table: "t",
+        record: %{"code" => code},
+        old_record: nil
+      }
+
+    defp s_delete(code),
+      do: %Change{
+        op: :delete,
+        schema: "s",
+        table: "t",
+        record: nil,
+        old_record: %{"code" => code}
+      }
+
+    test "k with weight < cursor weight forwards though the RAW is byte-greater ('a' vs 'Z')" do
+      # Byte order: "a" > "Z" ⇒ a raw-byte gate SUPPRESSES (double-delivery via the future
+      # chunk). Collation order: weight('a') < weight('Z') ⇒ already backfilled ⇒ FORWARD.
+      change = s_insert("a")
+      assert CursorGate.classify(change, @w_z, @varchar_pk) == [change]
+    end
+
+    test "k with weight > cursor weight suppresses though the RAW is byte-less ('zed' vs 'Z'... inverted arm)" do
+      # "Z" < "a"/"zed" in bytes, but weight('zed') > weight('Z'): a not-yet-backfilled key.
+      assert CursorGate.classify(s_insert("zed"), @w_z, @varchar_pk) == []
+    end
+
+    test "k == cursor weight forwards (the inclusive boundary, by weight)" do
+      change = s_insert("Z")
+      assert CursorGate.classify(change, @w_z, @varchar_pk) == [change]
+    end
+
+    test "a delete gates on delivered_pk in WEIGHT space (F1 crash-window arm)" do
+      spec = Map.put(@varchar_pk, :delivered_pk, @w_z)
+      change = s_delete("a")
+      assert CursorGate.classify(change, @w_zed, spec) == [change]
+      assert CursorGate.classify(s_delete("zed"), @w_zed, spec) == []
+    end
+
+    test ":start suppresses WITHOUT weights resolved (the weight-free short-circuit)" do
+      # Before the first chunk everything suppresses — no comparison, so the spec carries
+      # NO weights map at all (the coordinator resolves nothing while the cursor is :start).
+      no_weights = %{pk_columns: ["code"], pk_types: [:varchar], complete?: false}
+      assert CursorGate.classify(s_insert("a"), :start, no_weights) == []
+    end
+
+    test "a complete? table forwards without weights (the stream is authoritative)" do
+      no_weights = %{pk_columns: ["code"], pk_types: [:varchar], complete?: true}
+      change = s_insert("a")
+      assert CursorGate.classify(change, :start, no_weights) == [change]
+    end
+
+    test "a missing weight fails LOUD and VALUE-FREE (Rule 1 — the raw never rides the error)" do
+      no_weights = %{pk_columns: ["code"], pk_types: [:varchar], complete?: false}
+
+      assert_raise ArgumentError, ~r/weight/i, fn ->
+        CursorGate.classify(s_insert("a"), @w_z, no_weights)
+      end
+    end
+
+    test "a composite (INT, VARCHAR) gates by {int, weight} tuple order (probe Q7)" do
+      spec = %{
+        pk_columns: ["i", "k"],
+        pk_types: [:int, :varchar],
+        complete?: false,
+        weights: %{"k" => @weights["code"]}
+      }
+
+      change = %Change{
+        op: :insert,
+        schema: "s",
+        table: "t",
+        record: %{"i" => 1, "k" => "a"},
+        old_record: nil
+      }
+
+      # cursor weight {1, w_z}: {1, w_a} < {1, w_z} ⇒ forward; {2, w_a} > ⇒ suppress.
+      assert CursorGate.classify(change, {1, @w_z}, spec) == [change]
+
+      change2 = %Change{change | record: %{"i" => 2, "k" => "a"}}
+      assert CursorGate.classify(change2, {1, @w_z}, spec) == []
+    end
+
+    test "a PK-changing string UPDATE splits and gates each half by weight (tripwire 17 arm)" do
+      change = %Change{
+        op: :update,
+        schema: "s",
+        table: "t",
+        record: %{"code" => "zed"},
+        old_record: %{"code" => "Z"}
+      }
+
+      # k_old ('Z') ≤ cursor weight, k_new ('zed') > ⇒ forward the delete, suppress the upsert.
+      [forwarded] = CursorGate.classify(change, @w_z, @varchar_pk)
+      assert forwarded.op == :delete
+      assert forwarded.old_record == %{"code" => "Z"}
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
   ## classify/3 — single-key gating (tripwire 4, strict-once)
   ## ---------------------------------------------------------------------------
 

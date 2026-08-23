@@ -292,16 +292,32 @@ backfill resumes with `WHERE pk > cursor` — never a re-scan from zero. A store
 `:snapshot_config_drifted` — a newly-added table would otherwise be silently never backfilled. To
 re-backfill a changed set, drop the durable snapshot state (a fresh start re-introspects config).
 
-**Supported primary keys (order-faithful only).** Chunking pages by MySQL `ORDER BY pk` while the
-gate compares in Elixir, so the PK type's Elixir order must provably match MySQL's: **integer**
-(signed/unsigned, incl. `BIGINT UNSIGNED`), **`BINARY`/`VARBINARY`**, and **composites** of those.
+**Supported primary keys (order-faithful).** Chunking pages by MySQL `ORDER BY pk` while the
+gate compares in Elixir, so the comparison must provably match MySQL's: **integer**
+(signed/unsigned, incl. `BIGINT UNSIGNED`), **`BINARY`/`VARBINARY`**, **`CHAR`/`VARCHAR`**
+(any charset, any collation — ADR-0012), and **composites** of those. A string PK's ordering
+rides its collation WEIGHT BYTES, computed by the server on both sides (the chunk read selects
+`WEIGHT_STRING(pk)`; streamed raws resolve through a COLLATE-pinned `CONVERT` introducer) —
+Elixir never re-implements a collation. Two costs are inherent to the design: during a
+string-PK table's backfill window every streamed transaction carrying a NEW string key pays
+≥1 weight-resolution round trip on the source (repeated keys hit a bounded cache), and
+composite row-value pagination is a full index scan per page (a pre-existing cost class for
+composites of ANY type). On resume the persisted cursor's weight half is recomputed from its
+raw half, so both sides of every comparison always come from the same server.
+
+Still refused `:snapshot_pk_unsupported_type`, on measured grounds (ADR-0012): the **TEXT
+family** (a prefix PK pays a filesort per chunk page — `Using filesort` vs `Using index` on
+VARCHAR — superlinear backfill) and **`ENUM`/`SET`** (the column's `ORDER BY` is
+member-position order while any string-context weight is string order — two disagreeing
+order spaces). `DECIMAL`/`DOUBLE`/`FLOAT`/temporal PKs remain refused (Elixir term-order
+diverges from MySQL).
+
 **Zero-row tables complete loudly (C2c).** A configured snapshot table with no
 pre-existing rows delivers exactly ONE snapshot beat — an empty `final_chunk?: true`
 chunk — so a sink gating per-table readiness on the final chunk never waits on an
 empty table. Tables that had rows deliver their final chunk as always.
 
-A collation-ordered STRING PK (`CHAR`/`VARCHAR`/`TEXT`) is refused `:snapshot_pk_unsupported_type`
-(a named follow-up, ROADMAP C2a). A `tables: :all` snapshot — which arises when the capture
+A `tables: :all` snapshot — which arises when the capture
 allowlist is itself `:all` — RESOLVES to the server's scoped base tables: the
 `information_schema.TABLES` enumeration filtered to `TABLE_TYPE = 'BASE TABLE'` outside the
 system schemas (`mysql`, `information_schema`, `performance_schema`, `sys`), ordered and
@@ -377,8 +393,12 @@ with it).
 
 - `:snapshot_table_no_primary_key` — a snapshot table has no usable key (no PK and no `NOT
   NULL`-complete unique key).
-- `:snapshot_pk_unsupported_type` — a PK column outside the order-faithful allowlist (a
-  collation-ordered string, `DECIMAL`/`DOUBLE`/temporal).
+- `:snapshot_pk_unsupported_type` — a PK column outside the order-faithful allowlist (the
+  TEXT family, `ENUM`/`SET`, `DECIMAL`/`DOUBLE`/temporal — each on a measured or provable
+  ordering divergence; see ADR-0012).
+- `:snapshot_pk_weight_failed` — resolving a string PK's collation weights (ADR-0012) failed
+  on the source beyond the shared retry budget; an ungated change would be a silent gap/dup,
+  so the pipeline halts fail-closed instead.
 - `:snapshot_lock_unavailable` — the brief `LOCK TABLES … READ` failed (missing `LOCK TABLES`
   privilege, or a lock-wait timeout) beyond the retry budget.
 - `:snapshot_schema_drifted` — a snapshot table's structure changed mid-backfill (a per-chunk

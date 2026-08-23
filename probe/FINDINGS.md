@@ -51,3 +51,44 @@ MySQL **8.0.46** (docker `mysql-cdc-probe` @ 127.0.0.1:5633, `gtid_mode=ON`,
 ## Substrate left up
 
 `docker mysql-cdc-probe` (mysql:8.0.46) @ :5633, root/probe, db `probe_db` table `widgets`.
+
+---
+
+# C2a collation / WEIGHT_STRING probe — FINDINGS
+
+**Date:** 2026-08-23 · **Verdict: GO — weight-bytes cursor is order-faithful; TEXT/ENUM refusals are measured, not conservative**
+
+Probes: `collation_weight_probe.exs` (16/16 green) + `collation_extra_probe.exs` (green) against
+mysql-cdc-probe (8.0.46). Read the MySQL refman `WEIGHT_STRING()` entry first-hand: weight order
+== sort order is the function's documented contract; the function is version-mutable (design
+depends on the order contract, computed server-side both sides, never on a frozen byte form).
+
+## Claims → evidence
+
+| Claim | Evidence |
+|---|---|
+| Weight-byte order == `ORDER BY` order | Q1a (0900_ai_ci adversarial set), Q3a (`_bin` families), Q3p (PAD SPACE crafted distinct keys), Q7 (composite row-value) |
+| Elixir byte order DIVERGES from collation order | Q1b: `'a'` after `'Z'` in bytes, before in collation; Q2b shows the mis-classification concretely |
+| `WHERE pk > cursor` partitions by weight exactly | Q2a: `{k : weight(k) > weight(cursor)}` — the gate and the pagination share one order |
+| Weight FORMS are family-specific | 0900_ai_ci `1C47`; 0900_bin raw bytes; legacy utf8mb4_bin 3-byte cells `000061`; as_cs multi-level `1CAA000000200024000000020002` |
+| PAD SPACE + trailing spaces safe for DISTINCT keys | Q3p + Q10 collision proof (space-stripped-equal values cannot coexist on a PK) |
+| DISTINCT PK ⇒ DISTINCT weights | Q11 ai_ci `'e'`/`'é'` collision; collation-equality == weight-equality |
+| Introducer path computes column weights from raw bytes | Q5c: `WEIGHT_STRING(CONVERT(X'E9' USING latin1))` == column weight `45` |
+| The COLLATE pin is load-bearing BOTH sides | extra probe: unpinned CONVERT computes the charset-DEFAULT collation's weights (`1CAA` vs `1CAA…0002`); WHERE unpinned raises ERROR 1267 on as_cs/latin1_general_cs (adversarial-pass measurement) |
+| CONVERT-form cursor keeps the index | Q9: `range` + `PRIMARY` + `Using index` (same plan as plain literal) |
+| TEXT prefix PK: order-consistent but filesort per page | Q6a/Q6b: `Using filesort` vs varchar's `Using index` — the measured refusal ground |
+| ENUM/SET cannot ride the weight path | Q13: column weights are member-POSITION-based (`8000000000000001/2`), string-context weights `1C60/1C47` — two disagreeing order spaces |
+| CHAR(n) unpadded on retrieval; `CAST(col AS BINARY)` == stored bytes | Q4/Q5 — the raw cursor form + binlog-form delivery are the column's own bytes |
+| latin1 text-protocol wire form is utf8mb4 (é→C3A9); round-trip lossless | Q5a/Q5b — pagination identical via plain literal and CONVERT form |
+
+## Design-relevant discoveries
+
+1. The server is the only collation oracle — an Elixir UCA reimplementation would silently
+   diverge (versioned tailorings, multi-level weights, PAD SPACE).
+2. Composite row-value pagination is `type=index` (full index scan per page) EVEN for int-only
+   composites — pre-existing cost class, independent of C2a.
+3. Weight resolution must be COLLATE-pinned and chunk-bounded (max_allowed_packet).
+
+## Substrate left up
+
+mysql-cdc-probe (8.0.46) @ :11619; probe_db self-cleaned (all cw_* tables dropped).

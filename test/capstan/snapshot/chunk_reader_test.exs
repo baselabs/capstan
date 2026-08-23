@@ -29,7 +29,7 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
 
   # The default mock table: PK `id INT`, columns `(id INT, v INT)`.
   @statistics [["PRIMARY", "1", "id", "0"]]
-  @pk_columns [["id", "int", "int", "NO"], ["v", "int", "int", "NO"]]
+  @pk_columns [["id", "int", "int", "NO", nil, nil], ["v", "int", "int", "NO", nil, nil]]
   @cr_columns [["id", "int", "1"], ["v", "int", "2"]]
   @gtid "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5"
 
@@ -181,6 +181,108 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
 
       # max_pk canonicalizes the composite last row: {7, <<0xAB, 0xCD>>}.
       assert chunk.max_pk == {7, <<0xAB, 0xCD>>}
+    end
+  end
+
+  ## ===========================================================================
+  ## Unit — string PK SQL + the dual cursor (ADR-0012)
+  ##
+  ## A string PK table pages under its COLLATION: the pk column projects as its raw column
+  ## bytes (`CAST(col AS BINARY)` — the binlog-delivered form), a WEIGHT_STRING column rides
+  ## along for the cursor, and the keyset literal is COLLATE-pinned (an unpinned CONVERT
+  ## raises ERROR 1267 on non-default collations — measured). max_pk is the DUAL cursor
+  ## %{raw, weight}; the weight columns NEVER appear in delivered rows.
+  ## ===========================================================================
+
+  describe "read_chunk/2 — string PK: CAST projection, WEIGHT_STRING column, pinned literal" do
+    test "the chunk SELECT carries CAST(pk AS BINARY), the projection, and WEIGHT_STRING(pk)" do
+      cfg = varchar_cfg() |> Map.put(:chunk_rows, [["Z", "5", <<0x1F, 0x21>>]])
+      {reader, agent} = open_reader(cfg)
+
+      assert {:ok, %Chunk{}, _final?, _reader} = ChunkReader.read_chunk(reader, :start)
+
+      chunk_select = chunk_select_of(recorded(agent))
+
+      assert chunk_select ==
+               "SELECT CAST(`code` AS BINARY), `v`, WEIGHT_STRING(`code`) " <>
+                 "FROM `test`.`t` ORDER BY `code` LIMIT 4097"
+    end
+
+    test "a non-:start cursor pages by the COLLATE-pinned CONVERT literal over the raw bytes" do
+      cfg = varchar_cfg() |> Map.put(:chunk_rows, [["zed", "9", <<0x1F, 0x31>>]])
+      {reader, agent} = open_reader(cfg)
+
+      # The dual cursor: raw (the page form) + weight (the gate form).
+      cursor = %{raw: "Z", weight: <<0x1F, 0x21>>}
+
+      assert {:ok, %Chunk{}, _final?, _reader} = ChunkReader.read_chunk(reader, cursor)
+
+      assert chunk_select_of(recorded(agent)) ==
+               "SELECT CAST(`code` AS BINARY), `v`, WEIGHT_STRING(`code`) " <>
+                 "FROM `test`.`t` WHERE `code` > CONVERT(X'5A' USING utf8mb4) " <>
+                 "COLLATE utf8mb4_0900_ai_ci ORDER BY `code` LIMIT 4097"
+    end
+
+    test "the pin names the COLUMN's charset and collation (latin1 / non-default collations)" do
+      for {charset, collation} <- [
+            {"latin1", "latin1_swedish_ci"},
+            {"utf8mb4", "utf8mb4_0900_as_cs"}
+          ] do
+        cfg =
+          varchar_cfg(
+            pk_columns: [["code", "varchar", "varchar(64)", "NO", charset, collation]],
+            chunk_rows: [["zed", "9", <<0x1F, 0x31>>]]
+          )
+
+        {reader, agent} = open_reader(cfg)
+
+        cursor = %{raw: "Z", weight: <<0x1F, 0x21>>}
+        assert {:ok, %Chunk{}, _final?, _reader} = ChunkReader.read_chunk(reader, cursor)
+
+        assert chunk_select_of(recorded(agent)) =~
+                 "WHERE `code` > CONVERT(X'5A' USING #{charset}) COLLATE #{collation}"
+      end
+    end
+
+    test "max_pk is the DUAL cursor: %{raw: column bytes, weight: server weight}" do
+      cfg =
+        varchar_cfg()
+        |> Map.put(:chunk_rows, [["Z", "5", <<0x1F, 0x21>>], ["a", "6", <<0x1C, 0x47>>]])
+
+      {reader, _agent} = open_reader(cfg)
+
+      assert {:ok, chunk, _final?, _reader} = ChunkReader.read_chunk(reader, :start)
+
+      assert chunk.max_pk == %{raw: "a", weight: <<0x1C, 0x47>>}
+    end
+
+    test "delivered rows carry ONLY the table columns — the weight column never rides (finding 6)" do
+      cfg = varchar_cfg() |> Map.put(:chunk_rows, [["Z", "5", <<0x1F, 0x21>>]])
+      {reader, _agent} = open_reader(cfg)
+
+      assert {:ok, chunk, _final?, _reader} = ChunkReader.read_chunk(reader, :start)
+
+      assert [%{"code" => "Z", "v" => "5"}] = chunk.rows
+      assert Enum.map(chunk.rows, &Map.keys/1) == [["code", "v"]] |> Enum.map(&Enum.sort/1)
+    end
+
+    test "a composite (INT, VARCHAR) PK mixes ints and pinned CONVERTs in the row-value keyset" do
+      cfg =
+        int_varchar_cfg()
+        |> Map.put(:chunk_rows, [["1", "a", "9", <<0x1C, 0x47>>]])
+
+      {reader, agent} = open_reader(cfg)
+
+      cursor = %{raw: {0, "zed"}, weight: {0, <<0x1F, 0x31>>}}
+
+      assert {:ok, chunk, _final?, _reader} = ChunkReader.read_chunk(reader, cursor)
+
+      assert chunk_select_of(recorded(agent)) ==
+               "SELECT `i`, CAST(`k` AS BINARY), `v`, WEIGHT_STRING(`k`) " <>
+                 "FROM `test`.`t` WHERE (`i`, `k`) > (0, CONVERT(X'7A6564' USING utf8mb4) " <>
+                 "COLLATE utf8mb4_0900_ai_ci) ORDER BY `i`, `k` LIMIT 4097"
+
+      assert chunk.max_pk == %{raw: {1, "a"}, weight: {1, <<0x1C, 0x47>>}}
     end
   end
 
@@ -727,11 +829,50 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
   defp composite_cfg do
     default_cfg(
       statistics: [["PRIMARY", "1", "a", "0"], ["PRIMARY", "2", "b", "0"]],
-      pk_columns: [["a", "int", "int", "NO"], ["b", "varbinary", "varbinary(16)", "NO"]],
+      pk_columns: [
+        ["a", "int", "int", "NO", nil, nil],
+        ["b", "varbinary", "varbinary(16)", "NO", nil, nil]
+      ],
       columns: [["a", "int", "1"], ["b", "varbinary(16)", "2"]],
       projection_ncols: 2
     )
   end
+
+  # A VARCHAR(64) utf8mb4_0900_ai_ci PK table `(code, v)` — chunk rows carry the projection
+  # PLUS the appended WEIGHT_STRING column (3 wire columns).
+  defp varchar_cfg(overrides \\ []) do
+    base =
+      default_cfg(
+        statistics: [["PRIMARY", "1", "code", "0"]],
+        pk_columns: [["code", "varchar", "varchar(64)", "NO", "utf8mb4", "utf8mb4_0900_ai_ci"]],
+        columns: [["code", "varchar(64)", "1"], ["v", "int", "2"]],
+        projection_ncols: 3
+      )
+
+    Enum.reduce(overrides, base, fn {k, v}, acc -> Map.put(acc, k, v) end)
+  end
+
+  # A composite (INT i, VARCHAR k ai_ci) PK table `(i, k, v)` — the weight column appends
+  # only for the STRING pk column (4 wire columns).
+  defp int_varchar_cfg do
+    default_cfg(
+      statistics: [["PRIMARY", "1", "i", "0"], ["PRIMARY", "2", "k", "0"]],
+      pk_columns: [
+        ["i", "int", "int", "NO", nil, nil],
+        ["k", "varchar", "varchar(64)", "NO", "utf8mb4", "utf8mb4_0900_ai_ci"]
+      ],
+      columns: [["i", "int", "1"], ["k", "varchar(64)", "2"], ["v", "int", "3"]],
+      projection_ncols: 4
+    )
+  end
+
+  # The chunk SELECT of a string-PK table (starts with `SELECT CAST(` — not `SELECT \``).
+  defp chunk_select_of(recorded),
+    do:
+      Enum.find(
+        recorded,
+        &(String.starts_with?(&1, "SELECT") and String.contains?(&1, "FROM `test`.`t`"))
+      )
 
   # The mutable server config the mock consults per request.
   defp build_cfg(cfg),
@@ -834,7 +975,9 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
         {:response, {:rows, 4, cfg.statistics}}
 
       sql =~ "information_schema.COLUMNS" and sql =~ "IS_NULLABLE" ->
-        {:response, {:rows, 4, cfg.pk_columns}}
+        # 6-column COLUMNS resultset incl. charset/collation (NULL for non-string columns).
+        ncols = cfg.pk_columns |> List.first() |> length()
+        {:response, {:rows, ncols, cfg.pk_columns}}
 
       sql =~ "information_schema.COLUMNS" ->
         {:response, {:rows, 3, cfg.columns}}
@@ -859,6 +1002,10 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
         {:ok, state}
 
       String.starts_with?(sql, "SELECT `") ->
+        faultable(:chunk, {:rows, cfg.projection_ncols, cfg.chunk_rows}, state)
+
+      # A string-PK chunk SELECT leads with CAST(`pk` AS BINARY), not a bare backtick column.
+      String.starts_with?(sql, "SELECT CAST(") ->
         faultable(:chunk, {:rows, cfg.projection_ncols, cfg.chunk_rows}, state)
 
       true ->
@@ -900,11 +1047,16 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
     t_send(srv, <<0xFE, 0, 0, 2, 0, 0, 0>>, ncols + 2 + length(rows))
   end
 
-  # Each value < 251 bytes ⇒ a single-byte length prefix; a binary value passes its raw bytes.
+  # Each value < 251 bytes ⇒ a single-byte length prefix; a binary value passes its raw
+  # bytes; NULL (the charset/collation cells of non-string columns) is the 0xFB marker.
   defp encode_text_row(values) do
-    Enum.reduce(values, <<>>, fn value, acc ->
-      bin = to_wire(value)
-      acc <> <<byte_size(bin)::8, bin::binary>>
+    Enum.reduce(values, <<>>, fn
+      nil, acc ->
+        acc <> <<0xFB>>
+
+      value, acc ->
+        bin = to_wire(value)
+        acc <> <<byte_size(bin)::8, bin::binary>>
     end)
   end
 

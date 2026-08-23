@@ -143,8 +143,9 @@ fail-closed).
   and `%Capstan.Change{op: :snapshot}` (upsert-by-PK). Additive — an absent `:snapshot` config is
   pure C1, byte-for-byte.
 - Two named fail-closed capability boundaries ship as loud refusals, each a separable follow-up:
-  collation-ordered-string PK (collation-aware cursor comparison) and `tables: :all` snapshot
-  resolution (a scoped `information_schema` enumeration). Neither is silent narrowing.
+  collation-ordered-string PK (collation-aware cursor comparison — **landed, see
+  [ADR-0012](0012-collation-string-pk-weight-cursor.md)**) and `tables: :all` snapshot
+  resolution (a scoped `information_schema` enumeration, landed C2b). Neither is silent narrowing.
 
 ## Evidence
 

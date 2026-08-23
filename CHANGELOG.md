@@ -6,6 +6,35 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — C2a collation-ordered string primary keys (ADR-0012)
+
+- `CHAR`/`VARCHAR` primary keys (any charset, any collation, alone or in composites
+  and the unique-key fallback) are now snapshot-eligible. A string PK's cursor-gate
+  comparison rides its collation WEIGHT BYTES computed by the SERVER on both sides —
+  the chunk read selects `WEIGHT_STRING(pk)` alongside each row, and streamed raws
+  resolve through a COLLATE-pinned `CONVERT(X'..' USING charset)` introducer over the
+  binlog's column bytes — so `k ≤ cursor` provably reproduces the source's collation
+  order (probe-proven for `ai_ci`, both `_bin` weight forms, PAD SPACE over distinct
+  keys, multi-level `as_cs`, and composites). Previously the whole string family was
+  refused `:snapshot_pk_unsupported_type`, including the MySQL 8 default collation.
+- The durable cursor for a string-PK table is dual-formed (`raw` column bytes +
+  `weight`); on resume the weight half is RECOMPUTED from the raw half, so both sides
+  of every comparison always come from the same server (`WEIGHT_STRING()`'s byte form
+  is version-mutable by documentation).
+- Chunk rows deliver a string PK column as its RAW COLUMN BYTES (`CAST(col AS
+  BINARY)`) — byte-identical to the previous text-protocol form for `utf8mb4` (the
+  connection charset), and identical to what the binlog delivers for the same column
+  on every other charset.
+- Still refused, now on measured grounds: the TEXT family (a prefix PK pays a
+  per-chunk filesort — superlinear backfill) and `ENUM`/`SET` (member-position order
+  no introducer weight path reproduces).
+- New halt reason `:snapshot_pk_weight_failed` (budgeted, then fail-closed) when
+  weight resolution fails on the source.
+- Known cost, by design: during a string-PK table's backfill window, a streamed
+  transaction carrying a NEW string key pays ≥1 weight-resolution round trip
+  (repeated keys hit a bounded cache); composite row-value pagination remains a full
+  index scan per page (pre-existing for composites of any type).
+
 ### Changed — presentation overhaul (docs as product)
 
 - README rewritten as a user document: what it is, install, a 30-second

@@ -56,21 +56,27 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
       assert {:ok, :varbinary} = PrimaryKey.resolve_pk_type("varbinary", "varbinary(255)")
     end
 
-    test "the collation-ordered STRING family refuses — both _bin and _ci report varchar/char" do
-      # A `_bin` collation and a `_ci` collation BOTH report data_type varchar/char, so the
-      # collation cannot distinguish them: the whole string family fails closed (tripwire 7
-      # collation-string arm).
-      assert {:error, :snapshot_pk_unsupported_type} =
-               PrimaryKey.resolve_pk_type("varchar", "varchar(255)")
+    test "CHAR / VARCHAR accept (ADR-0012 — the server-computed weight path carries ordering)" do
+      assert {:ok, :varchar} = PrimaryKey.resolve_pk_type("varchar", "varchar(255)")
+      assert {:ok, :char} = PrimaryKey.resolve_pk_type("char", "char(36)")
+    end
 
-      assert {:error, :snapshot_pk_unsupported_type} =
-               PrimaryKey.resolve_pk_type("char", "char(36)")
+    test "the TEXT family refuses — prefix-PK pagination pays a measured filesort per page" do
+      # probe/collation_weight_probe.exs Q6b: `Using filesort` per page on a TEXT prefix PK vs
+      # `Using index` on VARCHAR — superlinear backfill, refused on the measurement.
+      for dt <- ["tinytext", "text", "mediumtext", "longtext"] do
+        assert {:error, :snapshot_pk_unsupported_type} = PrimaryKey.resolve_pk_type(dt, dt)
+      end
+    end
 
-      assert {:error, :snapshot_pk_unsupported_type} =
-               PrimaryKey.resolve_pk_type("text", "text")
-
+    test "ENUM / SET refuse — member-position order no introducer weight path reproduces" do
+      # Q13: the column's weights are position-based (8000000000000001/2) while any string-
+      # context weight of the same members is 1C60/1C47 — two disagreeing order spaces.
       assert {:error, :snapshot_pk_unsupported_type} =
                PrimaryKey.resolve_pk_type("enum", "enum('a','b')")
+
+      assert {:error, :snapshot_pk_unsupported_type} =
+               PrimaryKey.resolve_pk_type("set", "set('a','b')")
     end
 
     test "DECIMAL / DOUBLE / FLOAT / temporal refuse" do
@@ -97,45 +103,89 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
   ##
   ## The RED-capable seam: introspect/2 fetches the two resultsets and delegates here,
   ## so the PK / unique-key fallback / type refusal logic is exercised without a server.
-  ## Rows mirror the live text-protocol shape (all information_schema columns are NOT NULL).
+  ## Rows mirror the live text-protocol shape: STATISTICS/COLUMNS cells are NOT NULL
+  ## EXCEPT the charset/collation cells, which are NULL for non-string columns.
   ## ---------------------------------------------------------------------------
 
   describe "resolve_key/2 — PK present" do
-    test "a single INT PK resolves to pk_columns + pk_types" do
+    test "a single INT PK resolves to pk_columns + pk_types (nil charset/collation)" do
       index_rows = [["PRIMARY", "1", "id", "0"]]
-      column_rows = [["id", "int", "int", "NO"]]
+      column_rows = [["id", "int", "int", "NO", nil, nil]]
 
-      assert {:ok, %{pk_columns: ["id"], pk_types: [:int]}} =
-               PrimaryKey.resolve_key(index_rows, column_rows)
+      assert {:ok,
+              %{
+                pk_columns: ["id"],
+                pk_types: [:int],
+                pk_charsets: [nil],
+                pk_collations: [nil]
+              }} = PrimaryKey.resolve_key(index_rows, column_rows)
     end
 
     test "a BIGINT UNSIGNED PK resolves to :bigint_unsigned (tripwire 18 type arm)" do
       index_rows = [["PRIMARY", "1", "id", "0"]]
-      column_rows = [["id", "bigint", "bigint unsigned", "NO"]]
+      column_rows = [["id", "bigint", "bigint unsigned", "NO", nil, nil]]
 
       assert {:ok, %{pk_columns: ["id"], pk_types: [:bigint_unsigned]}} =
                PrimaryKey.resolve_key(index_rows, column_rows)
     end
 
-    test "a composite (INT, VARBINARY) PK preserves ordinal order (tripwire 7 composite arm)" do
+    test "a VARCHAR PK resolves WITH its charset and collation (ADR-0012)" do
+      index_rows = [["PRIMARY", "1", "code", "0"]]
+
+      column_rows = [
+        ["code", "varchar", "varchar(255)", "NO", "utf8mb4", "utf8mb4_0900_ai_ci"]
+      ]
+
+      assert {:ok,
+              %{
+                pk_columns: ["code"],
+                pk_types: [:varchar],
+                pk_charsets: ["utf8mb4"],
+                pk_collations: ["utf8mb4_0900_ai_ci"]
+              }} = PrimaryKey.resolve_key(index_rows, column_rows)
+    end
+
+    test "a composite (INT, VARCHAR) PK preserves ordinal order with per-column collations" do
       # SEQ_IN_INDEX out of natural order in the resultset — resolve_key must sort by it.
+      index_rows = [
+        ["PRIMARY", "2", "label", "0"],
+        ["PRIMARY", "1", "id", "0"]
+      ]
+
+      column_rows = [
+        ["id", "int", "int", "NO", nil, nil],
+        ["label", "varchar", "varchar(64)", "NO", "latin1", "latin1_general_cs"]
+      ]
+
+      assert {:ok,
+              %{
+                pk_columns: ["id", "label"],
+                pk_types: [:int, :varchar],
+                pk_charsets: [nil, "latin1"],
+                pk_collations: [nil, "latin1_general_cs"]
+              }} = PrimaryKey.resolve_key(index_rows, column_rows)
+    end
+
+    test "a composite (INT, VARBINARY) PK preserves ordinal order (tripwire 7 composite arm)" do
       index_rows = [
         ["PRIMARY", "2", "region", "0"],
         ["PRIMARY", "1", "id", "0"]
       ]
 
       column_rows = [
-        ["id", "int", "int", "NO"],
-        ["region", "varbinary", "varbinary(8)", "NO"]
+        ["id", "int", "int", "NO", nil, nil],
+        ["region", "varbinary", "varbinary(8)", "NO", nil, nil]
       ]
 
       assert {:ok, %{pk_columns: ["id", "region"], pk_types: [:int, :varbinary]}} =
                PrimaryKey.resolve_key(index_rows, column_rows)
     end
 
-    test "a VARCHAR PK fails closed :snapshot_pk_unsupported_type (tripwire 7 collation arm)" do
+    test "a string PK column WITHOUT a charset fails closed (introspection shape guard)" do
+      # information_schema always reports a charset for char/varchar; a nil here is a broken
+      # resultset — fail closed rather than build an unpinnable weight literal.
       index_rows = [["PRIMARY", "1", "code", "0"]]
-      column_rows = [["code", "varchar", "varchar(255)", "NO"]]
+      column_rows = [["code", "varchar", "varchar(255)", "NO", nil, nil]]
 
       assert {:error, :snapshot_pk_unsupported_type} =
                PrimaryKey.resolve_key(index_rows, column_rows)
@@ -143,7 +193,7 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
 
     test "a DECIMAL PK fails closed :snapshot_pk_unsupported_type" do
       index_rows = [["PRIMARY", "1", "amount", "0"]]
-      column_rows = [["amount", "decimal", "decimal(20,4)", "NO"]]
+      column_rows = [["amount", "decimal", "decimal(20,4)", "NO", nil, nil]]
 
       assert {:error, :snapshot_pk_unsupported_type} =
                PrimaryKey.resolve_key(index_rows, column_rows)
@@ -156,8 +206,8 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
       ]
 
       column_rows = [
-        ["id", "int", "int", "NO"],
-        ["label", "varchar", "varchar(64)", "NO"]
+        ["id", "int", "int", "NO", nil, nil],
+        ["label", "text", "text", "NO", "utf8mb4", "utf8mb4_0900_ai_ci"]
       ]
 
       assert {:error, :snapshot_pk_unsupported_type} =
@@ -169,7 +219,7 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
     test "no PK and no unique key → :snapshot_table_no_primary_key (tripwire 6)" do
       # A non-unique secondary index does NOT substitute for a PK.
       index_rows = [["idx_created", "1", "created_at", "1"]]
-      column_rows = [["created_at", "datetime", "datetime", "YES"]]
+      column_rows = [["created_at", "datetime", "datetime", "YES", nil, nil]]
 
       assert {:error, :snapshot_table_no_primary_key} =
                PrimaryKey.resolve_key(index_rows, column_rows)
@@ -177,9 +227,21 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
 
     test "a NOT-NULL-complete unique key substitutes for a missing PK" do
       index_rows = [["uq_email", "1", "email_id", "0"]]
-      column_rows = [["email_id", "bigint", "bigint", "NO"]]
+      column_rows = [["email_id", "bigint", "bigint", "NO", nil, nil]]
 
       assert {:ok, %{pk_columns: ["email_id"], pk_types: [:bigint]}} =
+               PrimaryKey.resolve_key(index_rows, column_rows)
+    end
+
+    test "a NOT-NULL-complete VARCHAR unique key substitutes with its collation" do
+      index_rows = [["uq_code", "1", "code", "0"]]
+
+      column_rows = [
+        ["code", "varchar", "varchar(64)", "NO", "utf8mb4", "utf8mb4_0900_as_cs"]
+      ]
+
+      assert {:ok,
+              %{pk_columns: ["code"], pk_types: [:varchar], pk_collations: ["utf8mb4_0900_as_cs"]}} =
                PrimaryKey.resolve_key(index_rows, column_rows)
     end
 
@@ -187,7 +249,7 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
       # A nullable unique-key column admits NULL-keyed rows that `WHERE k > cursor` never
       # selects → silent gap. RED: accept it and NULL-keyed rows escape the backfill (Ch3.3).
       index_rows = [["uq_ext", "1", "ext_id", "0"]]
-      column_rows = [["ext_id", "int", "int", "YES"]]
+      column_rows = [["ext_id", "int", "int", "YES", nil, nil]]
 
       assert {:error, :snapshot_table_no_primary_key} =
                PrimaryKey.resolve_key(index_rows, column_rows)
@@ -200,8 +262,8 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
       ]
 
       column_rows = [
-        ["a", "int", "int", "NO"],
-        ["b", "int", "int", "YES"]
+        ["a", "int", "int", "NO", nil, nil],
+        ["b", "int", "int", "YES", nil, nil]
       ]
 
       assert {:error, :snapshot_table_no_primary_key} =
@@ -210,7 +272,7 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
 
     test "a NOT-NULL-complete unique key with an unsupported type refuses :snapshot_pk_unsupported_type" do
       index_rows = [["uq_code", "1", "code", "0"]]
-      column_rows = [["code", "varchar", "varchar(64)", "NO"]]
+      column_rows = [["code", "text", "text", "NO", "utf8mb4", "utf8mb4_0900_ai_ci"]]
 
       assert {:error, :snapshot_pk_unsupported_type} =
                PrimaryKey.resolve_key(index_rows, column_rows)
@@ -223,8 +285,8 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
       ]
 
       column_rows = [
-        ["maybe", "int", "int", "YES"],
-        ["solid_id", "int", "int", "NO"]
+        ["maybe", "int", "int", "YES", nil, nil],
+        ["solid_id", "int", "int", "NO", nil, nil]
       ]
 
       assert {:ok, %{pk_columns: ["solid_id"], pk_types: [:int]}} =
@@ -258,6 +320,90 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
     test "a composite canonicalizes to a tuple in column order" do
       assert PrimaryKey.canonical([:int, :varbinary], [5, <<0xAB>>]) == {5, <<0xAB>>}
       assert PrimaryKey.canonical([:int, :varbinary], ["5", <<0xAB>>]) == {5, <<0xAB>>}
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## canonical/2 string arms (ADR-0012) — a string PK column's canonical value is its
+  ## SERVER-COMPUTED WEIGHT BYTES, passed as a {raw, weight} pair by the callers that
+  ## hold both (the cursor-gate via its spec-carried weights; the chunk reader via the
+  ## appended WEIGHT_STRING columns). The weight is the equality AND ordering form;
+  ## comparing the raws in Elixir is exactly the byte-order divergence C2a retires.
+  ## ---------------------------------------------------------------------------
+
+  describe "canonical/2 — string columns canonicalize to their weight bytes" do
+    test "a single varchar canonicalizes to the weight half of its {raw, weight} pair" do
+      w_z = <<0x1F, 0x21>>
+      w_a = <<0x1C, 0x47>>
+
+      assert PrimaryKey.canonical([:varchar], [{"Z", w_z}]) == w_z
+      assert PrimaryKey.canonical([:char], [{"a", w_a}]) == w_a
+    end
+
+    test "weights order by COLLATION, not bytes — 'a' < 'Z' where the raws invert (probe Q1b)" do
+      w_z = <<0x1F, 0x21>>
+      w_a = <<0x1C, 0x47>>
+
+      k_z = PrimaryKey.canonical([:varchar], [{"Z", w_z}])
+      k_a = PrimaryKey.canonical([:varchar], [{"a", w_a}])
+
+      # Byte order says "Z" < "a"; the collation (and its weights) say the opposite. The
+      # gate must classify by the WEIGHT order — the core mis-classification fix.
+      assert "Z" < "a"
+      assert PrimaryKey.compare(k_a, k_z) == :lt
+      assert PrimaryKey.compare(k_z, k_a) == :gt
+    end
+
+    test "a composite (INT, VARCHAR) canonicalizes to {int, weight} — tuple order == row-value ORDER BY (probe Q7)" do
+      # Live-proven shape: ORDER BY (i, k) == order by (i, WEIGHT_STRING(k)).
+      rows = [{1, "Z", <<0x1F, 0x21>>}, {1, "a", <<0x1C, 0x47>>}, {0, "zed", <<0x1F, 0x31>>}]
+
+      canon =
+        Enum.map(rows, fn {i, raw, w} -> PrimaryKey.canonical([:int, :varchar], [i, {raw, w}]) end)
+
+      sorted = Enum.sort(canon, fn a, b -> PrimaryKey.compare(a, b) != :gt end)
+
+      assert sorted == [{0, <<0x1F, 0x31>>}, {1, <<0x1C, 0x47>>}, {1, <<0x1F, 0x21>>}]
+    end
+
+    test "a bare binary for a string column fails loud and value-free (unresolved weight is a caller bug)" do
+      assert_raise ArgumentError,
+                   ~r/collation weight/i,
+                   fn -> PrimaryKey.canonical([:varchar], ["raw-without-weight"]) end
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## weight_sql/3 — the pure stream-side weight-resolution SQL builder (ADR-0012).
+  ##
+  ## Every literal is COLLATE-PINNED to the column's collation: an unpinned CONVERT
+  ## computes the charset-DEFAULT collation's weights — a different order space (probed:
+  ## 1CAA vs 1CAA00000002...) — and in a WHERE the unpinned form raises ERROR 1267 on
+  ## non-default collations. The pin is load-bearing; this is its red-capable guard.
+  ## ---------------------------------------------------------------------------
+
+  describe "weight_sql/3 — the COLLATE-pinned weight-resolution SQL" do
+    test "pins the column collation on every term (the pin cannot silently regress)" do
+      sql = PrimaryKey.weight_sql("utf8mb4", "utf8mb4_0900_as_cs", ["a"])
+
+      assert sql ==
+               "SELECT WEIGHT_STRING(CONVERT(X'61' USING utf8mb4) COLLATE utf8mb4_0900_as_cs)"
+    end
+
+    test "one term per raw value, order-preserving (positional result columns)" do
+      sql = PrimaryKey.weight_sql("latin1", "latin1_swedish_ci", ["Z", <<0xE9>>])
+
+      assert sql ==
+               "SELECT WEIGHT_STRING(CONVERT(X'5A' USING latin1) COLLATE latin1_swedish_ci), " <>
+                 "WEIGHT_STRING(CONVERT(X'E9' USING latin1) COLLATE latin1_swedish_ci)"
+    end
+
+    test "hex-encodes arbitrary bytes (NULs, quotes, backslashes, empty) — no string-literal escaping surface" do
+      sql = PrimaryKey.weight_sql("utf8mb4", "utf8mb4_bin", [<<0>>, "a'b\\c", <<>>])
+
+      assert sql =~ "CONVERT(X'00' USING utf8mb4)"
+      assert sql =~ "CONVERT(X'6127625C63' USING utf8mb4)"
+      assert sql =~ "CONVERT(X'' USING utf8mb4)"
     end
   end
 
@@ -388,9 +534,41 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
                PrimaryKey.introspect(q, {@schema, "composite_pk"})
     end
 
-    test "a VARCHAR PK is refused :snapshot_pk_unsupported_type", %{query: q} do
+    test "a VARCHAR PK introspects WITH charset + collation (ADR-0012)", %{query: q} do
+      assert {:ok,
+              %{
+                pk_columns: ["code"],
+                pk_types: [:varchar],
+                pk_charsets: ["utf8mb4"],
+                pk_collations: ["utf8mb4_0900_ai_ci"]
+              }} = PrimaryKey.introspect(q, {@schema, "varchar_pk"})
+    end
+
+    test "a non-default-collation VARCHAR PK introspects its exact collation", %{query: q} do
+      assert {:ok, %{pk_types: [:varchar], pk_collations: ["utf8mb4_0900_as_cs"]}} =
+               PrimaryKey.introspect(q, {@schema, "as_cs_pk"})
+    end
+
+    test "a latin1 VARCHAR PK introspects its charset", %{query: q} do
+      assert {:ok,
+              %{
+                pk_types: [:varchar],
+                pk_charsets: ["latin1"],
+                pk_collations: ["latin1_swedish_ci"]
+              }} =
+               PrimaryKey.introspect(q, {@schema, "latin1_pk"})
+    end
+
+    test "a TEXT PK is refused :snapshot_pk_unsupported_type (filesort ground)", %{query: q} do
       assert {:error, :snapshot_pk_unsupported_type} =
-               PrimaryKey.introspect(q, {@schema, "varchar_pk"})
+               PrimaryKey.introspect(q, {@schema, "text_pk"})
+    end
+
+    test "an ENUM PK is refused :snapshot_pk_unsupported_type (position-order ground)", %{
+      query: q
+    } do
+      assert {:error, :snapshot_pk_unsupported_type} =
+               PrimaryKey.introspect(q, {@schema, "enum_pk"})
     end
 
     test "a nullable-unique-key table (no PK) is refused :snapshot_table_no_primary_key", %{
@@ -459,6 +637,26 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
         run!(
           socket,
           "CREATE TABLE #{@schema}.varchar_pk (code VARCHAR(64) PRIMARY KEY, payload INT)"
+        )
+
+        run!(
+          socket,
+          "CREATE TABLE #{@schema}.as_cs_pk (code VARCHAR(64) COLLATE utf8mb4_0900_as_cs PRIMARY KEY, payload INT)"
+        )
+
+        run!(
+          socket,
+          "CREATE TABLE #{@schema}.latin1_pk (code VARCHAR(64) CHARACTER SET latin1 PRIMARY KEY, payload INT)"
+        )
+
+        run!(
+          socket,
+          "CREATE TABLE #{@schema}.text_pk (t TEXT NOT NULL, payload INT, PRIMARY KEY (t(10)))"
+        )
+
+        run!(
+          socket,
+          "CREATE TABLE #{@schema}.enum_pk (e ENUM('b','a') PRIMARY KEY, payload INT)"
         )
 
         # A table with NO primary key whose only unique key has a NULLABLE column.
