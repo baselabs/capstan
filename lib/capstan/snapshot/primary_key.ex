@@ -420,7 +420,12 @@ defmodule Capstan.Snapshot.PrimaryKey do
   # A string PK column must carry both a charset and a collation; anything else is a broken
   # introspection shape and refuses the key (never an unpinnable literal).
   defp string_pin_ok?(type, charset, collation) when type in [:char, :varchar] do
-    if is_binary(charset) and charset != "" and is_binary(collation) and collation != "",
+    # The names interpolate into weight/cursor SQL (`USING #{charset}` / `COLLATE #{collation}`)
+    # — structural identity only, matching the identifier grammar information_schema itself
+    # guarantees, so even a hostile catalog cannot smuggle SQL through them (span-review note).
+    present? = &(is_binary(&1) and &1 != "" and &1 =~ ~r/\A[A-Za-z0-9_]+\z/)
+
+    if present?.(charset) and present?.(collation),
       do: :ok,
       else: {:error, :snapshot_pk_unsupported_type}
   end

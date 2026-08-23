@@ -387,7 +387,11 @@ defmodule Capstan.Config do
         {:ok, nil}
 
       batch when is_list(batch) ->
-        with :ok <- batch_shape(batch) do
+        # Unknown keys are refused like every other sub-config (span-review note): a typo
+        # like `flush:` for `flush_ms:` would otherwise silently widen the crash-replay
+        # window against operator intent.
+        with :ok <- reject_unknown_keys(batch, ~w(max_transactions flush_ms mode)a),
+             :ok <- batch_shape(batch) do
           {:ok,
            %{
              max_transactions: Keyword.get(batch, :max_transactions, 1000),

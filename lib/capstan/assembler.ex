@@ -446,6 +446,11 @@ defmodule Capstan.Assembler do
         # resolves as a correct ROW-LESS advance — its rows predate the pipeline (the
         # snapshot's domain); anything else is a desync we refuse to guess at.
         if MapSet.member?(state.startup_xids, digest) do
+          # CONSUMED, symmetric with the pool's Map.pop (claude-peer finding): a digest
+          # that stays resident would silently absorb a LATER duplicate resolution for
+          # the same XID (a re-used application XID whose second prepare was lost) as
+          # another benign row-less advance — turning a loud desync halt silent.
+          state = %{state | startup_xids: MapSet.delete(state.startup_xids, digest)}
           rowless_advance(state, event, txn, [])
         else
           {:halt, xa_desync(verb)}

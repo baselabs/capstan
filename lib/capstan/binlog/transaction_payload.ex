@@ -42,8 +42,10 @@ defmodule Capstan.Binlog.TransactionPayload do
   # exceed what the pipeline could buffer as an in-memory transaction anyway,
   # and a source that declares (or inflates toward) more is either hostile or
   # beyond capstan's operating envelope — refuse it BEFORE inflating when the
-  # server declares the size, and after when it does not (never a partial
-  # guess; a zip-bomb frame must not exhaust the BEAM).
+  # server declares the size, and DURING inflation when it does not (the cap is
+  # threaded into the decompressor's block loop: a no-declared-size frame of
+  # RLE blocks can no longer materialize unbounded output before any check —
+  # span review, blocking: "a zip-bomb frame must not exhaust the BEAM").
   @max_inflated_bytes 1024 * 1024 * 1024
 
   @doc """
@@ -147,7 +149,7 @@ defmodule Capstan.Binlog.TransactionPayload do
   defp inflated_size_cap(_actual), do: :ok
 
   defp inflate(frame) do
-    case Zstd.decompress(frame) do
+    case Zstd.decompress(frame, max_output_bytes: @max_inflated_bytes) do
       {:ok, inner} -> {:ok, inner}
       {:error, reason} -> {:error, {:payload_inflate, reason}}
     end

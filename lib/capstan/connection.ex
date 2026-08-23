@@ -1,4 +1,8 @@
 defmodule Capstan.Connection do
+  # Rule 1 (vector d): the struct carries the raw `:connection` keyword — including the
+  # password. An incidental inspect (a crash dump of an unguarded handler) must never
+  # render it (mirrors Assembler's redaction; span-review note).
+  @derive {Inspect, only: [:server_id, :xa, :command_failures, :cycle_count]}
   @moduledoc """
   The socket-owning GenServer: handshake, auth, the fail-closed gap gate, the dump,
   and frame forwarding.

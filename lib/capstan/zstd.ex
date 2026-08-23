@@ -78,35 +78,64 @@ defmodule Capstan.Zstd do
   skippable frames (`0x184D2A5X`), returning the concatenated decompressed
   content, or `{:error, reason}` on any corruption signal — never partial or
   guessed output.
+
+  ## The output cap (span review, blocking)
+
+  `max_output_bytes:` bounds the CUMULATIVE decompressed size DURING inflation —
+  a frame that would exceed it fails `{:error, :output_too_large}` BEFORE the
+  output is materialized. Without this, a valid frame with no content-size TLV
+  and thousands of ≤128 KB RLE blocks inflates a ~MB payload toward tens of GB
+  as a single BEAM binary and OOM-crashes the node: any post-hoc size check
+  fires only after the memory is already spent. Without the option there is no
+  cap (the generic utility form); the binary-log path always passes one.
   """
-  @spec decompress(binary()) :: {:ok, binary()} | {:error, term()}
-  def decompress(<<>>), do: {:error, :bad_magic}
+  @spec decompress(binary(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def decompress(bin) when is_binary(bin), do: decompress(bin, [])
 
-  def decompress(bin) when is_binary(bin), do: do_frames(bin, [])
+  def decompress(<<>>, _opts), do: {:error, :bad_magic}
 
-  defp do_frames(<<>>, acc), do: {:ok, :erlang.iolist_to_binary(:lists.reverse(acc))}
+  def decompress(bin, opts) when is_binary(bin) do
+    case Keyword.get(opts, :max_output_bytes) do
+      nil -> do_frames(bin, [], :unbounded)
+      cap when is_integer(cap) and cap > 0 -> do_frames(bin, [], cap)
+      _ -> {:error, :bad_output_cap}
+    end
+  end
+
+  defp do_frames(<<>>, acc, _cap), do: {:ok, :erlang.iolist_to_binary(:lists.reverse(acc))}
 
   # Skippable frame: 4-byte magic (any 0x184D2A50..5F, LE) + u32 LE size.
-  defp do_frames(<<v, 0x2A, 0x4D, 0x18, size::32-little, rest::binary>>, acc)
+  defp do_frames(<<v, 0x2A, 0x4D, 0x18, size::32-little, rest::binary>>, acc, cap)
        when v in 0x50..0x5F do
     case rest do
-      <<_skip::binary-size(^size), rest2::binary>> -> do_frames(rest2, acc)
+      <<_skip::binary-size(^size), rest2::binary>> -> do_frames(rest2, acc, cap)
       _ -> {:error, :truncated_frame}
     end
   end
 
-  defp do_frames(<<@magic, rest::binary>>, acc) do
-    case frame(rest) do
-      {:ok, out, rest2} -> do_frames(rest2, [out | acc])
-      {:error, _} = e -> e
+  defp do_frames(<<@magic, rest::binary>>, acc, cap) do
+    case frame(rest, cap) do
+      {:ok, out, rest2} ->
+        produced = Enum.sum(for b <- acc, do: byte_size(b)) + byte_size(out)
+
+        if cap == :unbounded or produced <= cap,
+          do: do_frames(rest2, [out | acc], cap),
+          else: {:error, :output_too_large}
+
+      {:error, _} = e ->
+        e
     end
   end
 
-  defp do_frames(_bin, _acc), do: {:error, :bad_magic}
+  defp do_frames(_bin, _acc, _cap), do: {:error, :bad_magic}
 
   # -- one zstd frame -----------------------------------------------------------
 
-  defp frame(<<fhd::8, rest::binary>>) do
+  defp frame(bin, cap) do
+    do_frame(bin, cap)
+  end
+
+  defp do_frame(<<fhd::8, rest::binary>>, cap) do
     fcs_flag = fhd >>> 6
     single_segment = fhd >>> 5 &&& 1
     checksum? = (fhd >>> 2 &&& 1) == 1
@@ -130,12 +159,14 @@ defmodule Capstan.Zstd do
            {:ok, fcs, rest4} <- frame_content_size(fcs_size, rest3),
            window <- frame_window(single_segment, window, fcs) do
         st = %{huff: nil, ll: nil, of: nil, ml: nil, reps: {1, 4, 8}, window: window}
-        blocks(rest4, st, <<>>, fcs, checksum?)
+        blocks(rest4, st, <<>>, fcs, checksum?, cap)
       end
     end
   end
 
-  defp frame(<<>>), do: {:error, :truncated_frame}
+  # A declared FCS beyond the cap is refused BEFORE any block is read (the cheap
+  # pre-check; the block loop enforces it for undeclared/lying sizes).
+  defp do_frame(<<>>, _cap), do: {:error, :truncated_frame}
 
   # Single-segment frames carry no Window_Descriptor: Window_Size = FCS
   # (RFC 3.1.1.1.1.2), which is necessarily present in that case.
@@ -171,7 +202,7 @@ defmodule Capstan.Zstd do
 
   # -- frame block loop ---------------------------------------------------------
 
-  defp blocks(bin, st, out, fcs, checksum?) do
+  defp blocks(bin, st, out, fcs, checksum?, cap) do
     case bin do
       <<h::24-little, rest::binary>> ->
         last? = (h &&& 1) == 1
@@ -180,7 +211,7 @@ defmodule Capstan.Zstd do
 
         case block(type, size, rest, st, out) do
           {:ok, out2, st2, rest2} ->
-            next_block(last?, {out, out2, st2, rest2, fcs, checksum?, st.window})
+            next_block(last?, {out, out2, st2, rest2, fcs, checksum?, st.window, cap})
 
           {:error, _} = e ->
             e
@@ -191,15 +222,22 @@ defmodule Capstan.Zstd do
     end
   end
 
-  defp next_block(last?, {out, out2, st2, rest2, fcs, checksum?, window}) do
+  defp next_block(last?, {out, out2, st2, rest2, fcs, checksum?, window, cap}) do
     # RFC 3.1.1.2.4: Block_Maximum_Size bounds every block's decompressed
-    # size; exceeding it is corruption.
-    if byte_size(out2) - byte_size(out) > min(window, @block_max) do
-      {:error, :block_size_exceeded}
-    else
-      if last?,
-        do: close_frame(out2, rest2, fcs, checksum?),
-        else: blocks(rest2, st2, out2, fcs, checksum?)
+    # size; exceeding it is corruption. The OUTPUT CAP is checked here too —
+    # BEFORE another block can grow the binary (the decompression-bomb bound).
+    cond do
+      byte_size(out2) - byte_size(out) > min(window, @block_max) ->
+        {:error, :block_size_exceeded}
+
+      cap != :unbounded and byte_size(out2) > cap ->
+        {:error, :output_too_large}
+
+      last? ->
+        close_frame(out2, rest2, fcs, checksum?)
+
+      true ->
+        blocks(rest2, st2, out2, fcs, checksum?, cap)
     end
   end
 
@@ -473,8 +511,14 @@ defmodule Capstan.Zstd do
 
   # RLE_Mode: the description is a single symbol byte used for every
   # sequence — a zero-accuracy table whose state never moves.
-  defp sequence_table(1, _max_sym, _max_al, _predefined, _prev, <<sym::8, rest::binary>>),
-    do: {:ok, %{0 => {sym, 0, 0}}, rest}
+  defp sequence_table(1, max_sym, _max_al, _predefined, _prev, <<sym::8, rest::binary>>) do
+    # The RLE description byte is a SYMBOL INDEX — an out-of-range byte is corruption
+    # (elem/2 on the baseline tables would crash instead of signalling). The FSE arm
+    # already enforces the same bound via too_many_symbols.
+    if sym <= max_sym,
+      do: {:ok, %{0 => {sym, 0, 0}}, rest},
+      else: {:error, :too_many_symbols}
+  end
 
   defp sequence_table(1, _max_sym, _max_al, _predefined, _prev, <<>>),
     do: {:error, :truncated_frame}
@@ -581,8 +625,10 @@ defmodule Capstan.Zstd do
       {offset, reps} = resolve_offset(offset_value, ll, reps)
 
       # RFC 3.1.1.4: with no dictionary the match must land inside the bytes
-      # decoded so far, and (RFC 3.1.1) no offset may reach past Window_Size.
-      if offset < 1 or offset > byte_size(out) or offset >= window do
+      # decoded so far, and (RFC 3.1.1) no offset may EXCEED Window_Size — an offset
+      # EQUAL to Window_Size is the maximum VALID back-reference (span review note:
+      # `>=` over-rejected it; single-segment frames never hit this either way).
+      if offset < 1 or offset > byte_size(out) or offset > window do
         {:error, :offset_out_of_range}
       else
         out = match_copy(out, offset, ml)

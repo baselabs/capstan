@@ -84,16 +84,42 @@ defmodule Capstan.Supervisor do
   # authenticated socket against the CONFIGURED connection coordinates and resume from
   # it ("start from now"). Any fault fails the start fail-closed.
   defp current_position(opts) do
-    with {:gen_tcp, _} = socket <- connect_socket(opts),
-         {:ok, conn} <- Handshake.connect(socket, Keyword.get(opts, :connection) || []),
-         {:ok, [[executed]]} <- Command.query(conn.socket, "SELECT @@global.gtid_executed") do
-      close_socket(conn.socket)
-      {:ok, %Position{gtid_set: executed, file: nil, pos: nil}}
-    else
-      {:error, reason} -> {:error, {:start_position_current_read_failed, reason}}
-      _other -> {:error, {:start_position_current_read_failed, :unknown}}
+    # The socket is closed on EVERY arm (span-review note): an fd/ssl-process leak on the
+    # GTID-read failure survives the failed start.
+    case connect_socket(opts) do
+      {:gen_tcp, _} = socket -> read_live_position(socket, opts)
+      other -> current_read_failed(other)
     end
   end
+
+  defp read_live_position(socket, opts) do
+    case Handshake.connect(socket, Keyword.get(opts, :connection) || []) do
+      {:ok, conn} -> read_executed(conn)
+      other -> close_and_failed(socket, other)
+    end
+  end
+
+  defp read_executed(conn) do
+    case Command.query(conn.socket, "SELECT @@global.gtid_executed") do
+      {:ok, [[executed]]} ->
+        close_socket(conn.socket)
+        {:ok, %Position{gtid_set: executed, file: nil, pos: nil}}
+
+      other ->
+        close_socket(conn.socket)
+        current_read_failed(other)
+    end
+  end
+
+  defp close_and_failed(socket, other) do
+    close_socket(socket)
+    current_read_failed(other)
+  end
+
+  defp current_read_failed({:error, reason}),
+    do: {:error, {:start_position_current_read_failed, reason}}
+
+  defp current_read_failed(_other), do: {:error, {:start_position_current_read_failed, :unknown}}
 
   defp close_socket({:gen_tcp, s}), do: :gen_tcp.close(s)
   defp close_socket({:ssl, s}), do: :ssl.close(s)

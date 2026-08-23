@@ -34,6 +34,7 @@ defmodule Capstan.Integration.SnapshotStringPkTest do
   alias Capstan.MysqlCase.{DurableSnapshotStore, DurableStore, SnapshotSink}
   alias Capstan.Query
   alias Capstan.Snapshot.ChunkReader
+  alias Capstan.Snapshot.PrimaryKey
 
   @moduletag :integration
 
@@ -201,6 +202,55 @@ defmodule Capstan.Integration.SnapshotStringPkTest do
     resume_cursor = List.last(cursors)
     {resumed, _} = drain_string_reader(reader2, resume_cursor, [], [])
     assert resumed == Enum.drop(server_order, length(tiled))
+  end
+
+  test "a CHAR(n) PK pages and gates in weight space too (the fixed-length corner)" do
+    # The claude-peer's untested corner: CHAR (fixed-length) under a NO PAD collation with
+    # short values — chunk-side WEIGHT_STRING(char_col) must equal the stream-side
+    # introducer weight, and the tiling must match the server's ORDER BY.
+    ctx = string_ctx("utf8mb4_0900_ai_ci")
+
+    MysqlCase.run!(
+      ctx.qconn,
+      "CREATE TABLE #{q(ctx.schema, ctx.table)} " <>
+        "(code CHAR(16) COLLATE utf8mb4_0900_ai_ci NOT NULL PRIMARY KEY, v INT NOT NULL) ENGINE=InnoDB"
+    )
+
+    seed_string_rows!(ctx, @pre_keys)
+
+    {:ok, query} =
+      Query.establish(
+        connection: MysqlCase.pipeline_connection(),
+        connect_fun: &Query.default_connect/1
+      )
+
+    on_exit(fn -> Query.close(query) end)
+
+    {:ok, reader} = ChunkReader.open(query, {ctx.schema, ctx.table}, chunk_size: @chunk)
+
+    server_order =
+      ctx.qconn
+      |> MysqlCase.query_rows!("SELECT code FROM #{q(ctx.schema, ctx.table)} ORDER BY code")
+      |> Enum.map(&List.first/1)
+
+    assert Enum.sort(@pre_keys) != server_order
+
+    {tiled, cursors} = drain_string_reader(reader, :start, [], [])
+    assert tiled == server_order
+
+    assert Enum.all?(
+             tl(cursors),
+             &match?(%{raw: r, weight: w} when is_binary(r) and is_binary(w), &1)
+           )
+
+    # The stream-side introducer weight equals the chunk-side column weight for CHAR too
+    # (the canonical-equality half of the strict-once proof).
+    {first_raw, first_weight} = hd(Enum.map(tl(cursors), &{&1.raw, &1.weight}))
+
+    assert {:ok, weights} =
+             PrimaryKey.resolve_weights(query, "utf8mb4", "utf8mb4_0900_ai_ci", [first_raw])
+
+    assert weights[first_raw] == first_weight
   end
 
   ## ===========================================================================

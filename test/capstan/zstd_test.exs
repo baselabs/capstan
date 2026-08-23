@@ -235,4 +235,54 @@ defmodule Capstan.ZstdTest do
     assert cells[27] == {28, 5, 0}
     assert cells[31] == {24, 5, 0}
   end
+
+  ## ===========================================================================
+  ## The output cap (span review, blocking — the decompression bomb)
+  ##
+  ## A valid frame with NO content-size TLV and thousands of <=128 KB RLE blocks
+  ## inflates a tiny input toward tens of GB as ONE BEAM binary — every post-hoc
+  ## size check fires only after the memory is spent. The cap is enforced DURING
+  ## inflation (the block loop), before the output materializes.
+  ## ===========================================================================
+
+  describe "decompress/2 max_output_bytes — the decompression bomb bound" do
+    # A hand-built frame: magic + FHD 0x00 (no FCS, no checksum, not single-segment) +
+    # Window_Descriptor 0x38 (128 KB window) + N RLE blocks (3-byte header + 1 content
+    # byte; each regenerates 128 KB) with the last flag on the final block.
+    defp rle_bomb(n_blocks) do
+      header = <<0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x38>>
+
+      blocks =
+        for i <- 1..n_blocks do
+          last = if i == n_blocks, do: 1, else: 0
+          h = (128 * 1024) <<< 3 ||| 1 <<< 1 ||| last
+          <<h::24-little, 0x61>>
+        end
+
+      header <> IO.iodata_to_binary(blocks)
+    end
+
+    test "an RLE-bomb frame under a small cap fails :output_too_large, fast" do
+      # 200 blocks x 128 KB = ~25 MB output from a ~1.4 KB input; the 1 MB cap must trip
+      # in the block loop. RED (pre-fix): no cap existed — this returned {:ok, 25 MB}.
+      assert {:error, :output_too_large} =
+               Zstd.decompress(rle_bomb(200), max_output_bytes: 1024 * 1024)
+    end
+
+    test "a frame within the cap still inflates exactly" do
+      bomb = rle_bomb(4)
+      assert {:ok, out} = Zstd.decompress(bomb, max_output_bytes: 1024 * 1024)
+      assert byte_size(out) == 4 * 128 * 1024
+      assert out == String.duplicate("a", 4 * 128 * 1024)
+    end
+
+    test "the uncapped arity is unchanged (the generic utility form)" do
+      assert {:ok, out} = Zstd.decompress(rle_bomb(2))
+      assert byte_size(out) == 2 * 128 * 1024
+    end
+
+    test "a bogus cap is refused, never silently uncapped" do
+      assert {:error, :bad_output_cap} = Zstd.decompress(rle_bomb(1), max_output_bytes: 0)
+    end
+  end
 end
