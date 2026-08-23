@@ -12,7 +12,7 @@ MySQL sibling: replicant consumes Postgres logical replication (pgoutput) over a
 slot; capstan consumes MySQL row-based binary-log replication over a registered replica
 connection.
 
-> **Status: C1 streaming and C2 initial snapshot are released in 0.2.0.** capstan
+> **Status: C1 streaming and C2 initial snapshot are released in 0.3.0.** capstan
 > connects to MySQL as a replica, tails the row-based binlog from a GTID position,
 > assembles committed transactions, delivers them to a sink, and durably advances a
 > processed-GTID checkpoint — fail-closed on every silent-loss condition. C2 adds a
@@ -61,7 +61,7 @@ Add `capstan` to your dependencies:
 ```elixir
 def deps do
   [
-    {:capstan, "~> 0.2.0"}
+    {:capstan, "~> 0.3.0"}
   ]
 end
 ```

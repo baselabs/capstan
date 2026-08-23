@@ -6,11 +6,22 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-22
+
 ### Changed
 
+- **Strict option surface**: an option key outside the documented set — at the top
+  level, in `connection:`, in `snapshot:`, or in a store block — is refused with the
+  new `:unknown_option` instead of silently defaulting (a misspelled key such as
+  `stream_timeout:` for `stream_timeout_ms:` is loud, never ignored). `child_spec`'s
+  `:id` is accepted. Configs passing extra keys were previously tolerated and now
+  refuse — the reason this is a minor bump.
 - Align the contributor guide and README with the released 0.2.0 surface:
   C1 streaming and C2 initial snapshot are complete; C3–C6 and the named C2
   follow-ups remain open. Register the existing XA tracking ADR 0006 in ExDoc.
+- Compile warning-clean on Elixir 1.20 (pin operators in bitstring `size(...)`, per
+  the 1.20 hard deprecation); the supported range is unchanged — the pinned form is
+  valid on the declared floor (`~> 1.15`).
 
 ### Fixed
 
@@ -25,8 +36,8 @@ All notable changes to capstan are documented here. The format follows
   refusal the public path enforces — an over-ceiling, non-positive, or non-integer
   value is a value-free refusal (`:config_invalid` / `:invalid_liveness_config`),
   never a later timer crash or a silently disabled master heartbeat.
-- README install snippet pins `~> 0.2.0` (was `~> 0.1.0`, which cannot resolve the
-  release the same README documents).
+- README install snippet pins `~> 0.3.0` (the 0.2.0 tarball shipped `~> 0.1.0`, which
+  cannot resolve the release the same README documents).
 
 ## [0.2.0] - 2026-07-22
 
