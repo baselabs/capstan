@@ -8,6 +8,11 @@ All notable changes to capstan are documented here. The format follows
 
 ### Added
 
+- The precondition gate gains a sixth variable: `binlog_transaction_compression` must be OFF
+  (a distinct `:binlog_transaction_compression_on` refusal at connect, before the dump —
+  compression is source-unilateral and capstan cannot inflate zstd payloads; ADR-0011). The
+  decoder halt remains the backstop for a dynamic flip after connect.
+
 - Telemetry measurements on both fail-closed channels: `[:capstan, :transaction, :committed]`
   carries `change_count` + `sink_ms`; `[:capstan, :connection, :established]` carries
   `establish_ms`; measurement values must be non-negative numbers (the metadata allowlist

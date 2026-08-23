@@ -101,7 +101,8 @@ defmodule Capstan.MixProject do
         "docs/adr/0007-value-free-boundary-rule-1.md",
         "docs/adr/0008-pure-elixir-protocol-client.md",
         "docs/adr/0009-fail-closed-supervision-and-streaming-liveness.md",
-        "docs/adr/0010-exclusive-end-bound-of-com-binlog-dump-gtid.md"
+        "docs/adr/0010-exclusive-end-bound-of-com-binlog-dump-gtid.md",
+        "docs/adr/0011-transaction-compression-precondition.md"
       ],
       groups_for_modules: [
         "Consumer API": [

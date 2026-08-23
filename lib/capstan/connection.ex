@@ -134,6 +134,7 @@ defmodule Capstan.Connection do
     :binlog_row_metadata_not_full,
     :binlog_row_value_options_not_empty,
     :gtid_mode_not_on,
+    :binlog_transaction_compression_on,
     :precondition_query_failed
   ]
 

@@ -149,7 +149,7 @@ defmodule Capstan.Snapshot.BootstrapTest do
   @uuid_a "aaaaaaaa-1111-2222-3333-444444444444"
   @uuid_b "bbbbbbbb-5555-6666-7777-888888888888"
 
-  @good_precond {5, [["ROW", "FULL", "FULL", "", "ON"]]}
+  @good_precond {6, [["ROW", "FULL", "FULL", "", "ON", "0"]]}
 
   defp uuid_result(uuid), do: {1, [[uuid]]}
 

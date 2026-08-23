@@ -33,11 +33,12 @@ retained), (d) the **connection password**. Column names stay **strings** — ne
 allowlisted (GTIDs, table names, counts, durations, error classes — never values).
 
 **2. Fail closed on server preconditions (design Q5).** Refuse to start unless the source's
-row-image binlog is configured for lossless CDC. The precondition gate checks **five** variables and
+row-image binlog is configured for lossless CDC. The precondition gate checks **six** variables and
 refuses with a distinct reason per failure: `binlog_format=ROW`, `binlog_row_image=FULL`,
 `binlog_row_metadata=FULL`, `binlog_row_value_options=''` (full JSON, not PARTIAL_JSON),
-`gtid_mode=ON`. (`enforce_gtid_consistency=ON` is also required on the server and the dev substrate
-sets it; the Q5 gate itself checks the five above.) Simple-query results are all **strings** — coerce
+`gtid_mode=ON`, `binlog_transaction_compression=OFF` (compression is source-unilateral and
+capstan cannot inflate zstd — ADR-0011). (`enforce_gtid_consistency=ON` is also required on the server and the dev substrate
+sets it; the Q5 gate itself checks the six above.) Simple-query results are all **strings** — coerce
 every value as text before comparing.
 
 **3. Position is a GTID set — the sole authority and sole persisted value (design Q12).** Dedup is

@@ -249,19 +249,20 @@ defmodule Capstan.Integration.FailClosedDockerTest do
   end
 
   ## ---------------------------------------------------------------------------
-  ## binlog_transaction_compression=ON → loud halt (throwaway container)
+  ## binlog_transaction_compression=ON → precondition refusal (throwaway container)
   ## ---------------------------------------------------------------------------
 
-  test "a compressed transaction payload halts :compressed_payload_unsupported" do
+  test "a compression-enabled source is refused at the gate, before the dump" do
+    # Compression is source-unilateral (MySQL 8.0 refman: a consumer cannot opt out), so
+    # an ON source can never be consumed — the precondition gate refuses at establish
+    # with the actionable reason, BEFORE the dump. (Before the gate, this same server
+    # streamed and halted at the FIRST compressed transaction; the decoder's
+    # :compressed_payload_unsupported halt remains the backstop for a dynamic flip
+    # AFTER connect, unit-tripwired in decoder_test.)
     MysqlCase.with_throwaway_mysql(["--binlog-transaction-compression=ON"], fn port ->
       qconn = MysqlCase.socket!(MysqlCase.query_connection(port))
 
       try do
-        MysqlCase.run_all!(qconn, [
-          "DROP TABLE IF EXISTS fc_compressed",
-          "CREATE TABLE fc_compressed (id INT PRIMARY KEY, name VARCHAR(50)) ENGINE=InnoDB"
-        ])
-
         watermark = MysqlCase.read_gtid_executed!(qconn)
 
         {:ok, sup} =
@@ -275,19 +276,15 @@ defmodule Capstan.Integration.FailClosedDockerTest do
 
         on_exit(fn -> MysqlCase.stop_pipeline(sup) end)
 
-        # The AssemblerServer-side halt emits no telemetry, so observe the process exit directly.
+        # The halt surfaces on the assembler (the Connection forwards {:capstan_halt, _}
+        # before stopping) — observe the process exit directly.
         ref = Process.monitor(MysqlCase.assembler_pid(sup))
 
-        MysqlCase.run!(
-          qconn,
-          "INSERT INTO fc_compressed (id, name) VALUES (1, 'compressed-row')"
-        )
-
         assert_receive {:DOWN, ^ref, :process, _pid,
-                        {:shutdown, {:halt, {:assembler_error, :compressed_payload_unsupported}}}},
+                        {:shutdown, {:halt, :binlog_transaction_compression_on}}},
                        20_000
 
-        # No row is delivered — the compressed payload halts fail-closed, never guessed at.
+        # Nothing is delivered — the refusal precedes the dump entirely.
         refute_receive {:txn, _g, _c, _p}, 200
       after
         MysqlCase.close!(qconn)

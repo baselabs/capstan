@@ -24,7 +24,7 @@ SELECT VERSION() AS mysql_version,
        @@global.super_read_only AS super_read_only,
        NOW() AS report_time;
 
-SELECT '== 1. CAPSTAN PRECONDITIONS (all five must PASS; checked again at every connect) ==' AS section;
+SELECT '== 1. CAPSTAN PRECONDITIONS (all six must PASS; checked again at every connect) ==' AS section;
 SELECT 'binlog_format' AS setting, @@global.binlog_format AS current_value, 'ROW' AS required,
        IF(@@global.binlog_format = 'ROW', 'PASS', 'FAIL') AS verdict
 UNION ALL
@@ -38,13 +38,13 @@ SELECT 'binlog_row_value_options', @@global.binlog_row_value_options, '(empty)',
        IF(@@global.binlog_row_value_options = '', 'PASS', 'FAIL')
 UNION ALL
 SELECT 'gtid_mode', @@global.gtid_mode, 'ON',
-       IF(@@global.gtid_mode = 'ON', 'PASS', 'FAIL');
+       IF(@@global.gtid_mode = 'ON', 'PASS', 'FAIL')
+UNION ALL
+SELECT 'binlog_transaction_compression', @@global.binlog_transaction_compression, 'OFF',
+       IF(@@global.binlog_transaction_compression = 0, 'PASS',
+          'FAIL — source-unilateral, capstan cannot consume compressed payloads');
 
-SELECT '== 2. BINLOG COMPRESSION (must be OFF — a compressed transaction halts capstan today) ==' AS section;
-SELECT @@global.binlog_transaction_compression AS binlog_transaction_compression,
-       IF(@@global.binlog_transaction_compression = 0, 'PASS', 'FAIL') AS verdict;
-
-SELECT '== 3. GTID POSTURE ==' AS section;
+SELECT '== 2. GTID POSTURE ==' AS section;
 SELECT @@global.enforce_gtid_consistency AS enforce_gtid_consistency;
 SELECT @@global.gtid_executed AS gtid_executed;
 -- Non-empty gtid_purged means the earliest history is gone: a brand-new capstan
@@ -53,17 +53,17 @@ SELECT @@global.gtid_executed AS gtid_executed;
 SELECT @@global.gtid_purged AS gtid_purged,
        IF(@@global.gtid_purged = '', 'empty — fresh start possible', 'non-empty — SEED the checkpoint before first start') AS note;
 
-SELECT '== 4. UPSTREAM REPLICATION CHAIN (only relevant when this server is itself a replica) ==' AS section;
+SELECT '== 3. UPSTREAM REPLICATION CHAIN (only relevant when this server is itself a replica) ==' AS section;
 -- If this server replicates from a pre-GTID primary, Assign_Gtids_To_Anonymous_Transactions
 -- (8.0.23+) must be LOCAL or a UUID so incoming transactions get GTIDs, and
 -- log_replica_updates below must be ON so they reach THIS server's binlog.
 SHOW REPLICA STATUS\G
 
-SELECT '== 5. CASCADING-SOURCE SETTINGS ==' AS section;
+SELECT '== 4. CASCADING-SOURCE SETTINGS ==' AS section;
 SELECT @@global.log_replica_updates AS log_replica_updates,
        IF(@@global.log_replica_updates = 1, 'PASS', 'FAIL — replicated rows will NOT reach this binlog') AS verdict;
 
-SELECT '== 6. RETENTION AND VOLUME ==' AS section;
+SELECT '== 5. RETENTION AND VOLUME ==' AS section;
 SELECT @@global.binlog_expire_logs_seconds AS binlog_expire_logs_seconds,
        ROUND(@@global.binlog_expire_logs_seconds / 3600, 1) AS retention_hours,
        @@global.max_binlog_size AS max_binlog_size;
@@ -73,13 +73,13 @@ SELECT variable_name, variable_value
 FROM performance_schema.global_status
 WHERE variable_name IN ('Uptime', 'Com_commit', 'Com_insert', 'Com_update', 'Com_delete', 'Questions');
 
-SELECT '== 7. XA USAGE (any nonzero Com_xa_* or pending rows is a CAPSTAN BLOCKER today — flag it) ==' AS section;
+SELECT '== 6. XA USAGE (any nonzero Com_xa_* or pending rows is a CAPSTAN BLOCKER today — flag it) ==' AS section;
 SELECT variable_name, variable_value
 FROM performance_schema.global_status
 WHERE variable_name IN ('Com_xa_start', 'Com_xa_prepare', 'Com_xa_commit', 'Com_xa_rollback');
 XA RECOVER;
 
-SELECT '== 8. SCHEMA CENSUS (application schemas only) ==' AS section;
+SELECT '== 7. SCHEMA CENSUS (application schemas only) ==' AS section;
 SELECT 'column type counts' AS census;
 SELECT DATA_TYPE, COUNT(*) AS columns_count
 FROM information_schema.COLUMNS
@@ -120,7 +120,7 @@ WHERE t.TABLE_SCHEMA NOT IN ('mysql', 'sys', 'information_schema', 'performance_
   AND c.CONSTRAINT_NAME IS NULL
 ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME;
 
-SELECT '== 9. TLS AND AUTH ==' AS section;
+SELECT '== 8. TLS AND AUTH ==' AS section;
 SELECT @@global.require_secure_transport AS require_secure_transport,
        @@global.tls_version AS tls_version,
        @@global.character_set_server AS character_set_server;
@@ -128,7 +128,7 @@ SELECT VARIABLE_NAME, VARIABLE_VALUE
 FROM performance_schema.global_variables
 WHERE VARIABLE_NAME IN ('authentication_policy', 'default_authentication_plugin', 'have_ssl');
 
-SELECT '== 10. EXISTING DOWNSTREAM REPLICAS (capstan needs a server_id colliding with NONE of these) ==' AS section;
+SELECT '== 9. EXISTING DOWNSTREAM REPLICAS (capstan needs a server_id colliding with NONE of these) ==' AS section;
 SHOW REPLICAS;
 
 SELECT '== DONE — see the questions below ==' AS section;
