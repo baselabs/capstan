@@ -146,16 +146,32 @@ defmodule Capstan.Binlog.RowsTest do
     end
   end
 
+  describe "spatial — GEOMETRY/POINT decode verbatim (real fixture, C4a)" do
+    test "a GEOMETRY and a POINT column deliver the raw SRID+WKB binaries" do
+      tm = table_map("spatial", "07-table_map.bin")
+      tuple = rows_tuple("spatial", "08-write_rows.bin")
+
+      assert {:ok, {:insert, [row]}} = Rows.decode(tuple, tm)
+      assert row["id"] == 1
+
+      # SRID 0 + WKB: byte-order 1 (little) + type 1 (POINT, LE) + x + y.
+      assert row["g"] ==
+               <<0::32, 1::8, 1::32-little, 1.0::float-64-little, 2.0::float-64-little>>
+
+      assert row["p"] ==
+               <<0::32, 1::8, 1::32-little, 3.0::float-64-little, 4.0::float-64-little>>
+    end
+  end
+
   describe "set_type — SET NAMED SAFETY PROPERTY: detect and fail closed (real fixture)" do
-    test "a SET column halts with :unsupported_column_type, never an ENUM-style value" do
+    test "a SET column DECODES against the real fixture — members comma-joined (C4a)" do
+      # The captured row planted SET('a','c') — the wire bitmap must yield MySQL's text
+      # form, never an ENUM-style index.
       tm = table_map("set_type", "07-table_map.bin")
       tuple = rows_tuple("set_type", "08-write_rows.bin")
 
-      # SET wires as type 254 like ENUM; its row image is a bitfield ('a,c' = 0x05),
-      # NOT an index. Decoding it as an ENUM would emit a silently-wrong member. C1
-      # defers SET (C4) and MUST fail closed here.
-      assert {:error, {:unsupported_column_type, detail}} = Rows.decode(tuple, tm)
-      assert detail.reason == :set_deferred
+      assert {:ok, {:insert, [row]}} = Rows.decode(tuple, tm)
+      assert row["flags"] == "a,c"
     end
   end
 

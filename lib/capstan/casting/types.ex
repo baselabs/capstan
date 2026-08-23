@@ -50,6 +50,7 @@ defmodule Capstan.Casting.Types do
   @type_json 245
   @type_newdecimal 246
   @type_blob 252
+  @type_geometry 255
   @type_var_string 253
   @type_string 254
 
@@ -74,6 +75,7 @@ defmodule Capstan.Casting.Types do
           | {:time, 0..6}
           | :date
           | {:json, 1..4}
+          | {:geometry, 1..4}
 
   @typedoc "The fail-closed signal: a type/meta/value C1 refuses rather than mis-decode."
   @type unsupported :: {:unsupported_column_type, map()}
@@ -150,8 +152,13 @@ defmodule Capstan.Casting.Types do
   defp take_meta(@type_time2, <<fsp, rest::binary>>) when fsp in 0..6,
     do: {:ok, {:time, fsp}, rest}
 
-  # Every other type byte (FLOAT, DOUBLE, BIT, YEAR, GEOMETRY, old DECIMAL, ...) is
-  # refused: its meta width is not enumerated, so decoding cannot continue safely.
+  # GEOMETRY (C4a): 1 byte = number of length-prefix bytes, like BLOB. The value is
+  # the server's raw spatial binary (4-byte SRID prefix + WKB).
+  defp take_meta(@type_geometry, <<length_bytes, rest::binary>>) when length_bytes in 1..4,
+    do: {:ok, {:geometry, length_bytes}, rest}
+
+  # Every other type byte (FLOAT, DOUBLE, BIT, YEAR, old DECIMAL, ...) is refused: its
+  # meta width is not enumerated, so decoding cannot continue safely.
   defp take_meta(_type, _blob), do: {:error, :unknown_wire_type}
 
   # STRING metadata decode (MySQL log_event.cc). For a long CHAR the high length bits
@@ -203,11 +210,27 @@ defmodule Capstan.Casting.Types do
   def cast({:blob, length_bytes}, _signed?, _str, bytes),
     do: cast_var_length(length_bytes, bytes)
 
+  # Spatial (C4a): opaque raw SRID+WKB binary, delivered verbatim — never parsed
+  # (WKT/WKB interpretation is the sink's; capstan only transports it, Rule 1: the
+  # bytes are row values).
+  def cast({:geometry, length_bytes}, _signed?, _str, bytes),
+    do: cast_var_length(length_bytes, bytes)
+
   def cast({:enum, pack_len}, _signed?, str_values, bytes),
     do: cast_enum(pack_len, str_values, bytes)
 
-  def cast({:set, pack_len}, _signed?, _str, _bytes),
-    do: {:error, {:unsupported_column_type, %{reason: :set_deferred, pack_len: pack_len}}}
+  # SET (C4a): the wire value is a pack_len-byte little-endian BITMAP over the column's
+  # member list (bit i = member i, in declaration order). MySQL's text form is the
+  # selected members joined with "," — we deliver exactly that string; an empty set is "".
+  def cast({:set, pack_len}, _signed?, str_values, bytes) do
+    case bytes do
+      <<bitmap::size(^pack_len)-unit(8)-little, rest::binary>> ->
+        cast_set_bitmap(bitmap, str_values, pack_len, rest)
+
+      _ ->
+        {:error, {:unsupported_column_type, %{reason: :set_truncated, pack_len: pack_len}}}
+    end
+  end
 
   def cast(:date, _signed?, _str, <<raw::24-little, rest::binary>>), do: cast_date(raw, rest)
 
@@ -235,6 +258,23 @@ defmodule Capstan.Casting.Types do
   # ---- variable-length strings / blobs --------------------------------------------
 
   # `prefix_size` = 1 or 2 (VARCHAR/CHAR) or 1..4 (BLOB) length-prefix bytes, LE.
+  # A set bit beyond the declared member list is a metadata desync (the row names a
+  # member the schema does not declare) — refuse, never guess.
+  defp cast_set_bitmap(bitmap, str_values, _pack_len, _rest)
+       when bitmap >>> length(str_values) != 0,
+       do: {:error, {:unsupported_column_type, %{reason: :set_member_out_of_range}}}
+
+  defp cast_set_bitmap(bitmap, str_values, _pack_len, rest) do
+    members =
+      str_values
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {member, i} ->
+        if (bitmap >>> i &&& 1) === 1, do: [member], else: []
+      end)
+
+    {:ok, Enum.join(members, ","), rest}
+  end
+
   defp cast_var_length(prefix_size, bytes) do
     prefix_bits = prefix_size * 8
     <<length::size(^prefix_bits)-little, value::binary-size(length), rest::binary>> = bytes

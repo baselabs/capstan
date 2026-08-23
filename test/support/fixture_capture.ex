@@ -280,6 +280,17 @@ defmodule Capstan.FixtureCapture do
       # supplies the real captured SET bytes the SET-detection tripwire must go RED
       # against (self-signed/synthetic meta would only prove roundtrip, not conformance).
       %{
+        name: "spatial",
+        server_id: 4008,
+        setup: [
+          "DROP TABLE IF EXISTS geo_widgets",
+          "CREATE TABLE geo_widgets (id INT PRIMARY KEY, g GEOMETRY, p POINT) ENGINE=InnoDB"
+        ],
+        statements: [
+          "INSERT INTO geo_widgets VALUES (1, ST_GeomFromText('POINT(1 2)'), ST_GeomFromText('POINT(3 4)'))"
+        ]
+      },
+      %{
         name: "set_type",
         server_id: 4008,
         setup: [

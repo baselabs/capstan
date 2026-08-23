@@ -6,6 +6,17 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — C4a column-type breadth: SET decode + spatial passthrough
+
+- `SET` columns decode to MySQL's text form (selected members comma-joined; empty set is
+  `""`); a bitmap naming an undeclared member is a metadata desync and halts
+  (`:set_member_out_of_range`). `GEOMETRY` and the spatial family deliver the raw
+  SRID+WKB binary verbatim — interpretation is the sink's. Pre-5.6 temporals stay refused
+  (a supported 8.0+ source never emits them). Real-byte conformance: live-captured
+  `spatial` fixture (POINT columns byte-exact) plus the existing `set_type` fixture now
+  decoding `"a,c"`; a live marquee streams every SET form + geometry through a real
+  pipeline.
+
 ### Added — C3 batching
 
 - `batch: [max_transactions:, flush_ms:, mode:]` — `:lib_owned` (per-transaction

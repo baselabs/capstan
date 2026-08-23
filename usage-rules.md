@@ -200,6 +200,16 @@ marquee proves it live on an append-only ledger). An `handle_transaction/1` that
 `{:ok, position}` without having durably persisted that position breaks the mode's
 contract silently — the durability is YOURS to provide.
 
+### Column-type breadth (C4a)
+
+`SET` columns decode to MySQL's text form — the selected members comma-joined (`"a,c"`;
+an empty set is `""`). `GEOMETRY` (and its typed aliases: `POINT`, `LINESTRING`,
+`POLYGON`, the MULTI_* and `GEOMETRYCOLLECTION` family) deliver the column's **raw
+spatial binary** — the 4-byte SRID prefix plus WKB — verbatim; interpretation (WKT,
+parsers) is the sink's. A SET bitmap naming a member the schema does not declare is a
+metadata desync and halts `{:unsupported_column_type, reason: :set_member_out_of_range}`;
+pre-5.6 temporals remain refused (a supported 8.0+ source never emits them).
+
 **Memory shape.** A transaction is buffered whole in pipeline memory between assembly and
 delivery, so peak memory scales with the source's largest single transaction; in snapshot mode
 add one fully-materialized chunk per table (bounded by `chunk_size`). Streaming/batched delivery
@@ -326,8 +336,7 @@ via `[:capstan, :connection, :halt]` / `[:capstan, :assembler, :halt]` telemetry
   after the retry budget.
 - `{:assembler_error, reason}` — a stream desync (`:begin_without_gtid`,
   `:rows_without_transaction`, …) or a row the pipeline refuses to decode:
-  `:unmapped_table_id`, `{:unsupported_column_type, detail}` (spatial, `SET`, pre-5.6
-  temporals), a compressed transaction payload, an unknown event type.
+  `:unmapped_table_id`, `{:unsupported_column_type, detail}` (a column outside the decoded breadth, e.g. pre-5.6 temporals), a compressed transaction payload, an unknown event type.
 - `:unsupported_transaction_shape` — an XA transaction under the default `xa: :refuse`
   (the buffered rows are discarded, never delivered; ADR-0003). With `xa: :track`
   (ADR-0006) XA no longer halts here — see "XA transactions" for the `:xa_*` halts

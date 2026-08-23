@@ -147,10 +147,37 @@ defmodule Capstan.Casting.TypesTest do
     end
   end
 
-  describe "cast/4 — SET fails closed (C4 deferral must not silently decode)" do
-    test "a SET column never decodes to a value" do
-      assert {:error, {:unsupported_column_type, %{reason: :set_deferred}}} =
-               Types.cast({:set, 1}, false, [], <<0x05>>)
+  describe "cast/4 — SET decodes (C4a) with a fail-closed desync guard" do
+    test "a SET bitmap decodes to the selected members, comma-joined (MySQL's text form)" do
+      # members a(0) b(1) c(2); bitmap 0b101 = a,c
+      assert {:ok, "a,c", <<>>} = Types.cast({:set, 1}, false, ["a", "b", "c"], <<0x05>>)
+      assert {:ok, "b", <<>>} = Types.cast({:set, 1}, false, ["a", "b", "c"], <<0x02>>)
+      assert {:ok, "", <<>>} = Types.cast({:set, 1}, false, ["a", "b", "c"], <<0x00>>)
+      # Trailing columns survive.
+      assert {:ok, "a", "X"} = Types.cast({:set, 1}, false, ["a"], <<0x01, "X">>)
+    end
+
+    test "a set bit beyond the declared member list is a metadata desync — refused" do
+      assert {:error, {:unsupported_column_type, %{reason: :set_member_out_of_range}}} =
+               Types.cast({:set, 1}, false, ["a"], <<0x05>>)
+    end
+
+    test "a truncated SET bitmap is refused" do
+      assert {:error, {:unsupported_column_type, %{reason: :set_truncated}}} =
+               Types.cast({:set, 2}, false, ["a"], <<0x01>>)
+    end
+  end
+
+  describe "cast/4 — GEOMETRY decodes (C4a) as the raw SRID+WKB binary" do
+    test "a POINT's stored bytes pass through verbatim, length-prefixed" do
+      # The live substrate's HEX(p) for POINT(2 2): SRID 0 + WKB point.
+      wkb = <<0::32, 1::8-little, 2.0::float-64-little, 2.0::float-64-little>>
+
+      assert {:ok, ^wkb, <<>>} =
+               Types.cast({:geometry, 4}, false, [], <<
+                 byte_size(wkb)::32-little,
+                 wkb::binary
+               >>)
     end
   end
 end

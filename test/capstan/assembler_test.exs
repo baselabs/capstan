@@ -157,16 +157,12 @@ defmodule Capstan.AssemblerTest do
       assert {:error, :unmapped_table_id, [], %Position{}} = Assembler.run(seq, empty_start())
     end
 
-    test "a Rows.decode error (unsupported SET column) aborts fail-closed, no txn" do
-      # set_type is a real captured InnoDB insert into a SET column. C1 cannot decode
-      # SET yet, so Rows.decode returns {:error, {:unsupported_column_type, _}} and the
-      # whole transaction is refused — a partial/raw row is never emitted.
-      assert {:error, {:unsupported_column_type, detail}, [], %Position{}} =
-               Assembler.run(all_events("set_type"), empty_start())
-
-      # Rule 1: the error term carries only schema-level facts, never a row value.
-      refute Map.has_key?(detail, :value)
-      refute inspect(detail) =~ "a,c"
+    test "a SET-column transaction now DELIVERS (C4a) — the real fixture decodes end-to-end" do
+      # C4a: SET decodes; the C1-era refusal test is retired. The mid-transaction
+      # abort property itself is proven by the unmapped_table_id / unknown-type arms.
+      assert {:ok, [txn], _pos} = Assembler.run(all_events("set_type"), empty_start())
+      assert [%{changes: [change]}] = [txn]
+      assert change.record["flags"] == "a,c"
     end
 
     test "a Decoder {:error, _} (compressed payload) aborts fail-closed, no txn" do
