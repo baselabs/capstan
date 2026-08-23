@@ -293,6 +293,36 @@ defmodule Capstan.Snapshot.CoordinatorTest do
       assert Enum.sort(raws) == ["Z", "a"]
     end
 
+    test "RESUME recomputes a delivered_pk dual even when pk_cursor is :start (F1 first-chunk window — span finding O1)" do
+      # The F1 crash window on chunk ONE persists delivered_pk = dual while pk_cursor is
+      # still :start. The recompute must widen to that shape (a filter keyed only on
+      # pk_cursor leaves the delivered weight stale — the delete threshold would compare
+      # old-form weights against fresh keys, exactly what ADR-0012's recompute prevents).
+      tampered_delivered = %{raw: "Z", weight: <<0x00, 0x01>>}
+
+      _coord =
+        start_coordinator(
+          store_backed(),
+          snap_state(%{table() => string_table(:start, false, tampered_delivered)}),
+          readers: %{table() => string_reader()},
+          weight_resolver: StubWeightResolver
+        )
+
+      # A streamed delete of an already-delivered key gates on delivered_pk in WEIGHT
+      # space: recomputed (w_z) → 'a' (w_a < w_z) FORWARDS; under the tampered weight it
+      # would suppress (a permanent phantom). The handle_transaction call also flushes
+      # handle_continue, so the recompute has run by the assert.
+      change = s_delete("a")
+      assert Coordinator.handle_transaction(txn([change])) == {:ok, pos()}
+      assert_receive {:handle_transaction, forwarded}
+      assert forwarded.changes == [change]
+
+      # And the recompute actually resolved the DELIVERED raw at bootstrap (the gate then
+      # resolves the streamed delete's own key — delivered != :start is a real threshold).
+      assert [{@charset, @collation, ["Z"]}, {@charset, @collation, ["a"]}] =
+               Enum.reverse(StubWeightResolver.calls())
+    end
+
     test "the cache collapses a repeated raw across transactions (one resolution per distinct key)" do
       _coord = string_gate_coordinator(%{raw: "Z", weight: @w_z})
 
@@ -1058,6 +1088,10 @@ defmodule Capstan.Snapshot.CoordinatorTest do
 
   defp s_insert(code),
     do: %Change{op: :insert, schema: "s", table: "t", record: %{"code" => code}, old_record: nil}
+
+  defp s_delete(code) do
+    %Change{op: :delete, schema: "s", table: "t", record: nil, old_record: %{"code" => code}}
+  end
 
   defp s_update(old, new) do
     %Change{

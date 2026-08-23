@@ -99,6 +99,60 @@ defmodule Capstan.Integration.StartPositionTest do
     refute_receive {:txn, _g, [%{record: %{"v" => _}}], _p}, 500
   end
 
+  test ":current seeds the ASSEMBLER WATERMARK too — the first checkpoint covers the skipped interval (span finding C1)",
+       ctx do
+    # The dump resumes from the resolved :current position; the assembler's processed
+    # watermark must be seeded from the SAME value (pipeline.ex: "the same value the dump
+    # resumes from — the two can never disagree"). RED (the resolved position reached only
+    # the connection spec): the first checkpoint persists the old authority set plus the
+    # new GTID alone — the skipped interval is never recorded as processed, so a restart
+    # replays it.
+    store_table = DurableStore.new_table()
+
+    {:ok, sup} =
+      Capstan.start_link(
+        connection: MysqlCase.pipeline_connection(),
+        server_id: MysqlCase.unique_server_id(),
+        sink: Sink,
+        checkpoint_store: [
+          module: DurableStore,
+          options: [table: store_table, key: ctx.table]
+        ],
+        start_position: :current,
+        max_command_retries: 5
+      )
+
+    on_exit(fn -> MysqlCase.stop_pipeline(sup) end)
+
+    h = MysqlCase.attach_established_telemetry(self())
+    Process.sleep(1000)
+    :telemetry.detach(h)
+
+    # The live position the dump skipped TO (the whole pre-:current history).
+    w_cur = MysqlCase.read_gtid_executed!(ctx.qconn)
+
+    MysqlCase.run!(ctx.qconn, "INSERT INTO #{ctx.table} (id, v) VALUES (10, 'wm-seed')")
+    assert {:txn, _gtid, [%{record: %{"v" => "wm-seed"}}], _pos} = collect_one()
+
+    # The durable checkpoint SUBSUMES the skipped interval once the first txn checks in.
+    assert covers_within?(store_table, ctx.table, w_cur, 200),
+           "the durable checkpoint never covered the pre-:current interval — the assembler watermark was not seeded"
+  end
+
+  defp covers_within?(_table, _key, _w_cur, 0), do: false
+
+  defp covers_within?(table, key, w_cur, attempts) do
+    covered? =
+      case DurableStore.current(table, key) do
+        nil -> false
+        set -> Gtid.subset?(Gtid.parse(w_cur), Gtid.parse(set))
+      end
+
+    if covered?,
+      do: true,
+      else: Process.sleep(25) && covers_within?(table, key, w_cur, attempts - 1)
+  end
+
   defp collect_one do
     receive do
       {:txn, gtid, changes, pos} -> {:txn, gtid, changes, pos}

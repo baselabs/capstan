@@ -855,4 +855,32 @@ defmodule Capstan.ConnectionTest do
 
     {seq, payload}
   end
+
+  ## ===========================================================================
+  ## parse_recover_rows/1 — the XA RECOVER resultset shape (span finding O6)
+  ##
+  ## A row the guard passes but the parser crashes on (Integer.parse accepts "12abc"
+  ## partially; binary_part trusts gtrid_len beyond the data) would turn malformed
+  ## server output into an ArgumentError CRASH instead of the named
+  ## {:command_error, :xa_recover_unexpected_shape} fail-closed establish fault.
+  ## ===========================================================================
+
+  describe "parse_recover_rows/1 — malformed rows are refused, never crashed" do
+    test "a healthy row parses to its digest" do
+      assert {:ok, [digest]} = Connection.parse_recover_rows([["7", "4", "0", "gt01"]])
+      assert byte_size(digest) == 32
+    end
+
+    test "a partially-numeric gtrid length (Integer.parse accepts it; to_integer crashes) is refused" do
+      assert :error = Connection.parse_recover_rows([["7", "12abc", "0", "gt01"]])
+    end
+
+    test "a partially-numeric format id is refused" do
+      assert :error = Connection.parse_recover_rows([["7F", "4", "0", "gt01"]])
+    end
+
+    test "a gtrid length beyond the data column is refused (binary_part would raise)" do
+      assert :error = Connection.parse_recover_rows([["7", "99", "0", "gt01"]])
+    end
+  end
 end

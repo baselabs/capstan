@@ -171,7 +171,10 @@ The batch closes IMMEDIATELY (never across) on any halt and on snapshot coordina
 ### XA transactions (ADR-0006)
 
 Two-phase XA is opt-in: `xa: :track` (default `:refuse` halts
-`:unsupported_transaction_shape` at the prepare, the original posture). Under `:track` a
+`:unsupported_transaction_shape` at the prepare, the original posture). A **one-phase**
+`XA COMMIT ... ONE PHASE` is an ordinary atomic commit — it carries fully-committed rows
+with no rollback risk, so it is DELIVERED in both modes (the one deliberate deviation
+from the pre-XA unconditional type-38 halt; ADR-0006 §2). Under `:track` a
 prepared transaction's rows are pooled in memory (bounded by `max_prepared_transactions`,
 default 10 000 — exceeding halts `:xa_prepared_pool_exhausted`, never evicted) and
 delivered **exactly once at the resolution**: `XA COMMIT` delivers the pooled rows as one

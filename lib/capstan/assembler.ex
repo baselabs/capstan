@@ -167,8 +167,10 @@ defmodule Capstan.Assembler do
 
   `opts` accepts `tables: :all` (default) or `tables: [{schema, table}, ...]` — the
   allowlist of tables whose rows are delivered (everything else is filtered before row
-  decode) — plus the XA policy (ADR-0006): `xa: :refuse` (default — an `XA_PREPARE`
-  halts `:unsupported_transaction_shape`, the C1 posture byte-for-byte) or
+  decode) — plus the XA policy (ADR-0006): `xa: :refuse` (default — a TWO-PHASE
+  `XA_PREPARE` halts `:unsupported_transaction_shape`, the C1 posture; a `one_phase:
+  true` prepare is an ordinary atomic commit and is DELIVERED in both modes — the one
+  deliberate deviation from C1's unconditional type-38 halt, per ADR-0006 §2) or
   `xa: :track`; `max_prepared_transactions:` (positive integer, default
   #{@default_max_prepared}) bounds the in-memory prepared pool (halt
   `:xa_prepared_pool_exhausted` — never evict, eviction is the silent-loss class); and
@@ -310,7 +312,9 @@ defmodule Capstan.Assembler do
 
   # XA_PREPARE (type 38). one_phase = true is an ordinary single-GTID commit (the
   # prepare IS the commit; no pool entry — ADR-0006 §2). Two-phase is the policy split:
-  # :refuse keeps the C1 halt byte-for-byte; :track pools the buffered transaction
+  # :refuse keeps the C1 halt for TWO-PHASE prepares (a one-phase prepare is an
+  # ordinary atomic commit, delivered in both modes — ADR-0006 §2); :track pools the
+  # buffered transaction
   # under its XID digest and holds the watermark (the core invariant: G_p enters the
   # durable set ONLY in the same write as its resolver G_c).
   defp apply_decoded(state, event, {:xa_prepare, %{one_phase: true}}),

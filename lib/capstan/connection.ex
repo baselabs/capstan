@@ -512,21 +512,29 @@ defmodule Capstan.Connection do
     end
   end
 
-  defp parse_recover_rows(rows) do
+  @doc """
+  Parses `XA RECOVER` resultset rows into XID digests — `{:ok, [digest]}` or `:error`.
+
+  The pure, RED-capable seam `maybe_xa_recover/1` refuses on: a row that is not the
+  documented 4-column binary shape, a NON-INTEGER-NUMERIC cell (span finding O6:
+  `Integer.parse/1` accepts a PARTIAL match like `"12abc"`, which `String.to_integer/1`
+  then crashes on — a malformed row must be the named `:xa_recover_unexpected_shape`
+  establish fault, never an ArgumentError crash), or a `gtrid_length` beyond the data
+  column (`binary_part/3` would raise). Simple-query results are ALL text
+  (Critical Rule 2): every numeric cell is coerced as a FULL integer string.
+  """
+  @spec parse_recover_rows([[binary()]]) :: {:ok, [binary()]} | :error
+  def parse_recover_rows(rows) do
     if Enum.all?(rows, &recover_row?/1) do
       {:ok,
        for [format_id, gtrid_len, _bqual_len, data] <- rows do
-         # Simple-query results are ALL text (Critical Rule 2): coerce before use.
          gtrid_len = String.to_integer(gtrid_len)
-
-         gtrid = binary_part(data, 0, gtrid_len)
-         bqual = binary_part(data, gtrid_len, byte_size(data) - gtrid_len)
 
          Xa.Id.digest(%{
            one_phase: false,
            format_id: String.to_integer(format_id),
-           gtrid: gtrid,
-           bqual: bqual
+           gtrid: binary_part(data, 0, gtrid_len),
+           bqual: binary_part(data, gtrid_len, byte_size(data) - gtrid_len)
          })
        end}
     else
@@ -534,11 +542,22 @@ defmodule Capstan.Connection do
     end
   end
 
-  defp recover_row?([f, gl, _bl, data])
-       when is_binary(f) and is_binary(gl) and is_binary(data),
-       do: Integer.parse(f) != :error and Integer.parse(gl) != :error
+  # The full-row guard: all four cells binary, BOTH numeric cells FULL integer strings
+  # (never a partial `Integer.parse` match), and the gtrid length bounded by the data
+  # column — a row outside this shape is refused, never crashed on.
+  defp recover_row?([f, gl, bl, data])
+       when is_binary(f) and is_binary(gl) and is_binary(bl) and is_binary(data) do
+    full_integer?(f) and full_integer?(gl) and String.to_integer(gl) <= byte_size(data)
+  end
 
   defp recover_row?(_), do: false
+
+  defp full_integer?(cell) do
+    case Integer.parse(cell) do
+      {_n, ""} -> true
+      _ -> false
+    end
+  end
 
   defp send_dump(state) do
     checkpoint_set = Gtid.parse(state.checkpoint_str)

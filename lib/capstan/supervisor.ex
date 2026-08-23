@@ -58,6 +58,16 @@ defmodule Capstan.Supervisor do
     end
   end
 
+  # Rewrite `:start_position` to the RESOLVED %Position{} (span finding C1): the dump and
+  # the assembler's watermark seed must agree. `:current` was resolved late (after the
+  # assembler's opts were built), so the assembler kept the raw atom — which
+  # `start_override/1` discards — and the first checkpoint omitted the skipped interval.
+  # Injecting the resolved value is semantics-preserving for every other start shape (an
+  # explicit %Position{} is already it; a resumed/nil start seeds the same value the
+  # assembler would have read anyway).
+  defp at_start(opts, %Position{} = position), do: Keyword.put(opts, :start_position, position)
+  defp at_start(opts, _unresolved), do: opts
+
   # C1b `:current`: read the server's live `@@gtid_executed` over a short-lived
   # authenticated socket and resume from it ("start from now"). The socket is closed
   # immediately (the Connection opens its own). Any fault fails the start fail-closed.
@@ -130,7 +140,8 @@ defmodule Capstan.Supervisor do
     with {:ok, store} <- add_child(sup, Pipeline.store_spec(impl, store_options)),
          {:ok, resumed} <- CheckpointStore.read_position(impl, store),
          {:ok, start_position} <- resolve_start(opts, resumed),
-         {:ok, assembler} <- add_child(sup, Pipeline.assembler_spec(opts, {impl, store})),
+         {:ok, assembler} <-
+           add_child(sup, Pipeline.assembler_spec(at_start(opts, start_position), {impl, store})),
          {:ok, _connection} <-
            add_child(
              sup,
@@ -150,7 +161,8 @@ defmodule Capstan.Supervisor do
     # lib-owned store read.
     with {:ok, resumed} <- sink.checkpoint(),
          {:ok, start_position} <- resolve_start(opts, resumed),
-         {:ok, assembler} <- add_child(sup, Pipeline.assembler_spec(opts, nil)),
+         {:ok, assembler} <-
+           add_child(sup, Pipeline.assembler_spec(at_start(opts, start_position), nil)),
          {:ok, _connection} <-
            add_child(sup, Pipeline.connection_spec(opts, assembler, start_position, nil)) do
       :ok
@@ -221,7 +233,8 @@ defmodule Capstan.Supervisor do
   # `status: :complete` ⇒ pure C1: the REAL sink is wired directly, no coordinator, no attach —
   # observably identical to the C1 stream.
   defp finish_wire(sup, opts, :complete, {impl, store}, _snapshot_store, start_position) do
-    with {:ok, assembler} <- add_child(sup, Pipeline.assembler_spec(opts, {impl, store})),
+    with {:ok, assembler} <-
+           add_child(sup, Pipeline.assembler_spec(at_start(opts, start_position), {impl, store})),
          {:ok, _connection} <-
            add_child(
              sup,
@@ -240,7 +253,7 @@ defmodule Capstan.Supervisor do
   # watermark feed is a cumulative snapshot, not a delta).
   defp finish_wire(sup, opts, boot, {impl, store}, snapshot_store, start_position) do
     {:snapshot, snapshot_state, readers, processed_set} = boot
-    assembler_opts = Keyword.put(opts, :sink, Coordinator)
+    assembler_opts = opts |> Keyword.put(:sink, Coordinator) |> at_start(start_position)
 
     with {:ok, assembler} <-
            add_child(sup, Pipeline.assembler_spec(assembler_opts, {impl, store})),

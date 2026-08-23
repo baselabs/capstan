@@ -84,7 +84,6 @@ defmodule Capstan.AssemblerServer do
     :batch_pending,
     :batch_units,
     :batch_flush_timer,
-    :last_output,
     :processed_set,
     :max_retries,
     # C2 snapshot spine hooks (both absent in all of C1 ⇒ byte-identical behavior):
@@ -205,7 +204,6 @@ defmodule Capstan.AssemblerServer do
               batch_pending: [],
               batch_units: [],
               batch_flush_timer: nil,
-              last_output: nil,
               processed_set: Gtid.parse(start_position.gtid_set),
               max_retries: max_retries,
               watermark_observer: watermark_observer,
@@ -249,7 +247,6 @@ defmodule Capstan.AssemblerServer do
           batch_pending: [],
           batch_units: [],
           batch_flush_timer: nil,
-          last_output: nil,
           processed_set: Gtid.parse(start_position.gtid_set),
           max_retries: max_retries,
           watermark_observer: watermark_observer,
@@ -318,9 +315,13 @@ defmodule Capstan.AssemblerServer do
   # correct row-less advance rather than a desync halt (ADR-0006 §4).
   @impl true
   def handle_info({:xa_recover, digests}, state) when is_list(digests) do
+    # RESET, never union (span finding O2): XA RECOVER runs at EVERY establish and reports
+    # the CURRENTLY dangling set — that set is authoritative. A monotone union would (a)
+    # grow unbounded across reconnects and (b) keep treating a once-dangling XID's later
+    # resolution as a benign row-less advance forever, permanently weakening the
+    # :xa_commit_without_prepare / :xa_rollback_without_prepare desync detector.
     asm = state.assembler
-    merged = %{asm | startup_xids: MapSet.union(asm.startup_xids, MapSet.new(digests))}
-    {:noreply, %{state | assembler: merged}}
+    {:noreply, %{state | assembler: %{asm | startup_xids: MapSet.new(digests)}}}
   end
 
   # The timer fires ⇒ close whatever is pending NOW (the deadline form of the bound).
@@ -431,8 +432,10 @@ defmodule Capstan.AssemblerServer do
   # filtered/empty signal rather than have this site infer it from the representation.
   defp dispatch(%Transaction{changes: []} = txn, state) do
     # C3: an empty/filtered transaction checkpoints through the batch too — the
-    # watermark advance IS the durable side effect here (no sink call).
-    with {:ok, state} <- batch_aware_checkpoint(state, txn.position) do
+    # watermark advance IS the durable side effect here (no sink call, and NO batch
+    # unit: this txn delivered nothing, so its entry must not carry one — span finding
+    # C3: an inherited previous unit here double-delivered it).
+    with {:ok, state} <- batch_aware_checkpoint(state, txn.position, nil) do
       emit_filtered(txn.gtid)
       {:ok, state}
     end
@@ -445,9 +448,8 @@ defmodule Capstan.AssemblerServer do
   # sink call here — the unit + its position pool, and `handle_batch/2` delivers the
   # whole batch atomically at the flush (the batch effect-once contract).
   defp dispatch(%Transaction{} = txn, %__MODULE__{batch: %{mode: :sink_owned}} = state) do
-    state = %{state | last_output: txn}
     emit_committed(txn.gtid, length(txn.changes), 0)
-    batch_aware_checkpoint(state, txn.position)
+    batch_aware_checkpoint(state, txn.position, txn)
   end
 
   defp dispatch(%Transaction{} = txn, state) do
@@ -461,7 +463,7 @@ defmodule Capstan.AssemblerServer do
       {:ok, _position} ->
         sink_ms = monotonic_ms_since(started)
 
-        with {:ok, state} <- batch_aware_checkpoint(state, txn.position) do
+        with {:ok, state} <- batch_aware_checkpoint(state, txn.position, txn) do
           emit_committed(txn.gtid, change_count, sink_ms)
           {:ok, state}
         end
@@ -484,6 +486,16 @@ defmodule Capstan.AssemblerServer do
   # Assembler must carry a per-output position (as `%Transaction{}` already does) rather
   # than have this site read the shared post-step position.
   defp dispatch(%SchemaChange{} = schema_change, state) do
+    # Span finding C2: a DDL arriving with a PENDING batch must flush it FIRST. The DDL
+    # checkpoints its own (newer) position; if the queue held UNDELIVERED units
+    # (sink-owned batch mode), persisting past them would skip their delivery entirely
+    # across a crash. Flushing here preserves watermark ≤ delivered+persisted.
+    with {:ok, state} <- flush_pending_batch(state) do
+      dispatch_schema_change(schema_change, state)
+    end
+  end
+
+  defp dispatch_schema_change(schema_change, state) do
     position = Assembler.position(state.assembler)
 
     case state.sink.handle_schema_change(schema_change, position) do
@@ -510,11 +522,15 @@ defmodule Capstan.AssemblerServer do
   ## batch) — each closes IMMEDIATELY, never across.
   ## ---------------------------------------------------------------------------
 
-  defp batch_aware_checkpoint(%__MODULE__{batch: nil} = state, position) do
+  defp batch_aware_checkpoint(%__MODULE__{batch: nil} = state, position, _unit) do
     checkpoint(state, position)
   end
 
-  defp batch_aware_checkpoint(%__MODULE__{batch: %{mode: :lib_owned} = cfg} = state, position) do
+  defp batch_aware_checkpoint(
+         %__MODULE__{batch: %{mode: :lib_owned} = cfg} = state,
+         position,
+         _unit
+       ) do
     pending = [%{position: position, enqueued_at: System.monotonic_time()} | state.batch_pending]
     state = %{state | batch_pending: pending}
 
@@ -525,10 +541,16 @@ defmodule Capstan.AssemblerServer do
     end
   end
 
-  defp batch_aware_checkpoint(%__MODULE__{batch: %{mode: :sink_owned} = cfg} = state, position) do
-    # The unit that produced this advance rides along for handle_batch/2.
+  defp batch_aware_checkpoint(
+         %__MODULE__{batch: %{mode: :sink_owned} = cfg} = state,
+         position,
+         unit
+       ) do
+    # The unit that produced this advance rides along for handle_batch/2 — EXPLICITLY
+    # (nil for an advance that delivered nothing: a filtered/empty txn must not inherit
+    # a stale previous unit, span finding C3).
     pending = [
-      %{position: position, enqueued_at: System.monotonic_time(), unit: state.last_output}
+      %{position: position, enqueued_at: System.monotonic_time(), unit: unit}
       | state.batch_pending
     ]
 
@@ -556,6 +578,18 @@ defmodule Capstan.AssemblerServer do
     {:ok, %{state | batch_flush_timer: timer}}
   end
 
+  # Flush whatever is queued RIGHT NOW (a no-op with no batch / empty queue). Used by
+  # the schema-change path (span finding C2) so a DDL never checkpoints past pending —
+  # possibly undelivered — batch work.
+  defp flush_pending_batch(%__MODULE__{batch_pending: []} = state), do: {:ok, state}
+  defp flush_pending_batch(%__MODULE__{batch: nil} = state), do: {:ok, state}
+
+  defp flush_pending_batch(%__MODULE__{batch: %{mode: :lib_owned}} = state),
+    do: flush_batch(state)
+
+  defp flush_pending_batch(%__MODULE__{batch: %{mode: :sink_owned}} = state),
+    do: flush_sink_batch(state)
+
   # Lib-owned flush: ONE durable write of the batch's FINAL position (the newest — the
   # processed watermark is a set; the newest position subsumes the batch).
   defp flush_batch(%__MODULE__{} = state) do
@@ -568,7 +602,8 @@ defmodule Capstan.AssemblerServer do
   end
 
   # Sink-owned flush: the batch's units + final position, atomically, via handle_batch/2.
-  # The units are the pending entries' delivered outputs (last_output at each advance).
+  # The units are the pending entries' delivered outputs (the explicit unit each entry
+  # was enqueued with — nil entries delivered nothing and contribute no unit).
   defp flush_sink_batch(%__MODULE__{} = state) do
     entries = Enum.reverse(state.batch_pending)
     %{position: position} = List.last(entries)

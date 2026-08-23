@@ -549,15 +549,17 @@ defmodule Capstan.Snapshot.Coordinator do
   ## resume recompute (ADR-0012, adversarial finding 2)
   ## ---------------------------------------------------------------------------
 
-  # At bootstrap, every ACTIVE string table with a dual cursor has its `.weight` half
-  # RECOMPUTED from the persisted `.raw` (one pinned batch per pk column): a server change
-  # between run and resume could alter weight forms, and an old-form cursor compared against
-  # fresh keys would mis-order silently. `pk_cursor` and `delivered_pk` both recompute.
+  # At bootstrap, every ACTIVE string table with a dual cursor — EITHER half (span finding
+  # O1: the F1 first-chunk crash window persists `delivered_pk` as a dual while `pk_cursor`
+  # is still `:start`, and the delete threshold compares in weight space too) — has its
+  # `.weight` half RECOMPUTED from the persisted `.raw`: a server change between run and
+  # resume could alter weight forms, and an old-form cursor compared against fresh keys
+  # would mis-order silently. `pk_cursor` and `delivered_pk` both recompute.
   defp recompute_resume_weights(state) do
     state.snapshot_state.tables
     |> Enum.filter(fn {_key, progress} ->
-      progress.done? == false and is_map_key(progress, :pk_cursor) and
-        match?(%{raw: _}, progress.pk_cursor)
+      progress.done? == false and
+        (dual_cursor?(progress, :pk_cursor) or dual_cursor?(progress, :delivered_pk))
     end)
     |> Enum.reduce_while({:ok, state}, fn {key, progress}, {:ok, state2} ->
       case recompute_table_weights(key, progress, state2) do
@@ -574,6 +576,11 @@ defmodule Capstan.Snapshot.Coordinator do
       {:error, reason} -> {:halt, reason}
     end
   end
+
+  # The named cursor field is the dual form (a `%{raw: _, weight: _}` map, not `:start`
+  # or a bare canonical); an absent field (a pre-F1 durable state) reads as not-dual.
+  defp dual_cursor?(progress, field),
+    do: match?(%{raw: _}, Map.get(progress, field))
 
   defp recompute_table_weights(key, progress, state) do
     with {:ok, cursor2, state2} <- recompute_dual(key, progress.pk_cursor, state),

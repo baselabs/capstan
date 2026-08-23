@@ -25,6 +25,13 @@ defmodule Capstan.AssemblerServerTest.RecordingSink do
     send(cfg.report_to, {:handle_schema_change, schema_change, position})
     cfg.on_schema_change.(schema_change, position)
   end
+
+  @impl Capstan.Sink
+  def handle_batch(units, position) do
+    cfg = config()
+    send(cfg.report_to, {:handle_batch, units, position})
+    cfg.on_batch.(units, position)
+  end
 end
 
 defmodule Capstan.AssemblerServerTest.FailingStore do
@@ -686,12 +693,114 @@ defmodule Capstan.AssemblerServerTest do
     end
   end
 
+  ## ===========================================================================
+  ## Sink-owned batch mode — the span-review trio (C2/C3/O2)
+  ##
+  ## Cross-vendor findings (codex round + the mined opus transcript), all CONFIRMED by
+  ## direct read: an empty/filtered txn stamps its pending batch entry with the STALE
+  ## `last_output` (double delivery); a schema change bypasses the pending queue (its
+  ## checkpoint can skip undelivered units); `startup_xids` unions monotonically across
+  ## reconnects (a once-dangling XID's later resolution is absorbed instead of halting).
+  ## ===========================================================================
+
+  describe "sink-owned batch — a filtered txn contributes NO unit (span finding C3)" do
+    test "a filtered txn after a delivered one flushes ONE unit, not the stale unit twice" do
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+
+      server =
+        start_server(
+          store: store,
+          batch: [mode: :sink_owned, max_transactions: 2, flush_ms: 60_000]
+        )
+
+      # A delivered transaction (queued as the batch's first unit — NO per-transaction
+      # sink call in sink-owned mode), then a FILTERED transaction (an empty synthesized
+      # txn): it advances the watermark but contributes NO delivered output. The bound (2)
+      # fires the flush.
+      feed(server, raws("simple_dml", @dml_txn))
+      feed(server, filtered_txn_raws())
+
+      # RED (stale last_output): the batch carries the delivered txn TWICE.
+      assert_receive {:handle_batch, units, _position}, 2000
+
+      assert length(units) == 1,
+             "a filtered txn duplicated the previous unit: #{length(units)} units"
+    end
+  end
+
+  describe "sink-owned batch — a schema change flushes the queue first (span finding C2)" do
+    test "a DDL with a pending (undelivered) batch flushes BEFORE the DDL checkpoints" do
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+
+      server =
+        start_server(
+          store: store,
+          batch: [mode: :sink_owned, max_transactions: 100, flush_ms: 60_000]
+        )
+
+      # A delivered transaction queued (bound far away — only the DDL can flush it)...
+      feed(server, raws("simple_dml", @dml_txn))
+
+      # ...then a self-committing DDL arrives while the txn's unit is still queued.
+      feed(server, ddl_after_txn_raws())
+
+      # RED (bypass): no handle_batch ever fires — the DDL's checkpoint skips the queued,
+      # UNDELIVERED unit (a crash there loses it permanently).
+      assert_receive {:handle_batch, [_unit], _position}, 2000
+      assert_receive {:handle_schema_change, %SchemaChange{}, _position}, 2000
+    end
+  end
+
+  describe "xa_recover — the digest set RESETS per establish (span finding O2)" do
+    test "a once-dangling XID absent from the CURRENT recover set halts, not row-less advance" do
+      {:ok, store} = @in_memory.start_link()
+      configure_sink()
+
+      server = start_server(store: store, xa: :track)
+      ref = Process.monitor(server)
+
+      # The fixture's XA COMMIT resolution XID, pre-computed from the fixture bytes.
+      digest = fixture_xa_digest()
+
+      # Establish 1 saw the XID dangling; establish 2 (a reconnect) sees it GONE — the
+      # authoritative current set. The stale union would keep absorbing its resolution.
+      send(server, {:xa_recover, [digest]})
+      send(server, {:xa_recover, []})
+
+      # The resolution QUERY for the no-longer-dangling, never-pooled XID: with the reset
+      # this is a desync we refuse to guess at (:xa_commit_without_prepare); with the
+      # monotone union it is silently absorbed as a row-less advance.
+      feed(server, xa_commit_resolution_raws())
+
+      assert_receive {:DOWN, ^ref, :process, ^server,
+                      {:shutdown, {:halt, :xa_commit_without_prepare}}},
+                     2000
+    end
+  end
+
   ## ---------------------------------------------------------------------------
   ## helpers
   ## ---------------------------------------------------------------------------
 
   defp start_server(opts) do
     store = Keyword.fetch!(opts, :store)
+
+    # `:batch` arrives as the user keyword; the server matches the NORMALIZED map
+    # (exactly what Capstan.Config.fetch_batch/1 produces before AssemblerServer sees it).
+    opts =
+      Keyword.update(opts, :batch, nil, fn
+        nil ->
+          nil
+
+        batch ->
+          %{
+            mode: Keyword.get(batch, :mode, :lib_owned),
+            max_transactions: Keyword.fetch!(batch, :max_transactions),
+            flush_ms: Keyword.fetch!(batch, :flush_ms)
+          }
+      end)
 
     # The `:watermark_observer` key is passed ONLY when the test sets it, so a test that
     # omits it exercises the byte-identical (option-absent) C1 path.
@@ -706,7 +815,7 @@ defmodule Capstan.AssemblerServerTest do
         sink: RecordingSink,
         checkpoint_store: {@in_memory, store},
         tables: Keyword.get(opts, :tables, :all)
-      ] ++ observer_opts
+      ] ++ observer_opts ++ Keyword.take(opts, [:batch, :xa])
 
     {:ok, pid} = GenServer.start(AssemblerServer, server_opts)
     on_exit(fn -> if Process.alive?(pid), do: safe_stop(pid) end)
@@ -723,7 +832,8 @@ defmodule Capstan.AssemblerServerTest do
     base = %{
       report_to: self(),
       on_transaction: fn txn -> {:ok, txn.position} end,
-      on_schema_change: fn _sc, _pos -> :ok end
+      on_schema_change: fn _sc, _pos -> :ok end,
+      on_batch: fn _units, position -> {:ok, position} end
     }
 
     config = Enum.reduce(overrides, base, fn {k, v}, acc -> Map.put(acc, k, v) end)
@@ -776,6 +886,26 @@ defmodule Capstan.AssemblerServerTest do
         0::16-little, body::binary>>
 
     <<payload::binary, :erlang.crc32(payload)::32-little>>
+  end
+
+  # An EMPTY synthesized transaction (GTID + XID, no rows): the filtered/empty-changes
+  # dispatch shape (a table-filtered txn or a no-op) for the span-review batch tests.
+  defp filtered_txn_raws(gno \\ 2), do: [gtid_raw(gno), xid_raw(gno)]
+
+  # The alter_ddl fixture's self-committing DDL pair (GTID + ALTER QUERY), fed after a DML
+  # transaction — the schema-change-arrives-with-a-pending-batch shape.
+  defp ddl_after_txn_raws, do: raws("alter_ddl", ["05-gtid.bin", "06-query.bin"])
+
+  # The xa fixture's XA COMMIT resolution pair (GTID + the resolution QUERY).
+  defp xa_commit_resolution_raws, do: raws("xa", ["11-gtid.bin", "12-query.bin"])
+
+  # The xa fixture's resolution XID — decoded from the captured
+  # `XA COMMIT X'78612d6774726964',X'78612d627175616c',7` (gtrid "xa-gtrid", bqual
+  # "xa-bqual", decimal format_id 7 — the DECIMAL form the fixture's parse accepts).
+  defp fixture_xa_digest do
+    alias Capstan.Xa.Id
+
+    Id.digest(%{one_phase: false, format_id: 7, gtrid: "xa-gtrid", bqual: "xa-bqual"})
   end
 
   # A GTID event body: flags(1) + source-id(16) + gno(8, signed) + (ignored rest).
