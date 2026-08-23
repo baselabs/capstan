@@ -220,6 +220,15 @@ defmodule Capstan.ConfigTest do
       assert {:error, :unknown_option} =
                Config.validate_snapshot(opts(tables: [{"a", "b"}], snapshot: snapshot))
     end
+
+    test "a store value shaped like an error tuple never leaks into the refusal channel (Rule 1)" do
+      # {:error, "s3cret-val"} as a module VALUE must collapse to the value-free
+      # :config_invalid — the refusal channel carries atoms only, never config terms.
+      snapshot = [store: [module: {:error, "s3cret-val"}]]
+
+      assert {:error, :config_invalid} =
+               Config.validate_snapshot(opts(tables: [{"a", "b"}], snapshot: snapshot))
+    end
   end
 
   ## ---------------------------------------------------------------------------

@@ -249,9 +249,11 @@ defmodule Capstan.Config do
     * `chunk_size` — a POSITIVE integer, default `#{@default_snapshot_chunk_size}`.
 
   Any mis-shaped field fails closed with the value-free `:config_invalid` (the generic
-  mis-shaped-option refusal, as elsewhere in this module).
+  mis-shaped-option refusal, as elsewhere in this module); an unrecognized key in the
+  block or its store refuses `:unknown_option`.
   """
-  @spec validate_snapshot(keyword()) :: {:ok, snapshot_config() | nil} | {:error, :config_invalid}
+  @spec validate_snapshot(keyword()) ::
+          {:ok, snapshot_config() | nil} | {:error, :config_invalid | :unknown_option}
   def validate_snapshot(opts) when is_list(opts) do
     case Keyword.get(opts, :snapshot) do
       nil ->
@@ -531,9 +533,10 @@ defmodule Capstan.Config do
          true <- Keyword.keyword?(options) do
       {:ok, {module, options}}
     else
-      # An explicit value-free refusal (:unknown_option) passes through; only the
-      # shape-match failures map to the generic :config_invalid.
-      {:error, _reason} = error -> error
+      # Only the explicit value-free :unknown_option passes through; every other failed
+      # match — including a VALUE shaped like an error tuple (Rule 1: the refusal channel
+      # carries atoms only, never config terms) — collapses to :config_invalid.
+      {:error, :unknown_option} = error -> error
       _ -> {:error, :config_invalid}
     end
   end

@@ -140,7 +140,7 @@ defmodule Capstan do
           not Keyword.keyword?(config) ->
             {:error, :checkpoint_store_required}
 
-          Keyword.keys(config) -- [:module, :options] != [] ->
+          Enum.any?(Keyword.keys(config), &(&1 not in [:module, :options])) ->
             {:error, :unknown_option}
 
           not (is_atom(Keyword.get(config, :module)) and Keyword.get(config, :module) != nil) ->

@@ -340,6 +340,19 @@ defmodule Capstan.SupervisorTest do
                  lib_opts(checkpoint_store: [module: Capstan.CheckpointStore.InMemory, modul: X])
                )
     end
+
+    test "a duplicated known checkpoint_store key is first-wins, matching the snapshot store block" do
+      # Keyword semantics: the first occurrence wins, and BOTH store blocks treat
+      # duplicates identically (the snapshot side's membership test accepts them).
+      {:ok, sup} =
+        Capstan.start_link(
+          lib_opts(checkpoint_store: [module: Capstan.CheckpointStore.InMemory, module: NotTaken])
+        )
+
+      on_exit(fn -> stop_supervisor(sup) end)
+      ids = sup |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
+      assert :store in ids
+    end
   end
 
   describe "supervision — a fail-closed halt does not take down the host supervisor" do
