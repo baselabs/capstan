@@ -402,6 +402,12 @@ with it).
 - `:snapshot_pk_weight_failed` — resolving a string PK's collation weights (ADR-0012) failed
   on the source beyond the shared retry budget; an ungated change would be a silent gap/dup,
   so the pipeline halts fail-closed instead.
+- `:snapshot_collation_contract_violated` — the bootstrap order-contract canary found the
+  source's `WEIGHT_STRING` byte order DISAGREEING with its `ORDER BY` order over a fixed
+  ASCII vector under the column's collation (ADR-0012). Every gate decision rests on that
+  equality; a server that breaks it would mis-gate silently, so the snapshot refuses to
+  open instead. A canary, not a proof — it covers the case/prefix/digit order classes the
+  suite exercises, not every character a future server could reorder.
 - `:snapshot_lock_unavailable` — the brief `LOCK TABLES … READ` failed (missing `LOCK TABLES`
   privilege, or a lock-wait timeout) beyond the retry budget.
 - `:snapshot_schema_drifted` — a snapshot table's structure changed mid-backfill (a per-chunk

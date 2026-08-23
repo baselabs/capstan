@@ -374,6 +374,50 @@ defmodule Capstan.Snapshot.PrimaryKeyTest do
   end
 
   ## ---------------------------------------------------------------------------
+  ## order_contract_sql/3 + order_contract_ok?/2 — the ADR-0012 canary seam (the
+  ## residual made loud: a server whose two orders disagree refuses BEFORE any
+  ## gate decision, fail-closed :snapshot_collation_contract_violated).
+  ## ---------------------------------------------------------------------------
+
+  describe "order_contract_sql/3 — the bootstrap canary SQL" do
+    test "one pinned literal per canary vector entry, ordered by the requested key" do
+      by_collation = PrimaryKey.order_contract_sql("utf8mb4", "utf8mb4_0900_ai_ci", :collation)
+      by_weight = PrimaryKey.order_contract_sql("utf8mb4", "utf8mb4_0900_ai_ci", :weight)
+
+      assert by_collation =~ "CONVERT(X'61' USING utf8mb4) COLLATE utf8mb4_0900_ai_ci AS v"
+      assert by_collation =~ "ORDER BY v"
+      assert by_weight =~ "ORDER BY WEIGHT_STRING(v)"
+      # The collation-ordered form must not accidentally order by the weights too.
+      refute by_collation =~ "ORDER BY WEIGHT_STRING"
+    end
+  end
+
+  describe "order_contract_ok?/2 — the canary verdict" do
+    test "agreeing sequences pass, a transposition fails (the tripwire's RED class)" do
+      agree = [["0141"], ["0259"], ["0266"]]
+
+      assert PrimaryKey.order_contract_ok?(agree, agree)
+      assert PrimaryKey.order_contract_ok?([["0141"], ["0259"]], [["0141"], ["0259"]])
+      # Hex case is not a contract signal.
+      assert PrimaryKey.order_contract_ok?([["0141"]], [["0141"]])
+
+      refute PrimaryKey.order_contract_ok?([["0141"], ["0259"], ["0266"]], [
+               ["0266"],
+               ["0141"],
+               ["0259"]
+             ])
+    end
+
+    test "TIES are safe — collation-equal values carry equal weights, so both orders agree" do
+      # Two vector entries equal under the collation: their weights are equal, and the
+      # two sequences match regardless of which equal entry lands where.
+      tied_a = [["0141"], ["0141"], ["0259"]]
+      tied_b = [["0141"], ["0141"], ["0259"]]
+      assert PrimaryKey.order_contract_ok?(tied_a, tied_b)
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
   ## weight_sql/3 — the pure stream-side weight-resolution SQL builder (ADR-0012).
   ##
   ## Every literal is COLLATE-PINNED to the column's collation: an unpinned CONVERT

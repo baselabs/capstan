@@ -77,6 +77,11 @@ and in the NOT-NULL unique-key fallback — with the **server as the only collat
   errors, or telemetry.
 - `WEIGHT_STRING()`'s version-mutability is contained, not assumed away: both sides of every
   comparison come from the same server in the same run, and resume recomputes the cursor half.
+  The ORDER contract itself is CANARIED at every snapshot open (bootstrap and resume): a
+  fixed ASCII vector is ordered by the collation and by its weight bytes under each string
+  PK column's own pin, and a disagreement refuses
+  `:snapshot_collation_contract_violated` before any decision — the "future server changes
+  the order contract" residual is a loud halt, not a silent mis-gate.
 
 ## Evidence
 

@@ -34,6 +34,12 @@ All notable changes to capstan are documented here. The format follows
   transaction carrying a NEW string key pays ≥1 weight-resolution round trip
   (repeated keys hit a bounded cache); composite row-value pagination remains a full
   index scan per page (pre-existing for composites of any type).
+- Derisk: a bootstrap order-contract canary runs once per string PK column at snapshot
+  open (bootstrap and resume) — a source whose `WEIGHT_STRING` byte order disagrees
+  with its `ORDER BY` order over the canary vector refuses
+  `:snapshot_collation_contract_violated` before any chunk or gate decision. This
+  converts the residual "a future server could change the order contract silently"
+  into a loud, value-free halt.
 
 ### Changed — presentation overhaul (docs as product)
 

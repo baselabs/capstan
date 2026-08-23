@@ -228,6 +228,52 @@ defmodule Capstan.Snapshot.PrimaryKey do
   end
 
   ## ---------------------------------------------------------------------------
+  ## the order-contract canary (ADR-0012's residual, made loud)
+  ## ---------------------------------------------------------------------------
+
+  # A fixed ASCII canary vector: every MySQL charset is ASCII-compatible, so these
+  # literals are representable under any column charset. The case-inversion band
+  # ('a'/'A'/'Z'/'b') is exactly the class the probe proved byte-order diverges on;
+  # '0' and the 'a'/'ab' pair cover the digit and prefix rules. A CANARY, not a proof:
+  # a divergence touching only characters outside the vector would still pass — the
+  # documented scope of this tripwire.
+  @canary_hex ["61", "41", "5A", "62", "30", "6162"]
+
+  @doc """
+  Builds the bootstrap order-contract canary SQL for one string pk column.
+
+  Two queries over the same fixed ASCII vector, introduced with the column's own
+  charset + collation pin: the first orders by the COLLATION (`ORDER BY v`), the
+  second by the WEIGHT BYTES (`ORDER BY WEIGHT_STRING(v)`), each returning one
+  hex-encoded weight per row. Under MySQL's documented order contract the two
+  weight sequences are EQUAL (`order_contract_ok?/2`) — the gate's every decision
+  rests on that equality.
+  """
+  @spec order_contract_sql(String.t(), String.t(), :collation | :weight) :: String.t()
+  def order_contract_sql(charset, collation, order_by)
+      when is_binary(charset) and is_binary(collation) and order_by in [:collation, :weight] do
+    vector =
+      Enum.map_join(@canary_hex, " UNION ALL ", fn hex ->
+        "SELECT CONVERT(X'#{hex}' USING #{charset}) COLLATE #{collation} AS v"
+      end)
+
+    order = if order_by == :weight, do: "WEIGHT_STRING(v)", else: "v"
+
+    "SELECT HEX(WEIGHT_STRING(v)) FROM (#{vector}) vec ORDER BY #{order}"
+  end
+
+  @doc """
+  The canary verdict: the collation-ordered weight sequence equals the weight-ordered
+  one. Ties are inherently safe — collation-equal values carry equal weights, so both
+  sequences show the same bytes at tie positions.
+  """
+  @spec order_contract_ok?([[binary()]], [[binary()]]) :: boolean()
+  def order_contract_ok?(by_collation, by_weight) do
+    normalize = &Enum.map(&1, fn [hex] -> hex |> String.downcase() end)
+    normalize.(by_collation) == normalize.(by_weight)
+  end
+
+  ## ---------------------------------------------------------------------------
   ## weight resolution (ADR-0012) — the server as the only collation oracle
   ## ---------------------------------------------------------------------------
 

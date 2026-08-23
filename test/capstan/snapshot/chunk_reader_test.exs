@@ -223,6 +223,18 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
                  "COLLATE utf8mb4_0900_ai_ci ORDER BY `code` LIMIT 4097"
     end
 
+    test "a VIOLATED order contract refuses open :snapshot_collation_contract_violated (the canary tripwire)" do
+      # ADR-0012's residual, made loud: a future server whose WEIGHT_STRING byte order
+      # diverges from ORDER BY would mis-gate silently. The bootstrap canary compares the
+      # two orders over a fixed ASCII vector per string pk column — a disagreement halts
+      # fail-closed BEFORE any chunk or gate decision. RED (pre-tripwire): open succeeded.
+      cfg = varchar_cfg(contract: :violated)
+      {query, _agent} = start_mock(build_cfg(cfg))
+
+      assert {:error, :snapshot_collation_contract_violated} =
+               ChunkReader.open(query, {"test", "t"})
+    end
+
     test "the pin names the COLUMN's charset and collation (latin1 / non-default collations)" do
       for {charset, collation} <- [
             {"latin1", "latin1_swedish_ci"},
@@ -884,7 +896,8 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
         :chunk_rows,
         :gtid,
         :projection_ncols,
-        :fault
+        :fault,
+        :contract
       ])
 
   defp recorded(agent), do: agent |> Agent.get(& &1.recorded) |> Enum.reverse()
@@ -971,6 +984,20 @@ defmodule Capstan.Snapshot.ChunkReaderTest do
 
   defp introspection_response(sql, cfg) do
     cond do
+      # The order-contract canary's weight-ordered half (`... ORDER BY WEIGHT_STRING(v)`);
+      # `:contract => :violated` scripts a disagreement for the tripwire's RED test.
+      sql =~ "ORDER BY WEIGHT_STRING" ->
+        rows =
+          if cfg[:contract] == :violated,
+            do: [["0266"], ["0141"], ["0259"]],
+            else: [["0141"], ["0259"], ["0266"]]
+
+        {:response, {:rows, 1, rows}}
+
+      # The canary's collation-ordered half (`... ORDER BY v`).
+      sql =~ "ORDER BY v" ->
+        {:response, {:rows, 1, [["0141"], ["0259"], ["0266"]]}}
+
       sql =~ "information_schema.STATISTICS" ->
         {:response, {:rows, 4, cfg.statistics}}
 

@@ -187,7 +187,8 @@ defmodule Capstan.Snapshot.ChunkReader do
   def open(%Query{} = query, {schema, table}, opts \\ [])
       when is_binary(schema) and is_binary(table) do
     with {:ok, key} <- introspect_key(query, {schema, table}),
-         {:ok, column_rows} <- read_columns_for_open(query, schema, table) do
+         {:ok, column_rows} <- read_columns_for_open(query, schema, table),
+         :ok <- check_order_contract(query, key) do
       projection = projection_of(column_rows)
 
       {:ok,
@@ -207,6 +208,52 @@ defmodule Capstan.Snapshot.ChunkReader do
          max_retries: Keyword.get(opts, :max_retries, CheckpointStore.default_max_retries()),
          seq: Keyword.get(opts, :seq, 0)
        }}
+    end
+  end
+
+  # The ADR-0012 order-contract canary, run ONCE per string pk column at open (bootstrap
+  # and resume): MySQL's documented contract says WEIGHT_STRING byte order == ORDER BY
+  # order, and the gate's every decision rests on that equality. A server whose two
+  # orders disagree (a future release changing the CONTRACT, not just the byte form —
+  # byte-form changes are absorbed by same-run comparison + the resume recompute) would
+  # mis-gate silently; the canary refuses BEFORE any chunk or gate decision, fail-closed
+  # and value-free. A canary QUERY fault is a transient open read fault (the same class
+  # as the introspection reads).
+  defp check_order_contract(query, %{
+         pk_types: types,
+         pk_charsets: charsets,
+         pk_collations: collations
+       }) do
+    string_pins =
+      types
+      |> Enum.zip(charsets)
+      |> Enum.zip(collations)
+      |> Enum.filter(fn {{type, _cs}, _co} -> type in [:char, :varchar] end)
+      |> Enum.map(fn {{_type, cs}, co} -> {cs, co} end)
+
+    Enum.reduce_while(string_pins, :ok, fn {charset, collation}, :ok ->
+      canary_one(query, charset, collation)
+    end)
+  end
+
+  defp canary_one(query, charset, collation) do
+    case canary_sequences(query, charset, collation) do
+      {:ok, by_collation, by_weight} ->
+        if PrimaryKey.order_contract_ok?(by_collation, by_weight),
+          do: {:cont, :ok},
+          else: {:halt, {:error, :snapshot_collation_contract_violated}}
+
+      {:error, _reason} ->
+        {:halt, {:error, :snapshot_chunk_read_failed}}
+    end
+  end
+
+  defp canary_sequences(query, charset, collation) do
+    with {:ok, by_collation} <-
+           Query.query(query, PrimaryKey.order_contract_sql(charset, collation, :collation)),
+         {:ok, by_weight} <-
+           Query.query(query, PrimaryKey.order_contract_sql(charset, collation, :weight)) do
+      {:ok, by_collation, by_weight}
     end
   end
 
