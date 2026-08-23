@@ -7,8 +7,9 @@ registry, TLS posture), the dev workflow, testing, and the local substrate.
 
 Quick pointers:
 
-- **Local MySQL substrate:** `scripts/dev-substrate.sh` (8.0 @ :5633, 8.4 @ :5634, with the
-  `capstan_sha2` replication user). Never restart or duplicate a running container.
+- **Local MySQL substrate:** `scripts/dev-substrate.sh` (8.0 and 8.4 on `127.0.0.1`, ports from
+  `.env` — `MYSQL_PORT_80`/`MYSQL_PORT_84`, defaults 11619/15401 — with the `capstan_sha2`
+  replication user). Never restart or duplicate a running container.
 - **Gates:** `mix compile --warnings-as-errors && mix test && mix quality`.
 - **Status / scope:** `docs/ROADMAP.md` (authored) + `.forge/plans/` (task-level, machine-local).
   The plan is the source of truth — do not re-derive scope from the code.
