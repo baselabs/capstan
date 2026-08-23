@@ -330,7 +330,16 @@ an uncompressed source would deliver. GTID/control/non-transactional events stil
 on such sources (a mix, by construction). A malformed payload — a non-ZSTD compression type,
 any zstd corruption signal, an uncompressed-size mismatch, a malformed inner header — halts
 with a value-free reason (`{:payload_header, _}` / `{:payload_inflate, _}` /
-`{:payload_inner, _}`); nothing is ever partially decoded.
+`{:payload_inner, _}`); nothing is ever partially decoded. One named envelope:
+a payload whose declared or inflated size exceeds **1 GiB** refuses
+`:payload_too_large` — checked on the DECLARATION before a byte is allocated,
+so a zip-bomb frame costs nothing. The 1 GiB constant
+(`Capstan.Binlog.TransactionPayload`, `@max_inflated_bytes`) is an operating
+envelope consistent with the rest of the system — the assembler buffers whole
+transactions in memory, so a >1 GiB single transaction is beyond capstan's
+working set regardless of the decoder. Sources with legitimately larger
+transactions need that constant revisited (and a streaming assembler design
+with it).
 
 **Connection** halts:
 

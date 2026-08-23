@@ -113,6 +113,62 @@ defmodule Capstan.ZstdTest do
     assert {:error, :bad_magic} = Zstd.decompress(<<>>)
   end
 
+  # -- XXH64 conformance: oracle digests through the production verify path -------------
+
+  describe "content-checksum verification against the independent-oracle vectors" do
+    @vectors Path.expand("../fixtures/xxh64", __DIR__)
+
+    test "every oracle-vector input verifies and round-trips in a checksummed frame" do
+      # MySQL never emits checksummed frames, so the oracle for this path is the
+      # committed vector table: inputs + digests computed by an INDEPENDENT
+      # spec-derived C implementation (provenance: test/fixtures/xxh64/README.md).
+      # Each input is wrapped in a single-segment raw-block frame carrying the
+      # ORACLE digest — decompress must verify (capstan's XXH64 == the oracle's,
+      # through the real verification code path) and return the input bytes.
+      digests =
+        @vectors
+        |> Path.join("digests.txt")
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&String.split/1)
+
+      assert length(digests) >= 39
+
+      for [name, digest_hex] <- digests do
+        input = File.read!(Path.join(@vectors, name))
+        digest = String.to_integer(digest_hex, 16)
+        frame = checksummed_frame(input, digest)
+
+        assert {:ok, ^input} = Zstd.decompress(frame), "checksum verify failed: #{name}"
+      end
+    end
+
+    test "a frame whose checksum is NOT the oracle digest is refused" do
+      # Tripwire: a flipped checksum bit must fail the verification, never
+      # decompress silently (the entire point of verifying the field).
+      input = File.read!(Path.join(@vectors, "vec_000100.bin"))
+      digest = String.to_integer("ef1ede14bf111783", 16)
+
+      assert {:ok, ^input} = Zstd.decompress(checksummed_frame(input, digest))
+
+      flipped = bxor(digest, 1)
+
+      assert {:error, :content_checksum_mismatch} =
+               Zstd.decompress(checksummed_frame(input, flipped))
+    end
+  end
+
+  # A minimal single-segment raw-block frame with the content-checksum flag set:
+  # magic + FHD(fcs=8B, single-segment, checksum) + u64 size + raw block + u32 LE
+  # low-32 of the digest.
+  defp checksummed_frame(input, digest) do
+    fhd = 0b1100_0000 ||| 0b0010_0000 ||| 0b0000_0100
+    block_header = <<1 ||| 0 <<< 1 ||| byte_size(input) <<< 3::24-little>>
+
+    <<0x28, 0xB5, 0x2F, 0xFD, fhd, byte_size(input)::64-little, block_header::binary,
+      input::binary, digest::32-little>>
+  end
+
   # -- RFC 8878 Appendix A crosschecks (doc-derived, read first-hand) -----------
 
   # The three predefined distributions (RFC §3.1.1.3.2.2), built structurally
