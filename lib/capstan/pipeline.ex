@@ -25,10 +25,8 @@ defmodule Capstan.Pipeline do
     * `handle_schema_change/2` whenever DDL delivery is enabled — in C1 the pipeline
       ALWAYS delivers self-committing DDL (ADR-0003), so it is required in both modes.
 
-  Note: C1's `AssemblerServer` implements only lib-owned checkpoint mode. Sink-owned
-  required-ness is still validated here so a bad
-  sink-owned sink is refused; `Capstan.start_link/1` refuses to *run* a sink-owned
-  pipeline in C1 (`:sink_owned_mode_unsupported`).
+  Both modes run (C1a): lib-owned wires a store child; sink-owned validates
+  `checkpoint/0` here and the `AssemblerServer` seeds from it — no store child.
   """
 
   alias Capstan.AssemblerServer
@@ -228,15 +226,21 @@ defmodule Capstan.Pipeline do
   end
 
   @doc "The `AssemblerServer` child spec, wired to the started checkpoint store `{impl, handle}`."
-  @spec assembler_spec(keyword(), AssemblerServer.checkpoint_store()) :: Supervisor.child_spec()
+  @spec assembler_spec(keyword(), AssemblerServer.checkpoint_store() | nil) ::
+          Supervisor.child_spec()
   def assembler_spec(opts, checkpoint_store) when is_list(opts) do
-    server_opts = [
-      sink: Keyword.fetch!(opts, :sink),
-      checkpoint_store: checkpoint_store,
-      tables: Keyword.get(opts, :tables, :all),
-      xa: Keyword.get(opts, :xa, :refuse),
-      max_prepared_transactions: Keyword.get(opts, :max_prepared_transactions, 10_000)
-    ]
+    mode = if lib_mode?(opts), do: :lib_owned, else: :sink_owned
+
+    server_opts =
+      [
+        sink: Keyword.fetch!(opts, :sink),
+        # nil only in sink-owned mode (no store child; the AssemblerServer reads
+        # c:Sink.checkpoint/0 instead).
+        tables: Keyword.get(opts, :tables, :all),
+        xa: Keyword.get(opts, :xa, :refuse),
+        max_prepared_transactions: Keyword.get(opts, :max_prepared_transactions, 10_000),
+        checkpoint_mode: mode
+      ] ++ if(mode == :lib_owned, do: [checkpoint_store: checkpoint_store], else: [])
 
     %{id: :assembler, start: {AssemblerServer, :start_link, [server_opts]}, restart: :temporary}
   end

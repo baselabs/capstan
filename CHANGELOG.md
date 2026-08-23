@@ -6,6 +6,18 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — C1a sink-owned checkpoint mode (ADR-0004's deferred arm)
+
+- Omit `checkpoint_store:` and implement `c:Capstan.Sink.checkpoint/0`: the sink
+  persists its data and the delivered position ATOMICALLY together and returns the
+  position; capstan resumes from `checkpoint/0`, and the post-delivery advance is
+  in-memory only (no store write — a crash between delivery and checkpoint is impossible
+  by construction). Effect-once across kill/restart — zero replays, zero skips, the
+  restart resumes at the checkpoint's successor — proven live on an append-only ledger.
+  The connection's dump resumes from the sink's checkpoint (an empty-set dump against a
+  purged source would halt `:data_gap` — the mode's position authority is the sink).
+  `:sink_owned_mode_unsupported` is retired.
+
 ### Added — C5 XA transaction tracking (ADR-0006)
 
 - `xa: :track` (default `:refuse`): two-phase XA transactions deliver **exactly once at

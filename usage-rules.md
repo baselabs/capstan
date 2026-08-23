@@ -4,9 +4,10 @@ capstan streams committed MySQL row changes from the binary log to a **sink** in
 supervision tree. This file is the consumer-facing contract; the permanent decision record is in
 `docs/adr/`.
 
-> **C1 scope (ADR-0004):** C1 ships **lib-owned checkpoint mode** and
-> **resume-from-durable-checkpoint** (`start_position: :checkpoint`) only. Sink-owned checkpoint
-> mode and explicit start positions are deferred and refused fail-closed today.
+> **Checkpoint modes:** **lib-owned** (default — capstan persists the processed GTID
+> set) and **sink-owned** (C1a — the sink persists its data and the position atomically
+> together; see "Sink-owned checkpoint mode"). Explicit start positions remain a named
+> follow-up (C1b).
 
 ## Starting a pipeline
 
@@ -156,6 +157,19 @@ account needs `XA_RECOVER_ADMIN`** for the connect-time enumeration (the preflig
 checks it). During an initial snapshot, a prepared XA on a snapshot table blocks the
 brief per-chunk lock (its row locks serialize against `LOCK TABLES … READ`), so a chunk
 is never captured over an unresolved XA.
+
+## Sink-owned checkpoint mode
+
+Omit `checkpoint_store:` and implement `c:Capstan.Sink.checkpoint/0` — the sink IS the
+checkpoint. `handle_transaction/1` must persist its data AND the delivered position
+**atomically together** and return the position; on (re)start capstan reads the resume
+position from `checkpoint/0`, delivers, and advances in-memory after each durable sink
+write. There is no store child and no separate checkpoint write — a crash between
+"delivery" and "checkpoint" is impossible by construction, which is what makes the mode
+**effect-once** (zero replays, zero skips across a kill/restart — the C1a acceptance
+marquee proves it live on an append-only ledger). An `handle_transaction/1` that returns
+`{:ok, position}` without having durably persisted that position breaks the mode's
+contract silently — the durability is YOURS to provide.
 
 **Memory shape.** A transaction is buffered whole in pipeline memory between assembly and
 delivery, so peak memory scales with the source's largest single transaction; in snapshot mode

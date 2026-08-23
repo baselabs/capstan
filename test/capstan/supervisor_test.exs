@@ -286,18 +286,23 @@ defmodule Capstan.SupervisorTest do
                Capstan.start_link(lib_opts(sink: NoTransactionSink))
     end
 
-    test "a valid SINK-OWNED config is refused fail-closed (C1 is lib-owned only)" do
+    test "a valid SINK-OWNED config now RUNS (C1a) — no store child, checkpoint from the sink" do
       # SinkOwnedSink is a VALID sink-owned sink (checkpoint/0 + handle_transaction/1 +
-      # handle_schema_change/2); dropping checkpoint_store makes it sink-owned mode, which
-      # the C1 AssemblerServer does not run — refused honestly, not crashed at init.
-      sink_owned =
-        [
+      # handle_schema_change/2). C1a landed: the mode runs — the AssemblerServer seeds
+      # its resume position from c:Sink.checkpoint/0 and NO store child is wired.
+      {:ok, sup} =
+        Capstan.start_link(
           connection: [host: "127.0.0.1", port: 1, username: "u", password: "p", ssl: false],
           server_id: 42,
           sink: SinkOwnedSink
-        ]
+        )
 
-      assert {:error, :sink_owned_mode_unsupported} = Capstan.start_link(sink_owned)
+      on_exit(fn -> stop_supervisor(sup) end)
+
+      ids = sup |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
+      assert :assembler in ids
+      assert :connection in ids
+      refute :store in ids
     end
 
     test "a lib-mode checkpoint_store missing :module is refused cleanly, not a KeyError" do

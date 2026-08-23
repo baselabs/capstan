@@ -36,14 +36,16 @@ defmodule Capstan do
 
   ## Checkpoint mode
 
-  C1 implements **lib-owned** checkpoint mode. Pass
-  `checkpoint_store: [module: impl, options: keyword()]`, where `impl` is a
-  `Capstan.CheckpointStore` implementation exporting `start_link/1` (e.g.
-  `Capstan.CheckpointStore.InMemory` for tests and ephemeral pipelines). The store is
-  supervised as part of the pipeline. **Sink-owned** checkpoint mode (the sink persisting
-  the position atomically with its own write) is validated but not yet run by C1's
-  `AssemblerServer`; a sink-owned configuration is refused with
-  `:sink_owned_mode_unsupported`.
+  **Lib-owned** (default): pass `checkpoint_store: [module: impl, options: keyword()]`,
+  where `impl` is a `Capstan.CheckpointStore` implementation exporting `start_link/1`
+  (e.g. `Capstan.CheckpointStore.InMemory` for tests and ephemeral pipelines). The store
+  is supervised as part of the pipeline.
+
+  **Sink-owned** (C1a): omit `checkpoint_store:` and implement `c:Capstan.Sink.checkpoint/0`
+  — the sink persists its data and the position atomically together and returns the
+  position from `handle_transaction/1`; capstan reads the resume position from
+  `checkpoint/0` and advances in-memory after each durable sink write. Effect-once by
+  construction (see usage-rules "Sink-owned checkpoint mode").
 
   ## Start position
 
@@ -68,7 +70,7 @@ defmodule Capstan do
   `:sink_missing_handle_transaction`, `:sink_missing_checkpoint`,
   `:sink_missing_handle_schema_change`, `:sink_missing_handle_snapshot`,
   `:snapshot_table_not_captured`), or from this module
-  (`:sink_owned_mode_unsupported`, `:checkpoint_store_required`,
+  (`:checkpoint_store_required`,
   `:start_position_override_unsupported`, `:start_position_current_unsupported`).
 
   ## Initial snapshot (C2)
@@ -94,7 +96,6 @@ defmodule Capstan do
   def start_link(opts) when is_list(opts) do
     with {:ok, config} <- Config.validate(opts),
          :ok <- Pipeline.validate_sink(opts),
-         :ok <- require_lib_mode(opts),
          :ok <- validate_checkpoint_store(opts),
          :ok <- validate_start_position(opts),
          {:ok, snapshot} <- Config.validate_snapshot(opts),
@@ -122,18 +123,26 @@ defmodule Capstan do
   @spec stop(pid()) :: :ok
   def stop(supervisor) when is_pid(supervisor), do: Supervisor.stop(supervisor)
 
-  # C1's AssemblerServer runs lib-owned checkpoint mode only; a valid sink-owned
-  # configuration is refused honestly rather than crashing at AssemblerServer init.
-  defp require_lib_mode(opts) do
-    if Pipeline.lib_mode?(opts), do: :ok, else: {:error, :sink_owned_mode_unsupported}
-  end
+  # C1a: sink-owned checkpoint mode RUNS (ADR-0004's deferred arm, landed). The sink
+  # persists its data and the position atomically; the AssemblerServer reads the resume
+  # position from c:Sink.checkpoint/0 and advances in-memory after each durable
+  # sink write. No store child is wired in this mode.
 
   # Fail closed on a malformed lib-owned checkpoint store BEFORE any child starts, so a
   # missing `:module` surfaces as a clean `{:error, :checkpoint_store_required}` from
   # `start_link/1` rather than a `KeyError` crash deep in `AssemblerServer` init. An
   # unrecognized block key (a typo) refuses `:unknown_option` — same posture as
-  # `Config.validate/1`.
+  # `Config.validate/1`. Sink-owned mode has NO store (the sink is the checkpoint), so
+  # the check is skipped there — but a PRESENT mis-shaped one still refuses.
   defp validate_checkpoint_store(opts) do
+    if Pipeline.lib_mode?(opts) or Keyword.has_key?(opts, :checkpoint_store) do
+      validate_checkpoint_store_shape(opts)
+    else
+      :ok
+    end
+  end
+
+  defp validate_checkpoint_store_shape(opts) do
     case Keyword.get(opts, :checkpoint_store) do
       config when is_list(config) ->
         cond do
@@ -176,7 +185,7 @@ defmodule Capstan do
   defp wiring(config, opts, snapshot) do
     base = [
       sink: Keyword.fetch!(opts, :sink),
-      checkpoint_store: Keyword.fetch!(opts, :checkpoint_store),
+      checkpoint_store: Keyword.get(opts, :checkpoint_store),
       connection: config.connection,
       server_id: config.server_id,
       max_command_retries: config.max_command_retries,

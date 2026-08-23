@@ -66,8 +66,19 @@ defmodule Capstan.Supervisor do
     end
   end
 
-  # The C1 wiring — unchanged: store → checkpoint read → assembler → connection.
+  # The C1 wiring. Lib-owned: store → checkpoint read → assembler → connection
+  # (unchanged). Sink-owned (C1a): NO store child — the AssemblerServer reads the
+  # resume position from c:Sink.checkpoint/0 itself; the connection's dump position is
+  # the same resolved value the assembler seeded from, so both agree.
   defp wire_c1(sup, opts) do
+    if Pipeline.lib_mode?(opts) do
+      wire_c1_lib_owned(sup, opts)
+    else
+      wire_c1_sink_owned(sup, opts)
+    end
+  end
+
+  defp wire_c1_lib_owned(sup, opts) do
     {impl, store_options} = Pipeline.checkpoint_store(opts)
 
     with {:ok, store} <- add_child(sup, Pipeline.store_spec(impl, store_options)),
@@ -79,6 +90,23 @@ defmodule Capstan.Supervisor do
              sup,
              Pipeline.connection_spec(opts, assembler, start_position, {impl, store})
            ) do
+      :ok
+    end
+  end
+
+  defp wire_c1_sink_owned(sup, opts) do
+    sink = Keyword.fetch!(opts, :sink)
+
+    # The dump resumes from the SINK's own checkpoint (the mode's position authority —
+    # the same value the AssemblerServer seeded its watermark from), NOT an empty set:
+    # an empty set requests the server's full retained history and a purged source
+    # refuses it :data_gap. A read fault fails the start fail-closed, same as the
+    # lib-owned store read.
+    with {:ok, resumed} <- sink.checkpoint(),
+         {:ok, start_position} <- Pipeline.resolve_start_position(opts, resumed),
+         {:ok, assembler} <- add_child(sup, Pipeline.assembler_spec(opts, nil)),
+         {:ok, _connection} <-
+           add_child(sup, Pipeline.connection_spec(opts, assembler, start_position, nil)) do
       :ok
     end
   end

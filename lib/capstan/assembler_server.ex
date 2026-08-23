@@ -79,6 +79,7 @@ defmodule Capstan.AssemblerServer do
     :sink,
     :checkpoint_impl,
     :checkpoint_store,
+    :checkpoint_mode,
     :processed_set,
     :max_retries,
     # C2 snapshot spine hooks (both absent in all of C1 ⇒ byte-identical behavior):
@@ -139,13 +140,72 @@ defmodule Capstan.AssemblerServer do
   @impl true
   def init(opts) do
     sink = Keyword.fetch!(opts, :sink)
-    {impl, store} = Keyword.fetch!(opts, :checkpoint_store)
     tables = Keyword.get(opts, :tables, :all)
     max_retries = Keyword.get(opts, :max_retries, CheckpointStore.default_max_retries())
     xa = Keyword.get(opts, :xa, :refuse)
     max_prepared = Keyword.get(opts, :max_prepared_transactions, 10_000)
     watermark_observer = Keyword.get(opts, :watermark_observer)
 
+    case Keyword.get(opts, :checkpoint_mode, :lib_owned) do
+      :lib_owned ->
+        {impl, store} = Keyword.fetch!(opts, :checkpoint_store)
+
+        init_lib_owned(
+          sink,
+          impl,
+          store,
+          tables,
+          max_retries,
+          xa,
+          max_prepared,
+          watermark_observer
+        )
+
+      :sink_owned ->
+        # Sink-owned (ADR-0004, C1a): the sink IS the checkpoint — it persists its data
+        # and the position atomically together, so the resume position is read from
+        # `c:Capstan.Sink.checkpoint/0` and the durable write after a delivery is the
+        # sink's own (there is no store). The advance still routes through `checkpoint/2`
+        # so the watermark observer and processed_set behave identically.
+        case sink.checkpoint() do
+          {:ok, resumed} ->
+            start_position = resumed || %Position{gtid_set: "", file: nil, pos: nil}
+
+            state = %__MODULE__{
+              assembler:
+                Assembler.new(start_position,
+                  tables: tables,
+                  xa: xa,
+                  max_prepared_transactions: max_prepared
+                ),
+              sink: sink,
+              checkpoint_impl: nil,
+              checkpoint_store: nil,
+              checkpoint_mode: :sink_owned,
+              processed_set: Gtid.parse(start_position.gtid_set),
+              max_retries: max_retries,
+              watermark_observer: watermark_observer,
+              coordinator_ref: nil
+            }
+
+            {:ok, state}
+
+          {:error, reason} ->
+            {:stop, {:shutdown, {:halt, {:checkpoint_read_failed, reason}}}}
+        end
+    end
+  end
+
+  defp init_lib_owned(
+         sink,
+         impl,
+         store,
+         tables,
+         max_retries,
+         xa,
+         max_prepared,
+         watermark_observer
+       ) do
     case CheckpointStore.read_position(impl, store) do
       {:ok, resumed} ->
         start_position = resumed || %Position{gtid_set: "", file: nil, pos: nil}
@@ -160,6 +220,7 @@ defmodule Capstan.AssemblerServer do
           sink: sink,
           checkpoint_impl: impl,
           checkpoint_store: store,
+          checkpoint_mode: :lib_owned,
           processed_set: Gtid.parse(start_position.gtid_set),
           max_retries: max_retries,
           watermark_observer: watermark_observer,
@@ -371,6 +432,14 @@ defmodule Capstan.AssemblerServer do
   ## ---------------------------------------------------------------------------
   ## checkpoint (lib-owned) — advance only on a durable write; budgeted retry
   ## ---------------------------------------------------------------------------
+
+  defp checkpoint(%__MODULE__{checkpoint_mode: :sink_owned} = state, position) do
+    # Sink-owned advance: the sink already persisted this position atomically with its
+    # own write (that IS the effect-once contract of the mode) — there is no store to
+    # write. The observer still fires on every advance (same choke point).
+    notify_watermark(state.watermark_observer, position.gtid_set)
+    {:ok, %{state | processed_set: Gtid.parse(position.gtid_set)}}
+  end
 
   defp checkpoint(state, position), do: do_checkpoint(state, position, 0)
 
