@@ -396,7 +396,7 @@ defmodule Capstan.FixtureCapture do
 
     name = Map.get(@event_names, type, :"type_#{type}")
     body_len = byte_size(body_ck) - 4
-    <<body::binary-size(body_len), _crc::32-little>> = body_ck
+    <<body::binary-size(^body_len), _crc::32-little>> = body_ck
     {name, apply_event(name, body, state)}
   end
 
@@ -428,7 +428,7 @@ defmodule Capstan.FixtureCapture do
     <<_thread_id::32-little, _exec_time::32-little, schema_len::8, _err_code::16-little,
       status_vars_len::16-little, rest::binary>> = body
 
-    <<_status_vars::binary-size(status_vars_len), _schema::binary-size(schema_len), 0,
+    <<_status_vars::binary-size(^status_vars_len), _schema::binary-size(^schema_len), 0,
       sql::binary>> = rest
 
     String.trim(sql)
