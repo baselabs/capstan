@@ -6,6 +6,28 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-23
+
+### Fixed — the last zstd conformance holes + CI floor-leg hygiene (no library change)
+
+- The zstd conformance suite now reaches **100% of `Capstan.Zstd`** (was ~94%):
+  a test-side encoder for the sequences section (the exact inverse of the
+  production reverse bit-reader, with the RFC 8878 default baselines/extras
+  transcribed first-hand) crafts VALID frames for the decoder arms the MySQL
+  corpus and the reference CLI never emit — RLE and Repeat_Mode sequence
+  tables, the 3-byte sequence-count form (n ≥ 0x7F00 in one block), the
+  state-advance bitstream exhaustion, both `ll==0` repeat-offset arms, and a
+  corrupt/truncated 4-stream jump table over a direct-weight Huffman tree.
+  Each valid frame asserts byte-exact output through the production decoder.
+- The batching marquee's loop-value assert was vacuous — the pattern re-bound
+  the loop variable instead of pinning it, so delivered values were never
+  checked against the expected ones. Pinned: each of the three delivered
+  transactions is now asserted to carry its expected value, in order.
+- CI's Elixir 1.15 floor leg is warning-clean: dead test helpers removed
+  (`raw_socket_element/1`, the vestigial sink copies inside the sink-owned
+  test module, `@dual_z`), an unused `ctx` underscored, and the predefined
+  offset-table length tripwire actually asserted (it was defined but unused).
+
 ## [1.2.0] - 2026-08-23
 
 ### Fixed — decoder robustness (found by the release gate's coverage battery)
