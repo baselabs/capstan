@@ -359,27 +359,45 @@ defmodule Capstan.Snapshot.BootstrapTest do
                )
     end
 
-    test "a fresh :all snapshot set fails closed :config_invalid (explicit tables required)" do
-      # `:all` (which arises when the capture allowlist is itself `:all`) is DELIBERATELY refused
-      # at bootstrap: "snapshot every table on the server" is ambiguous/dangerous, so C2 requires an
-      # explicit snapshot table list. Fail CLOSED (loud), never a silent no-op. Identity + establish
-      # + P0 read all succeed; `open_tables` refuses the `:all` set before introspecting anything.
-      # RED: accepting `:all` (e.g. defaulting to `[]`) would silently backfill nothing.
+    test "a fresh :all snapshot set with NO base tables halts :snapshot_no_base_tables" do
+      # C2b: `:all` RESOLVES via information_schema enumeration instead of the old
+      # :config_invalid refusal. A server exposing no scoped base tables is a
+      # misconfiguration (wrong server / missing privileges) — a loud refusal,
+      # never a silent empty backfill. RED (old contract): the refusal was
+      # :config_invalid, before any enumeration query ran.
       connect_fun =
         scripted_connect_fun([
           [uuid_result(@uuid_a)],
-          [@good_precond, uuid_result(@uuid_a), {1, [[gt("1-100")]]}]
+          [@good_precond, uuid_result(@uuid_a), {1, [[gt("1-100")]]}, {2, []}]
         ])
 
       {:ok, cstore} = CheckpointInMemory.start_link([])
       {:ok, sstore} = SnapshotInMemory.start_link([])
 
-      assert {:error, :config_invalid} =
+      assert {:error, :snapshot_no_base_tables} =
                Snapshot.bootstrap(
                  [connection: fake_conn(), connect_fun: connect_fun],
                  %{snapshot_config() | tables: :all},
                  {CheckpointInMemory, cstore},
                  {SnapshotInMemory, sstore}
+               )
+    end
+
+    test "an :all snapshot set resumes against a durable state (config :all reconciles)" do
+      # C2b: the durable %State{} binds the RESOLVED set from the fresh start, so a
+      # configured `:all` always reconciles — the stored set IS what `:all` meant. The
+      # bootstrap proceeds PAST the reconcile (halting later at the refused connect,
+      # NOT at :config_invalid). RED (old contract): reconcile refused `:all` outright.
+      {:ok, cstore} = CheckpointInMemory.start_link([])
+
+      connect_fun = fn _connection -> {:error, :should_not_connect} end
+
+      assert {:error, :snapshot_query_connect_failed} =
+               Snapshot.bootstrap(
+                 [connection: fake_conn(), connect_fun: connect_fun],
+                 %{snapshot_config() | tables: :all},
+                 {CheckpointInMemory, cstore},
+                 {MidSnapshotStore, :ignored}
                )
     end
 

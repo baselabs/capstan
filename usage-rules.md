@@ -297,8 +297,13 @@ gate compares in Elixir, so the PK type's Elixir order must provably match MySQL
 (signed/unsigned, incl. `BIGINT UNSIGNED`), **`BINARY`/`VARBINARY`**, and **composites** of those.
 A collation-ordered STRING PK (`CHAR`/`VARCHAR`/`TEXT`) is refused `:snapshot_pk_unsupported_type`
 (a named follow-up, ROADMAP C2a). A `tables: :all` snapshot — which arises when the capture
-allowlist is itself `:all` — is refused `:config_invalid`: **specify an explicit snapshot table
-list** ("snapshot every table on the server" is ambiguous and dangerous; ROADMAP C2b).
+allowlist is itself `:all` — RESOLVES to the server's scoped base tables: the
+`information_schema.TABLES` enumeration filtered to `TABLE_TYPE = 'BASE TABLE'` outside the
+system schemas (`mysql`, `information_schema`, `performance_schema`, `sys`), ordered and
+deterministic (C2b). Views, system schemas, and temporary tables are excluded by construction;
+a server exposing no scoped base tables refuses `:snapshot_no_base_tables` (a misconfiguration,
+never a silent empty backfill). The resolved list is what the durable snapshot state binds —
+on resume, the stored set is the authority for what `:all` meant (`:all` always reconciles).
 
 ## Runtime halts (fail-closed)
 

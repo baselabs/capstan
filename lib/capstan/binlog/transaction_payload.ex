@@ -38,6 +38,14 @@ defmodule Capstan.Binlog.TransactionPayload do
 
   @compression_zstd 0
 
+  # An inflation ceiling: a single compressed payload can never legitimately
+  # exceed what the pipeline could buffer as an in-memory transaction anyway,
+  # and a source that declares (or inflates toward) more is either hostile or
+  # beyond capstan's operating envelope — refuse it BEFORE inflating when the
+  # server declares the size, and after when it does not (never a partial
+  # guess; a zip-bomb frame must not exhaust the BEAM).
+  @max_inflated_bytes 1024 * 1024 * 1024
+
   @doc """
   Decodes a type-40 body to its inner event list: parses the TLV header,
   inflates the ZSTD payload, and splits the inner event stream.
@@ -50,9 +58,11 @@ defmodule Capstan.Binlog.TransactionPayload do
     with {:ok, tlv, payload_offset} <- walk_tlv(body, 0, %{}),
          {:ok, size} <- require_size(tlv),
          :ok <- require_zstd(tlv),
+         :ok <- declared_size_cap(tlv),
          {:ok, frame} <- slice_payload(body, payload_offset, size),
          {:ok, inner} <- inflate(frame),
-         :ok <- uncompressed_size_check(tlv, byte_size(inner)) do
+         :ok <- uncompressed_size_check(tlv, byte_size(inner)),
+         :ok <- inflated_size_cap(byte_size(inner)) do
       split_events(inner, [])
     end
   end
@@ -109,14 +119,32 @@ defmodule Capstan.Binlog.TransactionPayload do
   defp require_zstd(_), do: {:error, {:payload_header, :missing_compression_type}}
 
   defp slice_payload(body, offset, size) do
+    # By construction the payload runs to the END of the event body (the
+    # server codec writes payload_size = the remainder): trailing bytes after
+    # the declared size are a malformed event, never silently skipped.
     if offset + size > byte_size(body) do
-      # The server codec's success condition: the payload must fit the
-      # remainder of the event after the header.
       {:error, {:payload_header, :payload_size_exceeded}}
     else
-      {:ok, binary_part(body, offset, size)}
+      if offset + size < byte_size(body) do
+        {:error, {:payload_header, :payload_trailing_bytes}}
+      else
+        {:ok, binary_part(body, offset, size)}
+      end
     end
   end
+
+  # The DECLARED uncompressed size gates BEFORE any inflation — a hostile
+  # frame's declared size is refused without allocating a byte of output.
+  defp declared_size_cap(%{uncompressed_size: declared})
+       when is_integer(declared) and declared > @max_inflated_bytes,
+       do: {:error, {:payload_header, :payload_too_large}}
+
+  defp declared_size_cap(_tlv), do: :ok
+
+  defp inflated_size_cap(actual) when actual > @max_inflated_bytes,
+    do: {:error, {:payload_header, :payload_too_large}}
+
+  defp inflated_size_cap(_actual), do: :ok
 
   defp inflate(frame) do
     case Zstd.decompress(frame) do

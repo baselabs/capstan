@@ -69,6 +69,7 @@ defmodule Capstan.Snapshot do
   alias Capstan.Query
   alias Capstan.Snapshot.ChunkReader
   alias Capstan.Snapshot.State
+  alias Capstan.Snapshot.Tables
   alias Capstan.SnapshotStore
 
   @gtid_executed_sql "SELECT @@global.gtid_executed"
@@ -168,10 +169,9 @@ defmodule Capstan.Snapshot do
   # closed on ANY divergence — the operator must resolve a config/state mismatch deliberately (drop
   # the durable snapshot state to re-backfill the new set, or restore the config). Pure key
   # comparison (no source connection), so the `:complete` no-connect property is preserved. A
-  # configured `:all` set is refused here for the same reason `open_tables/4` refuses it on a fresh
-  # start (`:config_invalid`) — a durable state is never created from `:all`, so `:all` vs any
-  # concrete stored set is a mis-config, not a drift.
-  defp reconcile_tables(%{tables: :all}, _existing), do: {:error, :config_invalid}
+  # configured `:all` set always reconciles: at a fresh start it RESOLVED to the stored concrete
+  # set (C2b, `Capstan.Snapshot.Tables`), so the stored set IS the authority for what `:all` meant.
+  defp reconcile_tables(%{tables: :all}, _existing), do: :ok
 
   defp reconcile_tables(%{tables: configured}, %State{tables: stored}) when is_list(configured) do
     if MapSet.new(configured) == MapSet.new(Map.keys(stored)),
@@ -339,18 +339,22 @@ defmodule Capstan.Snapshot do
 
   # FRESH: introspect every snapshot table (via ChunkReader.open) and build the durable %State{}
   # with `pk_cursor: :start`. An `:all` snapshot set (which arises when the CAPTURE allowlist is
-  # itself `:all`) is DELIBERATELY refused: "snapshot every table on the server" is ambiguous and
-  # dangerous (it would backfill unrelated/system tables), so C2 requires an EXPLICIT snapshot
-  # table list whenever capture is `:all`. This is a fail-closed capability boundary (loud, not a
-  # silent no-op) — a concrete `snapshot: [tables: [...]]` (or a concrete capture allowlist, from
-  # which snapshot defaults) works. Resolving `:all` to a scoped enumeration is a named backlog
-  # follow-up, not part of C2.
+  # itself `:all`) resolves to the server's scoped base tables — `information_schema.TABLES`
+  # enumeration excluding the system schemas and everything that is not a BASE TABLE (C2b,
+  # `Capstan.Snapshot.Tables`) — so "snapshot everything" means a well-defined, scoped set, never
+  # the system schemas and never a silent empty set. The resolved list is what the durable
+  # `%State{}` binds, exactly as an explicit config list would.
   defp open_tables(query, %{tables: tables, chunk_size: chunk_size}, nil, p0)
        when is_list(tables) do
     open_fresh(query, tables, chunk_size, p0)
   end
 
-  defp open_tables(_query, %{tables: :all}, nil, _p0), do: {:error, :config_invalid}
+  defp open_tables(query, %{tables: :all, chunk_size: chunk_size}, nil, p0) do
+    case Tables.resolve_all(query) do
+      {:ok, tables} -> open_fresh(query, tables, chunk_size, p0)
+      {:error, _reason} = error -> error
+    end
+  end
 
   # RESUME: keep the durable per-table cursors and reopen a reader per NOT-DONE table with the
   # stored fingerprint (so a schema drift across the resume is caught on chunk 1).

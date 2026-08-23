@@ -126,6 +126,121 @@ defmodule Capstan.Integration.SnapshotTest do
   end
 
   ## ---------------------------------------------------------------------------
+  ## ---------------------------------------------------------------------------
+  ## C2b — `tables: :all` resolves to the scoped base tables
+  ## ---------------------------------------------------------------------------
+
+  test "tables: :all backfills exactly the scoped BASE TABLES (C2b)" do
+    # A dedicated schema with TWO base tables + a VIEW; the substrate also
+    # carries live system schemas (mysql/sys/...) and probe_db's other tables.
+    # An `:all` snapshot must resolve to EXACTLY the two base tables: the view
+    # and the system schemas excluded (completing at all proves it — the view
+    # has no order-faithful PK and the system schemas are filtered by the
+    # enumeration), and nothing outside the schema arrives.
+    ctx = new_ctx()
+    second = "t2"
+
+    # The :all enumeration covers EVERY non-system base table, so other
+    # marquees' throwaway probe_db leftovers would widen the expected set
+    # (order-dependent). Drop them — they are per-marquee scratch tables by
+    # construction, never durable state.
+    leftovers =
+      MysqlCase.query_rows!(
+        ctx.qconn,
+        "SELECT TABLE_NAME FROM information_schema.TABLES " <>
+          "WHERE TABLE_SCHEMA = 'probe_db' AND TABLE_TYPE = 'BASE TABLE'"
+      )
+
+    Enum.each(leftovers, fn [table] ->
+      MysqlCase.run_tolerant(ctx.qconn, "DROP TABLE probe_db.#{table}")
+    end)
+
+    MysqlCase.run!(
+      ctx.qconn,
+      "CREATE TABLE #{q(ctx.schema, ctx.table)} (id INT PRIMARY KEY, v INT NOT NULL) ENGINE=InnoDB"
+    )
+
+    MysqlCase.run!(
+      ctx.qconn,
+      "CREATE TABLE #{q(ctx.schema, second)} (id INT PRIMARY KEY, v INT NOT NULL) ENGINE=InnoDB"
+    )
+
+    MysqlCase.run!(
+      ctx.qconn,
+      "CREATE VIEW #{ctx.schema}.v_not_a_table AS SELECT id, v FROM #{q(ctx.schema, ctx.table)}"
+    )
+
+    MysqlCase.run!(
+      ctx.qconn,
+      "INSERT INTO #{q(ctx.schema, ctx.table)} (id, v) VALUES (1, 10), (2, 20), (3, 30)"
+    )
+
+    MysqlCase.run!(
+      ctx.qconn,
+      "INSERT INTO #{q(ctx.schema, second)} (id, v) VALUES (7, 70), (8, 80)"
+    )
+
+    w0 = MysqlCase.read_gtid_executed!(ctx.qconn)
+    checkpoint = new_durable_checkpoint(ctx, w0)
+    snap_store = new_durable_snapshot_store(ctx)
+    configure_sink(ctx)
+
+    {:ok, sup} =
+      Capstan.start_link(
+        connection: MysqlCase.pipeline_connection(),
+        server_id: MysqlCase.unique_server_id(),
+        sink: SnapshotSink,
+        checkpoint_store: [
+          module: DurableStore,
+          options: [table: checkpoint.table, key: checkpoint.key]
+        ],
+        tables: :all,
+        snapshot: [
+          tables: :all,
+          store: [
+            module: DurableSnapshotStore,
+            options: [table: snap_store.table, key: snap_store.key]
+          ],
+          chunk_size: 10
+        ],
+        max_command_retries: 5
+      )
+
+    on_exit(fn -> MysqlCase.stop_pipeline(sup) end)
+
+    await_snapshot_completed(60_000)
+
+    # Collect every chunk beat: BOTH base tables backfilled, each with a final
+    # chunk; NO chunk for any other schema/table (system schemas, probe_db's
+    # other tables, the view).
+    chunks = collect_chunk_beats()
+
+    by_table = Enum.group_by(chunks, fn {sch, tbl, _} -> {sch, tbl} end)
+
+    assert MapSet.new(Map.keys(by_table)) ==
+             MapSet.new([{ctx.schema, ctx.table}, {ctx.schema, second}])
+
+    Enum.each(by_table, fn {_k, beats} ->
+      assert Enum.any?(beats, fn {_, _, final?} -> final? end),
+             "no final chunk in #{inspect(beats)}"
+    end)
+
+    # The ledger holds exactly the five seeded keys, all via the chunk path.
+    ledger_keys =
+      :ets.tab2list(ctx.ledger)
+      |> Enum.filter(fn {_k, entry} -> entry.source == :chunk end)
+      |> Enum.map(fn {{sch, tbl, pk}, _entry} -> {sch, tbl, pk} end)
+
+    assert MapSet.new(ledger_keys) ==
+             MapSet.new([
+               {ctx.schema, ctx.table, 1},
+               {ctx.schema, ctx.table, 2},
+               {ctx.schema, ctx.table, 3},
+               {ctx.schema, second, 7},
+               {ctx.schema, second, 8}
+             ])
+  end
+
   ## Tripwire 1 — RED procedure (documented; executed at build time)
   ## ---------------------------------------------------------------------------
   #
@@ -468,6 +583,16 @@ defmodule Capstan.Integration.SnapshotTest do
 
   # A handful of FILTERED heartbeat commits (on the non-captured `hb` table) to push the watermark
   # past the last chunk's `G` after the writers stop, so the final chunk's advance gate fires.
+  defp collect_chunk_beats, do: collect_chunk_beats([])
+
+  defp collect_chunk_beats(acc) do
+    receive do
+      {:snapshot_chunk, sch, tbl, _seq, final?} -> collect_chunk_beats([{sch, tbl, final?} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   defp drain_markers!(ctx) do
     Enum.each(1..8, fn n ->
       MysqlCase.run!(

@@ -263,8 +263,15 @@ defmodule Capstan.Assembler do
   # so the inner QUERY(BEGIN)/rows/terminator fold exactly as bare events. A
   # failure mid-payload propagates fail-closed with the in-flight buffer
   # discarded — structurally the same guarantee as a bare-stream failure.
-  defp apply_decoded(state, _event, {:transaction_payload, inner_events}) do
-    fold_inner(inner_events, state, [])
+  #
+  # The inner headers carry `log_pos: 0` (the compressor zeroes them — observed
+  # live), so each inner event is re-stamped with the OUTER payload event's
+  # `log_pos` before folding: a terminator's log_pos is the transaction's
+  # diagnostic `pos` (Rule 3: diagnostic only, never an ordering key — the GTID
+  # set is the authority), and the payload event's own log_pos is exactly the
+  # transaction's end position the XID's would have named.
+  defp apply_decoded(state, event, {:transaction_payload, inner_events}) do
+    fold_inner(Enum.map(inner_events, &%{&1 | log_pos: event.log_pos}), state, [])
   end
 
   # A GTID arriving while a transaction is still open is a stream desync — the prior

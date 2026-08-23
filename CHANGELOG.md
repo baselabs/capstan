@@ -6,6 +6,21 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — C2b `tables: :all` snapshot resolution
+
+- An `:all` snapshot set (which arises when the capture allowlist is itself
+  `:all`) now RESOLVES to a concrete, scoped list instead of refusing
+  `:config_invalid`: `Capstan.Snapshot.Tables` enumerates
+  `information_schema.TABLES` filtered to `BASE TABLE` outside the four system
+  schemas, ordered deterministically. Views/system schemas/temporary tables
+  are excluded by construction; an empty result refuses
+  `:snapshot_no_base_tables` (never a silent empty backfill). The durable
+  snapshot state binds the resolved list, and a configured `:all` always
+  reconciles on resume (the stored set is the authority). A concrete capture
+  allowlist with an `:all` snapshot is still refused (the `⊆ captured` proof
+  is impossible). Live marquee: a dedicated schema with two base tables + a
+  view backfills EXACTLY the two base tables.
+
 ### Added — C4b compressed-transaction consumption (ADR-0011 consume arm)
 
 - `binlog_transaction_compression=ON` sources are now CONSUMED: `Capstan.Zstd` — a

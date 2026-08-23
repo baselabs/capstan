@@ -592,12 +592,17 @@ defmodule Capstan.Config do
   end
 
   # The snapshot table set defaults to the capture allowlist (`:tables`, itself `:all` by
-  # default). When given explicitly it must be a NON-EMPTY list of `{schema, table}` binary
-  # tuples; the `⊆ captured` subset check lives in `Capstan.Pipeline.validate_snapshot_tables/2`.
+  # default). When given explicitly it is either `:all` — resolved to the scoped base-table
+  # enumeration at bootstrap (C2b, `Capstan.Snapshot.Tables`; valid only against an `:all`
+  # capture, enforced by `Capstan.Pipeline.validate_snapshot_tables/2`) — or a NON-EMPTY list
+  # of `{schema, table}` binary tuples.
   defp fetch_snapshot_tables(snapshot, opts) do
     case Keyword.get(snapshot, :tables) do
       nil ->
         {:ok, Keyword.get(opts, :tables, :all)}
+
+      :all ->
+        {:ok, :all}
 
       tables when is_list(tables) and tables != [] ->
         if Enum.all?(tables, &table_tuple?/1), do: {:ok, tables}, else: {:error, :config_invalid}

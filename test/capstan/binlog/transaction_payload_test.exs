@@ -71,7 +71,17 @@ defmodule Capstan.Binlog.TransactionPayloadTest do
 
       assert {:ok, [via_payload], _} = Assembler.run([gtid, payload], %Position{gtid_set: ""})
       assert {:ok, [via_inner], _} = Assembler.run([gtid | oracle_inner], %Position{gtid_set: ""})
-      assert via_payload == via_inner
+
+      # Same committed unit (GTID + changes). The one DELIBERATE divergence is
+      # `pos`: the compressor zeroes the inner headers' log_pos, so the payload
+      # path re-stamps every inner event with the OUTER payload event's log_pos
+      # — the true end position of the transaction — while the bare inner
+      # stream carries its own (zeroed) diagnostic. The GTID set (the
+      # authority, Rule 3) is identical.
+      assert via_payload.gtid == via_inner.gtid
+      assert via_payload.changes == via_inner.changes
+      assert via_payload.position.pos == payload.log_pos
+      assert via_payload.position.pos != 0
     end
 
     test "zstd_rows (all three payloads) delivers identical transactions" do
@@ -113,7 +123,9 @@ defmodule Capstan.Binlog.TransactionPayloadTest do
                  start
                )
 
-      assert via_payload == via_inner
+      assert Enum.map(via_payload, &{&1.gtid, &1.changes}) ==
+               Enum.map(via_inner, &{&1.gtid, &1.changes})
+
       assert length(via_payload) == 3
     end
   end
@@ -156,7 +168,28 @@ defmodule Capstan.Binlog.TransactionPayloadTest do
       event = payload_event("zstd_small", "06-transaction_payload.bin")
       tampered = replace_tlv_value(event.body, 1, fn v -> v + 10_000 end)
 
-      assert {:error, {:payload_header, _}} = TransactionPayload.decode(tampered)
+      assert {:error, {:payload_header, :payload_size_exceeded}} =
+               TransactionPayload.decode(tampered)
+    end
+
+    test "bytes trailing the declared payload are refused, never silently dropped" do
+      event = payload_event("zstd_small", "06-transaction_payload.bin")
+      # Shrink field 1 by one byte: the payload must run to the END of the body
+      # by construction, so a leftover byte is a malformed event.
+      tampered = replace_tlv_value(event.body, 1, fn v -> v - 1 end)
+
+      assert {:error, {:payload_header, :payload_trailing_bytes}} =
+               TransactionPayload.decode(tampered)
+    end
+
+    test "a declared uncompressed size beyond the ceiling is refused BEFORE inflating" do
+      event = payload_event("zstd_small", "06-transaction_payload.bin")
+      # Declare a >1GiB uncompressed size: refused on the DECLARATION alone —
+      # a zip-bomb frame must not allocate a byte of output.
+      tampered = replace_tlv_value(event.body, 3, fn _v -> 2 * 1024 * 1024 * 1024 end)
+
+      assert {:error, {:payload_header, :payload_too_large}} =
+               TransactionPayload.decode(tampered)
     end
   end
 
