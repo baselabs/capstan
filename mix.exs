@@ -89,7 +89,8 @@ defmodule Capstan.MixProject do
         "docs/adr/0002-fail-closed-server-preconditions.md",
         "docs/adr/0003-transaction-shape-and-checkpoint-semantics.md",
         "docs/adr/0004-c1-scope-lib-owned-checkpoint-only.md",
-        "docs/adr/0005-initial-snapshot-cursor-gate-brief-lock.md"
+        "docs/adr/0005-initial-snapshot-cursor-gate-brief-lock.md",
+        "docs/adr/0006-xa-prepare-commit-tracking.md"
       ],
       groups_for_modules: [
         "Consumer API": [

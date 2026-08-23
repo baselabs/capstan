@@ -14,11 +14,14 @@ fail-closed** on every condition that could otherwise lose or corrupt data silen
 in-library and probe-proven (`:gen_tcp`/`:ssl`/`:crypto` only; `decimal` + `jason` + `telemetry`).
 Elixir `~> 1.15`.
 
-**Under construction.** The current slice is **C1 (streaming spine)**. The rules below are the
-binding design invariants every module must uphold — grounded in the approved C1 design
-(`.forge/specs/`) and live MySQL probes (`probe/`), not aspiration. Not all modules exist yet.
-Status and roadmap: `docs/ROADMAP.md` (authored definitions) + `.forge/plans/` (task-level,
-machine-local). Do not re-derive scope from the code — the plan is the source of truth.
+**Current state:** C1 (streaming spine) and C2 (initial snapshot) are implemented
+and released as `capstan` 0.2.0. C2 adds cursor-gated, resumable initial
+backfill with the brief per-chunk read lock recorded in ADR 0005; omitting
+`:snapshot` preserves the C1 stream. C3–C6 and the named C1/C2 follow-up rows
+remain open in `docs/ROADMAP.md`. The rules below are binding invariants for the
+landed code and future rows, grounded in live MySQL probes under `probe/`.
+`docs/ROADMAP.md` carries authored definitions; `.forge/plans/` carries
+machine-local task state.
 
 ## Critical rules
 
