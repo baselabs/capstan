@@ -97,7 +97,11 @@ defmodule Capstan.MixProject do
         "docs/adr/0003-transaction-shape-and-checkpoint-semantics.md",
         "docs/adr/0004-c1-scope-lib-owned-checkpoint-only.md",
         "docs/adr/0005-initial-snapshot-cursor-gate-brief-lock.md",
-        "docs/adr/0006-xa-prepare-commit-tracking.md"
+        "docs/adr/0006-xa-prepare-commit-tracking.md",
+        "docs/adr/0007-value-free-boundary-rule-1.md",
+        "docs/adr/0008-pure-elixir-protocol-client.md",
+        "docs/adr/0009-fail-closed-supervision-and-streaming-liveness.md",
+        "docs/adr/0010-exclusive-end-bound-of-com-binlog-dump-gtid.md"
       ],
       groups_for_modules: [
         "Consumer API": [
