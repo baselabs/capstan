@@ -224,9 +224,20 @@ defmodule Capstan.Protocol.CommandTest do
              "substrate lacks a retained window to probe " <>
                "(executed_high=#{executed_high} purged_high=#{purged_high})"
 
-      # A checkpoint of uuid:1-k, sitting inside the retained window.
+      # A checkpoint modeled as a REAL processed watermark on a multi-uuid server: every
+      # OTHER source's executed intervals verbatim (the fabricated sets other marquees
+      # plant — on a long-lived substrate some are already in gtid_purged), and only the
+      # SERVER's OWN uuid lowered to 1-k, sitting inside the retained window. A
+      # single-uuid checkpoint leaves the foreign uuids in the unapplied remainder, which
+      # intersects gtid_purged and the dump is refused 1236 — exactly the :data_gap
+      # semantics the library itself implements (a fresh substrate masks this; a well-used
+      # one trips it, so the tripwire must be multi-uuid-correct).
       k = purged_high + div(executed_high - purged_high, 2)
-      checkpoint = Gtid.parse("#{server_uuid}:1-#{k}")
+
+      checkpoint =
+        executed
+        |> Gtid.parse()
+        |> Map.put(server_uuid, [{1, k}])
 
       # Correct encoder: wire end = k + 1 -> server resumes AT k + 1 (no replay).
       correct = first_streamed_gtid(Command.com_binlog_dump_gtid(5115, checkpoint))
@@ -234,7 +245,7 @@ defmodule Capstan.Protocol.CommandTest do
       # Off-by-one bug: the INCLUSIVE high (k) used verbatim as the wire end -> the
       # server thinks the peer only holds through k-1 and resumes at k, silently
       # REPLAYING transaction k on every restart.
-      off_by_one = first_streamed_gtid(buggy_dump(server_uuid, 1, k, 5116))
+      off_by_one = first_streamed_gtid(buggy_dump(Gtid.parse(executed), server_uuid, k, 5116))
 
       assert correct == k + 1,
              "the correct exclusive-end encoding must resume one past the checkpoint"
@@ -375,11 +386,31 @@ defmodule Capstan.Protocol.CommandTest do
 
   # Hand-built dump that uses the INCLUSIVE high as the wire end (no `+ 1`): the exact
   # F2 off-by-one the correct encoder avoids.
-  defp buggy_dump(uuid, low, inclusive_high, server_id) do
-    raw = uuid |> String.replace("-", "") |> Base.decode16!(case: :mixed)
+  defp sid(uuid), do: uuid |> String.replace("-", "") |> Base.decode16!(case: :mixed)
 
-    gtid_data =
-      <<1::64-little>> <> raw <> <<1::64-little, low::64-little, inclusive_high::64-little>>
+  # The deliberate F2 defect over the SAME multi-uuid set: the server uuid's INCLUSIVE
+  # high (k) used verbatim as the wire end — the correct encoder sends high + 1, so this
+  # under-counts by one and the server replays transaction k on every restart.
+  defp buggy_dump(set, server_uuid, inclusive_high, server_id) do
+    # Foreign sources encode CORRECTLY (wire end = inclusive high + 1); the defect is
+    # surgical — only the server uuid's INCLUSIVE high goes on the wire verbatim.
+    blocks =
+      set
+      |> Enum.sort()
+      |> Enum.map(fn
+        {^server_uuid, _intervals} ->
+          sid(server_uuid) <>
+            <<1::64-little>> <> <<1::64-little, inclusive_high::64-little>>
+
+        {uuid, intervals} ->
+          intervals_bin =
+            Enum.map(intervals, fn {low, high} -> <<low::64-little, high + 1::64-little>> end)
+
+          sid(uuid) <>
+            <<length(intervals)::64-little>> <> IO.iodata_to_binary(intervals_bin)
+      end)
+
+    gtid_data = <<length(blocks)::64-little>> <> IO.iodata_to_binary(blocks)
 
     <<0x1E, 0x04::16-little, server_id::32-little, 0::32-little, 4::64-little,
       byte_size(gtid_data)::32-little, gtid_data::binary>>

@@ -16,12 +16,7 @@ defmodule Capstan.MixProject do
       # capture tool, the substrate case scaffolding, the value-free sweep) is scaffolding,
       # not product. The threshold stays Mix's default 90 and is enforced by the CI cover step.
       test_coverage: [
-        ignore_modules: [
-          Capstan.FixtureCapture,
-          Capstan.MysqlCase,
-          Capstan.MysqlCase.DurableStore,
-          Capstan.ValueFree
-        ]
+        ignore_modules: [~r/^Capstan\.(FixtureCapture|MysqlCase|ValueFree)/]
       ],
       deps: deps(),
       package: package(),

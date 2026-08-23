@@ -1,7 +1,7 @@
 # capstan ROADMAP
 
-Authored definitions only. Status and evidence are DERIVED by
-`/Users/rp/Developer/forge-archive/scripts/forge-roadmap.py --repo .` — never hand-edited here.
+Authored definitions only. Status and evidence columns are DERIVED from the tracker by
+tooling — never hand-edited here.
 
 | ID | What | Acceptance | Depends | Why |
 |---|---|---|---|---|
