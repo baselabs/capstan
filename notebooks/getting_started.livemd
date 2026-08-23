@@ -22,7 +22,7 @@ Give it ~30 seconds to initialise, then run the cells top to bottom.
 
 ```elixir
 Mix.install([
-  {:capstan, "~> 0.1.0"},
+  {:capstan, "~> 1.1"},
   {:myxql, "~> 0.7"}
 ])
 ```

@@ -89,6 +89,9 @@ defmodule Capstan.MixProject do
 
   defp docs do
     [
+      groups_for_extras: [
+        Guides: ["docs/recipes.md", "docs/telemetry.md"]
+      ],
       main: "readme",
       source_ref: "v#{@version}",
       source_url: @source_url,
@@ -96,6 +99,8 @@ defmodule Capstan.MixProject do
         "README.md",
         "usage-rules.md",
         "CHANGELOG.md",
+        {"docs/recipes.md", title: "Recipes"},
+        {"docs/telemetry.md", title: "Telemetry Reference"},
         "docs/adr/0001-position-and-dedup-model.md",
         "docs/adr/0002-fail-closed-server-preconditions.md",
         "docs/adr/0003-transaction-shape-and-checkpoint-semantics.md",

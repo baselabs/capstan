@@ -6,6 +6,21 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed — presentation overhaul (docs as product)
+
+- README rewritten as a user document: what it is, install, a 30-second
+  pipeline, the three position-ownership modes, snapshot/backfill, the
+  fail-closed posture, and a when-to-use table — the internal status-report
+  shape is gone (probe/roadmap material stays in the repo docs where
+  contributors need it).
+- New `docs/telemetry.md`: every telemetry event with its measurements and
+  metadata tables plus attach examples and a standard telemetry_metrics set.
+- New `docs/recipes.md`: idempotent sinks, batched warehouse loads,
+  snapshot-then-stream migration, start-from-now, TLS against self-signed
+  certificates, XA sources, compressed sources, production watch/alerting.
+- ExDoc: recipes + telemetry as grouped "Guides" extras; the getting-started
+  Livebook's dependency pin bumped to the released line.
+
 ### Added — C2c zero-row snapshot completion signal
 
 - A configured snapshot table with ZERO pre-existing rows now delivers exactly
