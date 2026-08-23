@@ -6,6 +6,23 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Align the contributor guide and README with the released 0.2.0 surface:
+  C1 streaming and C2 initial snapshot are complete; C3–C6 and the named C2
+  follow-ups remain open. Register the existing XA tracking ADR 0006 in ExDoc.
+
+### Fixed
+
+- Thread the documented streaming-liveness options (`reconnect_backoff`,
+  `heartbeat_period_ms`, `stream_timeout_ms`) through `Capstan.start_link/1`: they
+  were silently ignored (defaults always applied) and the promised
+  `:invalid_liveness_config` refusal for `stream_timeout_ms <= heartbeat_period_ms`
+  was unreachable through the public entry point. The refusal now fires at config
+  time, before any socket opens, and valid overrides reach the connection.
+- README install snippet pins `~> 0.2.0` (was `~> 0.1.0`, which cannot resolve the
+  release the same README documents).
+
 ## [0.2.0] - 2026-07-22
 
 ### Added — C2 initial snapshot

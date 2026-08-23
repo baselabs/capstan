@@ -12,12 +12,14 @@ MySQL sibling: replicant consumes Postgres logical replication (pgoutput) over a
 slot; capstan consumes MySQL row-based binary-log replication over a registered replica
 connection.
 
-> **Status: C1 (streaming spine) implemented.** capstan connects to MySQL as a replica, tails
-> the row-based binlog from a GTID position, assembles committed transactions, delivers them to a
-> sink, and durably advances a processed-GTID checkpoint — fail-closed on every silent-loss
-> condition. C1 ships **lib-owned checkpoint mode** and resume-from-durable-checkpoint
+> **Status: C1 streaming and C2 initial snapshot are released in 0.2.0.** capstan
+> connects to MySQL as a replica, tails the row-based binlog from a GTID position,
+> assembles committed transactions, delivers them to a sink, and durably advances a
+> processed-GTID checkpoint — fail-closed on every silent-loss condition. C2 adds a
+> consistent, resumable backfill of pre-existing rows with a gap-free stream handoff;
+> omit `:snapshot` for the unchanged pure-C1 path. C1 ships **lib-owned checkpoint mode** and resume-from-durable-checkpoint
 > (`start_position: :checkpoint`) only; sink-owned checkpoint mode and explicit start positions are
-> deferred and refused fail-closed today (see
+> named follow-up rows and are refused fail-closed today (see
 > [ADR-0004](docs/adr/0004-c1-scope-lib-owned-checkpoint-only.md)). The protocol viability probe
 > that preceded implementation — a ~400-line zero-dependency Elixir client that spoke the full
 > MySQL replication protocol against live MySQL 8.0.46 and decoded both a replayed and a
@@ -59,7 +61,7 @@ Add `capstan` to your dependencies:
 ```elixir
 def deps do
   [
-    {:capstan, "~> 0.1.0"}
+    {:capstan, "~> 0.2.0"}
   ]
 end
 ```
@@ -194,11 +196,11 @@ decoding rows into positional tuples of unknown provenance.
 
 | Directory | Contents |
 | --- | --- |
-| `lib/` | The Elixir library (hex package `capstan`) — the C1 streaming spine |
+| `lib/` | The Elixir library (Hex package `capstan`) — C1 streaming plus the additive C2 snapshot |
 | `examples/` | Runnable minimal consumers ([examples/README.md](https://github.com/baselabs/capstan/blob/main/examples/README.md)) |
 | `docker-compose.yml`, `scripts/` | The local MySQL test substrate ([docs/testing.md](https://github.com/baselabs/capstan/blob/main/docs/testing.md)) |
 | `probe/` | The executed protocol viability probe + committed evidence |
-| `docs/adr/` | Architecture decision records ([0001](docs/adr/0001-position-and-dedup-model.md)–[0005](docs/adr/0005-initial-snapshot-cursor-gate-brief-lock.md)) |
+| `docs/adr/` | Architecture decision records ([0001](docs/adr/0001-position-and-dedup-model.md)–[0006](docs/adr/0006-xa-prepare-commit-tracking.md)) |
 | `docs/testing.md` | Test environment + how to run the suite |
 | `usage-rules.md` | Consumer-facing usage contract |
 
