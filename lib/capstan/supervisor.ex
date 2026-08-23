@@ -28,6 +28,8 @@ defmodule Capstan.Supervisor do
   alias Capstan.AssemblerServer
   alias Capstan.CheckpointStore
   alias Capstan.Pipeline
+  alias Capstan.Position
+  alias Capstan.Protocol.{Command, Handshake}
   alias Capstan.Query
   alias Capstan.Snapshot
   alias Capstan.Snapshot.Coordinator
@@ -53,6 +55,50 @@ defmodule Capstan.Supervisor do
       {:error, reason} ->
         _ = Supervisor.stop(sup)
         {:error, reason}
+    end
+  end
+
+  # C1b `:current`: read the server's live `@@gtid_executed` over a short-lived
+  # authenticated socket and resume from it ("start from now"). The socket is closed
+  # immediately (the Connection opens its own). Any fault fails the start fail-closed.
+  # The other forms resolve purely.
+  defp resolve_start(opts, resumed) do
+    case Pipeline.resolve_start_position(opts, resumed) do
+      {:ok, :current, nil} -> current_position(opts)
+      {:ok, position} -> {:ok, position}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # C1b `:current`: read the server's live `@@gtid_executed` over a short-lived
+  # authenticated socket against the CONFIGURED connection coordinates and resume from
+  # it ("start from now"). Any fault fails the start fail-closed.
+  defp current_position(opts) do
+    with {:gen_tcp, _} = socket <- connect_socket(opts),
+         {:ok, conn} <- Handshake.connect(socket, Keyword.get(opts, :connection) || []),
+         {:ok, [[executed]]} <- Command.query(conn.socket, "SELECT @@global.gtid_executed") do
+      close_socket(conn.socket)
+      {:ok, %Position{gtid_set: executed, file: nil, pos: nil}}
+    else
+      {:error, reason} -> {:error, {:start_position_current_read_failed, reason}}
+      _other -> {:error, {:start_position_current_read_failed, :unknown}}
+    end
+  end
+
+  defp close_socket({:gen_tcp, s}), do: :gen_tcp.close(s)
+  defp close_socket({:ssl, s}), do: :ssl.close(s)
+
+  # A fresh pre-auth socket for the one-shot :current read, against the CONFIGURED
+  # connection coordinates (host/port from the pipeline's own connection block).
+  defp connect_socket(opts) do
+    conn = Keyword.get(opts, :connection) || []
+    host = Keyword.get(conn, :host, "localhost")
+    port = Keyword.get(conn, :port, 3306)
+    host = if is_binary(host), do: String.to_charlist(host), else: host
+
+    case :gen_tcp.connect(host, port, [:binary, active: false], 10_000) do
+      {:ok, s} -> {:gen_tcp, s}
+      {:error, _} = error -> error
     end
   end
 
@@ -83,7 +129,7 @@ defmodule Capstan.Supervisor do
 
     with {:ok, store} <- add_child(sup, Pipeline.store_spec(impl, store_options)),
          {:ok, resumed} <- CheckpointStore.read_position(impl, store),
-         {:ok, start_position} <- Pipeline.resolve_start_position(opts, resumed),
+         {:ok, start_position} <- resolve_start(opts, resumed),
          {:ok, assembler} <- add_child(sup, Pipeline.assembler_spec(opts, {impl, store})),
          {:ok, _connection} <-
            add_child(
@@ -103,7 +149,7 @@ defmodule Capstan.Supervisor do
     # refuses it :data_gap. A read fault fails the start fail-closed, same as the
     # lib-owned store read.
     with {:ok, resumed} <- sink.checkpoint(),
-         {:ok, start_position} <- Pipeline.resolve_start_position(opts, resumed),
+         {:ok, start_position} <- resolve_start(opts, resumed),
          {:ok, assembler} <- add_child(sup, Pipeline.assembler_spec(opts, nil)),
          {:ok, _connection} <-
            add_child(sup, Pipeline.connection_spec(opts, assembler, start_position, nil)) do

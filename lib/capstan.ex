@@ -49,17 +49,17 @@ defmodule Capstan do
 
   ## Start position
 
-  C1 resumes **only from the durable checkpoint** (`start_position: :checkpoint`, the
-  default). A populated store resumes from the persisted watermark. A fresh
-  (never-written) store sends the dump an **empty GTID set**, which requests the
-  server's full retained history — and a server that has already purged its earliest
-  logs refuses that dump, halting `:data_gap`. To start "from now" today, seed the
-  checkpoint store with the server's current `@@global.gtid_executed` before first
-  start (see usage-rules.md). An explicit `%Capstan.Position{}`
-  override and `:current` are **refused fail-closed** (`:start_position_override_unsupported`
-  / `:start_position_current_unsupported`) — honoring an explicit resume position
-  end-to-end (the `AssemblerServer` seeds its watermark from the store alone today) is a
-  C1-completeness follow-up. Refusing avoids a silent checkpoint hole.
+  `start_position:` accepts three forms. **`:checkpoint`** (default) resumes from the
+  position authority — the checkpoint store (lib-owned) or `c:Capstan.Sink.checkpoint/0`
+  (sink-owned); a fresh authority sends the dump an **empty GTID set**, which requests
+  the server's full retained history — a server that has already purged its earliest
+  logs refuses that dump, halting `:data_gap` (seed the authority with the server's
+  current `@@global.gtid_executed` for a "from now" start; see usage-rules.md). An
+  **explicit `%Capstan.Position{}`** resumes BOTH the dump and the assembler watermark
+  from that position — the operator asserts it is a safe resume point (transactions it
+  already covers are NOT re-delivered; anything after it streams). **`:current`** reads
+  the server's live `@@global.gtid_executed` pre-dump and resumes from it — "start from
+  now" without pre-seeding.
 
   ## Return values
 
@@ -70,8 +70,7 @@ defmodule Capstan do
   `:sink_missing_handle_transaction`, `:sink_missing_checkpoint`,
   `:sink_missing_handle_schema_change`, `:sink_missing_handle_snapshot`,
   `:snapshot_table_not_captured`), or from this module
-  (`:checkpoint_store_required`,
-  `:start_position_override_unsupported`, `:start_position_current_unsupported`).
+  (`:checkpoint_store_required`).
 
   ## Initial snapshot (C2)
 
@@ -164,17 +163,17 @@ defmodule Capstan do
     end
   end
 
-  # C1 resumes ONLY from the durable checkpoint (`:start_position` default `:checkpoint`).
-  # An explicit `%Position{}` override and `:current` are refused fail-closed: the spine
-  # threads a resume position to the `Connection`'s dump but the `AssemblerServer` seeds
-  # its watermark from the checkpoint store alone, so honoring an override end-to-end is a
-  # C1-completeness follow-up. Refusing here converts what would be a silent checkpoint
-  # hole (dump resumes from the override, the watermark from empty) into a clean refusal.
+  # C1b: `:start_position` accepts `:checkpoint` (default — resume from the position
+  # authority: the checkpoint store in lib-owned mode, `c:Sink.checkpoint/0` in
+  # sink-owned), an explicit `%Position{}` (resume BOTH the dump and the assembler
+  # watermark from it — the operator asserts this is a safe resume point), or `:current`
+  # (resume from the server's live `@@gtid_executed`, read pre-dump). Anything else is a
+  # config error.
   defp validate_start_position(opts) do
     case Keyword.get(opts, :start_position, :checkpoint) do
       :checkpoint -> :ok
-      %Position{} -> {:error, :start_position_override_unsupported}
-      :current -> {:error, :start_position_current_unsupported}
+      %Position{} -> :ok
+      :current -> :ok
       _other -> {:error, :config_invalid}
     end
   end

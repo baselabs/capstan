@@ -313,17 +313,29 @@ defmodule Capstan.SupervisorTest do
                Capstan.start_link(lib_opts(checkpoint_store: "not-a-keyword"))
     end
 
-    test "an explicit %Position{} start_position override is refused fail-closed (C1)" do
-      # C1 resumes only from the durable checkpoint; honoring an explicit override
-      # end-to-end is a follow-up, so it is refused rather than silently creating a
-      # checkpoint hole (dump resumes from the override, watermark from the empty store).
-      assert {:error, :start_position_override_unsupported} =
-               Capstan.start_link(lib_opts(start_position: %Capstan.Position{gtid_set: "x:1-5"}))
-    end
+    test "an explicit %Position{} override now RUNS (C1b) — no store child seeded past it" do
+      # C1b: the override seeds BOTH the dump and the assembler watermark (no silent
+      # checkpoint hole). The InMemory store starts empty; the override governs.
+      {:ok, sup} =
+        Capstan.start_link(
+          lib_opts(
+            start_position: %Capstan.Position{
+              gtid_set: "0f0f0f0f-0000-4000-8000-000000000001:1-5"
+            }
+          )
+        )
 
-    test "start_position: :current is refused fail-closed (C1 does not wire it)" do
-      assert {:error, :start_position_current_unsupported} =
-               Capstan.start_link(lib_opts(start_position: :current))
+      on_exit(fn -> stop_supervisor(sup) end)
+      assert is_pid(sup)
+
+      # The assembler's watermark seeded from the OVERRIDE (not the empty store):
+      # its processed_set contains 1-5.
+      state = :sys.get_state(child_pid(sup, :assembler))
+
+      assert Capstan.Gtid.member?(
+               state.processed_set,
+               {"0f0f0f0f-0000-4000-8000-000000000001", 3}
+             )
     end
 
     test "a valid lib-mode config starts a supervised pipeline" do

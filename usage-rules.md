@@ -28,7 +28,7 @@ Capstan.start_link(
   server_id: 1001,                              # replica identity; MUST be unique in the topology
   sink: MyApp.OrdersSink,                       # implements Capstan.Sink
   checkpoint_store: [module: MyApp.Store, options: []],   # lib-owned mode; see below
-  start_position: :checkpoint,                  # C1: :checkpoint (default) only
+  start_position: :checkpoint,                  # :checkpoint (default) | %Position{} | :current
   tables: [{"orders", "line_items"}],           # or :all (default); filter applied before decode
   max_command_retries: 5,                       # default 5; pre-establish failures only
   xa: :track,                                   # default :refuse; see "XA transactions"
@@ -70,6 +70,16 @@ persistent partition halts `:stream_stalled`. `stream_timeout_ms` MUST exceed
 window at or below the heartbeat interval would false-drop a healthy idle stream. All three
 values must be positive integers within the schedulable timer ceiling (2^32−1 ms ≈ 49.7
 days); anything else is refused `:config_invalid` before any socket opens.
+
+### Start positions
+
+`start_position:` accepts three forms. **`:checkpoint`** (default) resumes from the
+position authority — the checkpoint store (lib-owned) or your `checkpoint/0`
+(sink-owned). An **explicit `%Capstan.Position{}`** resumes BOTH the dump and the
+dedup watermark from that position — you assert it is a safe resume point; transactions
+it covers are not re-delivered, everything after it streams. **`:current`** reads the
+server's live `@@global.gtid_executed` once, pre-dump, and resumes from it — "start
+from now" without pre-seeding.
 
 ### First start — an empty checkpoint requests FULL retained history
 

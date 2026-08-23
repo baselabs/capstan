@@ -429,6 +429,10 @@ defmodule Capstan.Connection do
 
   defp refresh_checkpoint(%__MODULE__{checkpoint_store: {impl, store}} = state) do
     case CheckpointStore.read_position(impl, store) do
+      # A never-written store keeps the injected start position (C1b: an explicit
+      # override / the resolved :current — the store is empty until the FIRST checkpoint
+      # write; clobbering with "" would dump an empty set into :data_gap).
+      {:ok, nil} -> state
       {:ok, position} -> %{state | checkpoint_str: checkpoint_string(position)}
       {:error, _reason} -> state
     end

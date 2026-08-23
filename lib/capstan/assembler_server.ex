@@ -145,6 +145,9 @@ defmodule Capstan.AssemblerServer do
     xa = Keyword.get(opts, :xa, :refuse)
     max_prepared = Keyword.get(opts, :max_prepared_transactions, 10_000)
     watermark_observer = Keyword.get(opts, :watermark_observer)
+    # C1b: an explicit start_position override seeds BOTH the fold's watermark and the
+    # dedup set (matching the Connection's dump position exactly); nil = authority-only.
+    override = start_override(opts)
 
     case Keyword.get(opts, :checkpoint_mode, :lib_owned) do
       :lib_owned ->
@@ -158,7 +161,7 @@ defmodule Capstan.AssemblerServer do
           max_retries,
           xa,
           max_prepared,
-          watermark_observer
+          %{watermark_observer: watermark_observer, override: override}
         )
 
       :sink_owned ->
@@ -169,7 +172,7 @@ defmodule Capstan.AssemblerServer do
         # so the watermark observer and processed_set behave identically.
         case sink.checkpoint() do
           {:ok, resumed} ->
-            start_position = resumed || %Position{gtid_set: "", file: nil, pos: nil}
+            start_position = override || resumed || %Position{gtid_set: "", file: nil, pos: nil}
 
             state = %__MODULE__{
               assembler:
@@ -204,11 +207,11 @@ defmodule Capstan.AssemblerServer do
          max_retries,
          xa,
          max_prepared,
-         watermark_observer
+         %{watermark_observer: watermark_observer, override: override}
        ) do
     case CheckpointStore.read_position(impl, store) do
       {:ok, resumed} ->
-        start_position = resumed || %Position{gtid_set: "", file: nil, pos: nil}
+        start_position = override || resumed || %Position{gtid_set: "", file: nil, pos: nil}
 
         state = %__MODULE__{
           assembler:
@@ -232,6 +235,16 @@ defmodule Capstan.AssemblerServer do
       {:error, reason} ->
         # Fail closed: never resume the pipeline from a guessed position.
         {:stop, {:shutdown, {:halt, {:checkpoint_read_failed, reason}}}}
+    end
+  end
+
+  # An explicit start_position override (%Position{}) — anything else (nil, :checkpoint,
+  # :current) is not a watermark seed; :current is resolved by the supervisor into a
+  # %Position{} BEFORE any child starts and passed the same way.
+  defp start_override(opts) do
+    case Keyword.get(opts, :start_position) do
+      %Position{} = pos -> pos
+      _ -> nil
     end
   end
 

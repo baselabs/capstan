@@ -6,6 +6,18 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — C1b explicit start positions
+
+- `start_position:` now accepts an explicit `%Capstan.Position{}` (the dump AND the
+  assembler's dedup watermark seed from it — they can never disagree; the covered
+  transactions are not re-delivered) and `:current` (the server's live
+  `@@gtid_executed` read once pre-dump against the pipeline's own connection
+  coordinates — "start from now" without pre-seeding). A never-written checkpoint
+  store no longer clobbers the injected start with an empty set (which dumped full
+  history into `:data_gap` on a purged source). `:start_position_override_unsupported`
+  / `:start_position_current_unsupported` are retired. Live-proven: override-skips +
+  delivers-only-the-tail, and :current-starts-from-now marquees.
+
 ### Added — C1a sink-owned checkpoint mode (ADR-0004's deferred arm)
 
 - Omit `checkpoint_store:` and implement `c:Capstan.Sink.checkpoint/0`: the sink

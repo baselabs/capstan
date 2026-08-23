@@ -139,29 +139,24 @@ defmodule Capstan.Pipeline do
 
   @doc """
   Resolve the public `:start_position` (default `:checkpoint`) against the position the
-  checkpoint store resumed with.
+  authority (checkpoint store / sink checkpoint) resumed with.
 
     * `:checkpoint` — the resumed position (a `%Position{}` or `nil` for a fresh start);
-    * a `%Capstan.Position{}` — `{:error, :start_position_override_unsupported}` in C1
-      (an explicit override would resume the `Connection`'s dump but NOT the
-      `AssemblerServer`'s watermark, which seeds from the store alone — a silent hole; so
-      it is refused fail-closed, matching `Capstan.start_link/1`'s pre-flight check);
-    * `:current` — `{:error, :start_position_current_unsupported}` (C1 does not implement
-      "start from the server's current position"; it needs a live pre-connect query the
-      spine does not yet wire);
+    * a `%Capstan.Position{}` — the override itself (C1b): BOTH the dump and the
+      assembler watermark seed from it, so the two can never disagree;
+    * `:current` — `{:ok, :current, nil}` marker (C1b): the caller resolves it against
+      the server's live `@@global.gtid_executed` over an authenticated socket, pre-dump;
     * anything else — `{:error, :config_invalid}`.
   """
   @spec resolve_start_position(keyword(), Position.t() | nil) ::
           {:ok, Position.t() | nil}
-          | {:error,
-             :start_position_override_unsupported
-             | :start_position_current_unsupported
-             | :config_invalid}
+          | {:ok, :current, nil}
+          | {:error, :config_invalid}
   def resolve_start_position(opts, resumed) when is_list(opts) do
     case Keyword.get(opts, :start_position, :checkpoint) do
       :checkpoint -> {:ok, resumed}
-      %Position{} -> {:error, :start_position_override_unsupported}
-      :current -> {:error, :start_position_current_unsupported}
+      %Position{} = override -> {:ok, override}
+      :current -> {:ok, :current, nil}
       _other -> {:error, :config_invalid}
     end
   end
@@ -231,6 +226,8 @@ defmodule Capstan.Pipeline do
   def assembler_spec(opts, checkpoint_store) when is_list(opts) do
     mode = if lib_mode?(opts), do: :lib_owned, else: :sink_owned
 
+    # C1b: an explicit start_position override seeds the assembler's watermark (the
+    # same value the dump resumes from — the two can never disagree).
     server_opts =
       [
         sink: Keyword.fetch!(opts, :sink),
@@ -240,7 +237,9 @@ defmodule Capstan.Pipeline do
         xa: Keyword.get(opts, :xa, :refuse),
         max_prepared_transactions: Keyword.get(opts, :max_prepared_transactions, 10_000),
         checkpoint_mode: mode
-      ] ++ if(mode == :lib_owned, do: [checkpoint_store: checkpoint_store], else: [])
+      ] ++
+        if(mode == :lib_owned, do: [checkpoint_store: checkpoint_store], else: []) ++
+        Keyword.take(opts, [:start_position])
 
     %{id: :assembler, start: {AssemblerServer, :start_link, [server_opts]}, restart: :temporary}
   end
