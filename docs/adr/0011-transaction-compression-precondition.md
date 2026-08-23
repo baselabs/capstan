@@ -25,7 +25,7 @@ surfaced only after the consumer had wired a checkpoint store and begun streamin
 
 ## Decision
 
-`Config.check_preconditions/1` gains a sixth variable: `binlog_transaction_compression` must
+`Capstan.Config.check_preconditions/1` gains a sixth variable: `binlog_transaction_compression` must
 be OFF (`"0"` as text) or the connection refuses with the distinct, actionable reason
 `:binlog_transaction_compression_on` — at connect, before the dump, alongside the other
 gate variables (ADR-0002's posture: distinct reason per violation, one query, text-compared).
