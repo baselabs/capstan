@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # DOCKER MANDATE (routed from Task 18). The :integration marquees stream from the shared
       # substrate started below, and the :requires_docker marquees spin their own THROWAWAY
@@ -87,7 +87,7 @@ jobs:
           elixir-version: "1.19"
 
       - name: Cache deps and _build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             deps
@@ -155,3 +155,43 @@ jobs:
       - name: Stop MySQL substrate
         if: always()
         run: docker rm -f mysql-cdc-probe || true
+
+  # The DECLARED floor (mix.exs `elixir: "~> 1.15"`) — the main matrix pins 1.19, so without
+  # this leg the floor claim is never tested anywhere. Compile (warnings-as-errors, proving
+  # e.g. the pin-operator `size(^var)` form is floor-valid) + the full unit suite (real-byte
+  # conformance fixtures included; the unit tag excludes the substrate marquees by default).
+  # Every test-env dependency floors at <= 1.13 (credo >= 1.13, dialyxir >= 1.6, dotenvy ~>
+  # 1.13, decimal ~> 1.12, jason ~> 1.4), so the whole env resolves on 1.15.
+  floor:
+    name: Elixir floor (1.15)
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up BEAM (Erlang/OTP + Elixir)
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "26"
+          elixir-version: "1.15.8"
+
+      - name: Cache deps and _build
+        uses: actions/cache@v5
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-floor-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-floor-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Unit tests
+        run: mix test
