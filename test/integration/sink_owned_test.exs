@@ -88,37 +88,6 @@ defmodule Capstan.Integration.SinkOwnedTest do
   end
 
   ## ---------------------------------------------------------------------------
-  ## the atomic sink — data + position in ONE durable write
-  ## ---------------------------------------------------------------------------
-
-  # (Defined at the bottom of the file, top-level, so the module is available before
-  # this test module's body runs — see AtomicLedgerSink below.)
-
-  @impl true
-  def checkpoint do
-    case :ets.lookup(:sink_owned_ckpt, :pos) do
-      [{:pos, set}] -> {:ok, %Capstan.Position{gtid_set: set, file: nil, pos: nil}}
-      [] -> {:ok, nil}
-    end
-  end
-
-  @impl true
-  def handle_transaction(txn) do
-    # THE atomic write: the row append(s) and the position in one ets insert batch —
-    # a crash mid-delivery leaves either BOTH or NEITHER.
-    gno = txn.gtid |> String.split(":") |> List.last() |> String.to_integer()
-
-    :ets.insert(:sink_owned_ckpt, {:pos, txn.position.gtid_set})
-    :ets.insert(:sink_owned_ledger_rows, {:gtid, txn.gtid, gno})
-
-    if pid = :persistent_term.get({__MODULE__, :test_pid}, nil) do
-      send(pid, {:sink_owned_txn, txn.gtid})
-    end
-
-    {:ok, txn.position}
-  end
-
-  ## ---------------------------------------------------------------------------
   ## helpers
   ## ---------------------------------------------------------------------------
 

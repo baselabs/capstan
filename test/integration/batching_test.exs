@@ -96,7 +96,9 @@ defmodule Capstan.Integration.BatchingTest do
     )
 
     for v <- ["b-1", "b-2", "b-3"] do
-      assert {:txn, _g, [%{record: %{"v" => v}}], _p} = stream_one()
+      # Pin: each delivered txn carries ITS loop value, in order — the
+      # unpinned form re-bound v from the row and checked nothing.
+      assert {:txn, _g, [%{record: %{"v" => ^v}}], _p} = stream_one()
     end
 
     wait_for(fn -> committed_count(store_table, ctx.table) >= base + 3 end)

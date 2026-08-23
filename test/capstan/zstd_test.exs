@@ -278,6 +278,323 @@ defmodule Capstan.ZstdTest do
              Zstd.decompress(comp_block(raw_sf0("abcd") <> <<1, 0xC0>>))
   end
 
+  # -- crafted VALID frames: the encoder shapes the reference CLI never emits --
+  #
+  # A test-side encoder for the sequences section (RFC 8878 §3.1.1.3.2.1.2),
+  # bit-for-bit the mirror of the production BitReader.Reverse: values are
+  # written MSB-first in read order; the byte stream carries the earliest bits
+  # in the LAST byte below the pad-`1` flag, then fills earlier bytes
+  # backwards. The default-table baselines/extras are transcribed from RFC
+  # Tables 16-17 (fetched first-hand from rfc-editor.org this session).
+
+  @ll_baseline_length 36
+  @ll_extra_length 36
+
+  defp ll_baseline,
+    do:
+      Enum.to_list(0..15) ++
+        [
+          16,
+          18,
+          20,
+          22,
+          24,
+          28,
+          32,
+          40,
+          48,
+          64,
+          128,
+          256,
+          512,
+          1024,
+          2048,
+          4096,
+          8192,
+          16_384,
+          32_768,
+          65_536
+        ]
+
+  defp ll_extra,
+    do:
+      List.duplicate(0, 16) ++ [1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+  @ml_baseline_length 53
+  @ml_extra_length 53
+
+  defp ml_baseline,
+    do:
+      Enum.map(0..31, &(&1 + 3)) ++
+        [
+          35,
+          37,
+          39,
+          41,
+          43,
+          47,
+          51,
+          59,
+          67,
+          83,
+          99,
+          131,
+          259,
+          515,
+          1027,
+          2051,
+          4099,
+          8195,
+          16_387,
+          32_771,
+          65_539
+        ]
+
+  defp ml_extra,
+    do:
+      List.duplicate(0, 32) ++
+        [1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+  # n bits of a value, MSB first (exactly what read_exact consumes).
+  defp bits_of(_v, 0), do: []
+
+  defp bits_of(v, n), do: [v >>> (n - 1) &&& 1 | bits_of(v, n - 1)]
+
+  # Read-order bits -> the byte stream the Reverse reader parses: the last
+  # byte is the flag `1` at bit position s with the FIRST s bits below it,
+  # remaining bits fill earlier bytes from the end, MSB-first within bytes.
+  defp rev_bitstream(bits) do
+    s = rem(length(bits), 8)
+    {head, body} = Enum.split(bits, s)
+    head_value = Enum.reduce(head, 0, fn b, acc -> acc <<< 1 ||| b end)
+    last_byte = head_value ||| 1 <<< s
+
+    body_ints =
+      body
+      |> Enum.chunk_every(8)
+      |> Enum.map(&Enum.reduce(&1, 0, fn b, acc -> acc <<< 1 ||| b end))
+
+    :erlang.list_to_binary(Enum.reverse(body_ints) ++ [last_byte])
+  end
+
+  defp predef_tables do
+    {:ok, ll} = Fse.build(ll_default(), 6)
+    {:ok, of} = Fse.build(of_default(), 5)
+    {:ok, ml} = Fse.build(ml_default(), 6)
+    %{ll: ll, of: of, ml: ml}
+  end
+
+  # The bits of one sequence's reads, in production read order:
+  # offset extra, then match extra, then literals extra.
+  defp seq_read_bits(ov, ml, ll, of_sym, ml_sym, ll_sym) do
+    bits_of(ov - (1 <<< of_sym), of_sym) ++
+      bits_of(ml - Enum.at(ml_baseline(), ml_sym), Enum.at(ml_extra(), ml_sym)) ++
+      bits_of(ll - Enum.at(ll_baseline(), ll_sym), Enum.at(ll_extra(), ll_sym))
+  end
+
+  # A state with the wanted symbol, and whether target t is reachable from s
+  # (advance writes t - base in nb bits — the production advance's inverse).
+  defp find_state(cells, sym) do
+    cells |> Enum.find(fn {_st, {s, _, _}} -> s == sym end) |> elem(0)
+  end
+
+  defp reachable?(cells, s, t) do
+    {_, nb, base} = cells[s]
+    diff = t - base
+    diff >= 0 and diff < 1 <<< nb
+  end
+
+  defp sym_a(cells, state), do: elem(cells[state], 0)
+
+  # The expected-output mirror of the production match copy: literals, then a
+  # back-reference copy that repeats while overlapping (RFC 3.1.1.4).
+  defp match_copy(out, offset, ml) do
+    start = byte_size(out) - offset
+    chunk = binary_part(out, start, offset)
+
+    copied =
+      if ml <= offset,
+        do: binary_part(chunk, 0, ml),
+        else: :binary.copy(chunk, div(ml, offset)) <> binary_part(chunk, 0, rem(ml, offset))
+
+    out <> copied
+  end
+
+  describe "crafted VALID sequences sections — RLE tables" do
+    # modes 0x54: all three tables in RLE_Mode; symbols ll=4 (ll=4, 0 extra
+    # bits), of=1 (1 extra bit: ov = 2 + bit), ml=0 (ml=3, 0 extra bits).
+    # No init or advance bits exist for RLE tables (their table log is 0) —
+    # the bitstream is ONLY the per-sequence offset-extra bits.
+    test "an all-RLE sequences section inflates a two-sequence block exactly" do
+      literals = "abcdefgh"
+      seqs = [{4, 2, 3}, {4, 3, 3}]
+
+      bits =
+        Enum.map(seqs, fn {_ll, ov, _ml} -> bits_of(ov - 2, 1) end) |> List.flatten()
+
+      content =
+        raw_sf0(literals) <>
+          <<2, 0x54, 4, 1, 0>> <> rev_bitstream(bits)
+
+      # Expected output by the mirror: arm1 (ov=2, ll≠0) takes r2=4; arm2
+      # (ov=3, ll≠0) takes r3=8 after the reps shift.
+      expected =
+        match_copy(match_copy("abcd", 4, 3) |> Kernel.<>("efgh"), 8, 3)
+
+      assert {:ok, ^expected} = Zstd.decompress(comp_block(content))
+    end
+
+    test "the 3-byte sequence count form (n >= 0x7F00) inflates exactly" do
+      # n = 0x7F00 + 1: every sequence is ll=1 (RLE ll sym 1), ov=1 (RLE of
+      # sym 0, arm0: repeat r1), ml=3 (RLE ml sym 0) — one literal byte then
+      # three copies of it. ZERO read bits per sequence: the bitstream is the
+      # flag byte alone.
+      n = 0x7F00 + 1
+      literals = for i <- 1..n, do: <<i &&& 0xFF>>
+      literals_bin = IO.iodata_to_binary(literals)
+
+      # Raw literals need the 3-byte size format for regen > 4095.
+      lit_section =
+        <<0x0C ||| (n &&& 0xF) <<< 4, n >>> 4 &&& 0xFF, n >>> 12, literals_bin::binary>>
+
+      content = lit_section <> <<0xFF, 1, 0, 0x54, 1, 0, 0>> <> <<1>>
+
+      expected =
+        literals |> Enum.map(fn <<b>> -> :binary.copy(<<b>>, 4) end) |> IO.iodata_to_binary()
+
+      assert byte_size(expected) == n * 4
+      assert {:ok, ^expected} = Zstd.decompress(comp_block(content))
+    end
+  end
+
+  describe "crafted VALID sequences sections — predefined + repeat tables" do
+    test "a second block in Repeat_Mode reuses the first block's tables" do
+      t = predef_tables()
+      s_ll = find_state(t.ll, 4)
+      s_of = find_state(t.of, 1)
+      s_ml = find_state(t.ml, 0)
+
+      init_bits = bits_of(s_ll, 6) ++ bits_of(s_of, 5) ++ bits_of(s_ml, 6)
+      # n=1: no advance bits (the last sequence never advances).
+      block1 = raw_sf0("abcdef") <> <<1, 0>> <> rev_bitstream(init_bits ++ bits_of(0, 1))
+      block2 = raw_sf0("ghijkl") <> <<1, 0xFC>> <> rev_bitstream(init_bits ++ bits_of(0, 1))
+
+      frame =
+        bare_header() <>
+          block_header(2, byte_size(block1), false) <>
+          block1 <>
+          block_header(2, byte_size(block2), true) <> block2
+
+      # Block1: literals "abcd", ov=2 (arm1: r2=4), ml=3, leftover "ef".
+      out1 = match_copy("abcd", 4, 3) <> "ef"
+      # Block2 continues the frame's reps {4, 1, 8}: literals "ghij", ov=2
+      # (arm1: r2=1 — the shifted r2), ml=3, leftover "kl".
+      out2 = match_copy(out1 <> "ghij", 1, 3) <> "kl"
+
+      assert {:ok, ^out2} = Zstd.decompress(frame)
+    end
+
+    test "a state advance past the bitstream's end is refused (:bitstream_exhausted)" do
+      # n=2 with predefined tables: init (6+5+6 bits) + zero extra bits for
+      # the first sequence; the advance's next-state read has nothing left.
+      t = predef_tables()
+
+      init_bits =
+        bits_of(find_state(t.ll, 4), 6) ++
+          bits_of(find_state(t.of, 0), 5) ++ bits_of(find_state(t.ml, 0), 6)
+
+      content = raw_sf0("abcd") <> <<2, 0>> <> rev_bitstream(init_bits)
+
+      assert {:error, :bitstream_exhausted} = Zstd.decompress(comp_block(content))
+    end
+
+    test "ll==0 repeat-offset arms resolve exactly (ov=2 -> r3, ov=3 -> r1-1)" do
+      # ll table PREDEFINED (states walked ll=4 then ll=0 twice); of/ml RLE:
+      # of sym 1 (1 extra bit: ov 2 or 3), ml sym 5 (ml=8, 0 extra bits).
+      t = predef_tables()
+
+      # Find ll states: sym 4 first, then two reachable sym-0 states in a row.
+      {s_a, s_z, s_y} =
+        Enum.find_value(
+          for s_a <- 0..63, sym_a(t.ll, s_a) == 4 do
+            s_a
+          end,
+          fn s_a ->
+            Enum.find_value(
+              for s_z <- 0..63, sym_a(t.ll, s_z) == 0, reachable?(t.ll, s_a, s_z) do
+                s_z
+              end,
+              fn s_z ->
+                Enum.find_value(
+                  for s_y <- 0..63, sym_a(t.ll, s_y) == 0, reachable?(t.ll, s_z, s_y) do
+                    s_y
+                  end,
+                  fn s_y -> {s_a, s_z, s_y} end
+                )
+              end
+            )
+          end
+        )
+
+      {_, ll_nb, ll_base} = t.ll[s_a]
+      {_, z_nb, z_base} = t.ll[s_z]
+
+      bits =
+        bits_of(s_a, 6) ++
+          seq_read_bits(2, 8, 4, 1, 5, 4) ++
+          bits_of(s_z - ll_base, ll_nb) ++
+          seq_read_bits(2, 8, 0, 1, 5, 0) ++
+          bits_of(s_y - z_base, z_nb) ++
+          seq_read_bits(3, 8, 0, 1, 5, 0)
+
+      content = raw_sf0("wxyz") <> <<3, 0x14, 1, 5>> <> rev_bitstream(bits)
+
+      # Mirror: seq1 (ll=4, ov=2, ml=8) arm1 r2=4; seq2 (ll=0, ov=2) arm2
+      # r3=8; seq3 (ll=0, ov=3) arm3 r1-1 = 7.
+      out = match_copy("wxyz", 4, 8)
+      out = match_copy(out, 8, 8)
+      out = match_copy(out, 7, 8)
+
+      assert {:ok, ^out} = Zstd.decompress(comp_block(content))
+    end
+  end
+
+  # -- crafted Huffman jump-table arms (4-stream literals, direct-weight tree) --
+
+  # A minimal direct-weight tree (RFC 4.2.1.1): header 129 = 2 weight nibbles;
+  # weights 1,1 complete with the deduced last weight. Two bytes total.
+  defp direct_tree, do: <<129, 0x11>>
+
+  # The 4-byte Huffman size header (sf=2): the 32-bit value the decoder reads
+  # INCLUDES b0, whose high nibble is the low 4 bits of regen — the sizes sit
+  # LSB-after the 4 flag bits (RFC 3.1.1.3.1.1).
+  defp huff_sizes(regen, comp),
+    do: <<regen <<< 4 ||| comp <<< 18 ||| 0x0A::32-little>>
+
+  test "a 4-stream literals section with a negative Stream4 size is refused" do
+    # regen=1 makes last = regen - 3*seg = -2 < 0 — the jump table cannot
+    # describe it. The tree is valid; the SECTION sizes are the corruption.
+    content = huff_sizes(1, 8) <> direct_tree() <> <<0, 0, 0, 0, 0, 0>>
+
+    assert {:error, :corrupt_jump_table} = Zstd.decompress(comp_block(content))
+  end
+
+  test "a 4-stream literals section with a truncated jump table is refused" do
+    # comp counts 5 bytes: tree(2) + only 3 of the 6 jump-table bytes.
+    content = huff_sizes(1, 5) <> direct_tree() <> <<0, 0, 0>>
+
+    assert {:error, :truncated_frame} = Zstd.decompress(comp_block(content))
+  end
+
+  test "an invalid Huffman weight description is refused at the tree read" do
+    # Single-stream sizes (sf=0): the 24-bit value includes b0 — regen=0,
+    # comp=2; the "tree" opens an FSE-coded weight description of 5 bytes but
+    # only 1 follows.
+    content = <<0x02, (0x02 ||| 2 <<< 14) >>> 8::16-little>> <> <<5, 1>>
+
+    assert {:error, _} = Zstd.decompress(comp_block(content))
+  end
+
   # -- fail-closed tripwires (protected mutations proven RED) -------------------
 
   test "a tampered compressed byte is refused, never silently mis-decoded" do
@@ -423,6 +740,7 @@ defmodule Capstan.ZstdTest do
   test "predefined distributions match the RFC's declared shapes" do
     assert length(ll_default()) == @ll_default_length
     assert length(ml_default()) == @ml_default_length
+    assert length(of_default()) == @of_default_length
     # The distributions must exactly fill their tables (lowprob counts as 1).
     assert Enum.sum(Enum.map(ll_default(), &abs/1)) == 64
     assert Enum.sum(Enum.map(ml_default(), &abs/1)) == 64

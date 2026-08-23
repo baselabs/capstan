@@ -223,14 +223,12 @@ defmodule Capstan.Integration.XaTest do
     sup
   end
 
-  defp raw_socket(ctx) do
+  defp raw_socket(_ctx) do
     {:ok, s} =
       :gen_tcp.connect(~c"127.0.0.1", MysqlCase.shared_port(), [:binary, active: false], 5000)
 
     s
   end
-
-  defp raw_socket_element({:gen_tcp, s}), do: s
 
   defp checkpoint_count(_ctx) do
     {store_table, table} = :persistent_term.get({__MODULE__, :store})

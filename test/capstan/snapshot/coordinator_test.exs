@@ -233,7 +233,6 @@ defmodule Capstan.Snapshot.CoordinatorTest do
   @charset "utf8mb4"
   @collation "utf8mb4_0900_ai_ci"
   @stub_weights %{"a" => @w_a, "Z" => @w_z, "zed" => @w_zed}
-  @dual_z %{raw: "Z", weight: @w_z}
   @sentinel "sentinel-cursor-raw"
 
   setup do
