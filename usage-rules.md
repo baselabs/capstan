@@ -37,7 +37,10 @@ Capstan.start_link(
 ```
 
 - Returns `{:ok, supervisor_pid}`, or `{:error, reason}` where `reason` is a value-free atom.
-  A bad substrate or config is refused **before** any socket opens.
+  A bad substrate or config is refused **before** any socket opens. An option key outside
+  the documented surface — a misspelled key (`stream_timeout:` for `stream_timeout_ms:`) at
+  the top level, in `connection:`, in `snapshot:`, or in a store block — is refused
+  `:unknown_option` rather than silently defaulted.
 - Embed it with the child spec: `{Capstan, connection: [...], server_id: ..., sink: ...,
   checkpoint_store: [...]}`.
 
@@ -90,7 +93,7 @@ is simply resumed from:
 
 `Capstan.start_link/1` returns `{:error, reason}` with one of:
 `:server_id_required`, `:config_invalid`, `:tls_verification_unspecified`,
-`:invalid_liveness_config`, `:invalid_sink`,
+`:invalid_liveness_config`, `:unknown_option`, `:invalid_sink`,
 `:sink_missing_handle_transaction`, `:sink_missing_checkpoint`,
 `:sink_missing_handle_schema_change`, `:checkpoint_store_required`, `:sink_owned_mode_unsupported`,
 `:start_position_override_unsupported`, `:start_position_current_unsupported`. In snapshot mode

@@ -327,6 +327,19 @@ defmodule Capstan.SupervisorTest do
       assert state.heartbeat_period_ms == 5_000
       assert state.stream_timeout_ms == 6_000
     end
+
+    test "a misspelled option key is refused :unknown_option through start_link" do
+      # stream_timeout: for stream_timeout_ms: — the typo would otherwise silently apply
+      # the default, the exact ignored-config class the fail-closed posture forbids.
+      assert {:error, :unknown_option} = Capstan.start_link(lib_opts(stream_timeout: 5_000))
+    end
+
+    test "an unknown checkpoint_store block key is refused :unknown_option" do
+      assert {:error, :unknown_option} =
+               Capstan.start_link(
+                 lib_opts(checkpoint_store: [module: Capstan.CheckpointStore.InMemory, modul: X])
+               )
+    end
   end
 
   describe "supervision — a fail-closed halt does not take down the host supervisor" do

@@ -63,8 +63,8 @@ defmodule Capstan do
 
   `{:ok, supervisor_pid}` on success, or `{:error, reason}` — a value-free atom from
   `Capstan.Config` (`:server_id_required`, `:config_invalid`,
-  `:tls_verification_unspecified`, `:invalid_liveness_config`), from `Capstan.Pipeline`
-  (`:invalid_sink`,
+  `:tls_verification_unspecified`, `:invalid_liveness_config`, `:unknown_option`),
+  from `Capstan.Pipeline` (`:invalid_sink`,
   `:sink_missing_handle_transaction`, `:sink_missing_checkpoint`,
   `:sink_missing_handle_schema_change`, `:sink_missing_handle_snapshot`,
   `:snapshot_table_not_captured`), or from this module
@@ -130,14 +130,25 @@ defmodule Capstan do
 
   # Fail closed on a malformed lib-owned checkpoint store BEFORE any child starts, so a
   # missing `:module` surfaces as a clean `{:error, :checkpoint_store_required}` from
-  # `start_link/1` rather than a `KeyError` crash deep in `AssemblerServer` init.
+  # `start_link/1` rather than a `KeyError` crash deep in `AssemblerServer` init. An
+  # unrecognized block key (a typo) refuses `:unknown_option` — same posture as
+  # `Config.validate/1`.
   defp validate_checkpoint_store(opts) do
     case Keyword.get(opts, :checkpoint_store) do
       config when is_list(config) ->
-        if Keyword.keyword?(config) and is_atom(Keyword.get(config, :module)) and
-             Keyword.get(config, :module) != nil,
-           do: :ok,
-           else: {:error, :checkpoint_store_required}
+        cond do
+          not Keyword.keyword?(config) ->
+            {:error, :checkpoint_store_required}
+
+          Keyword.keys(config) -- [:module, :options] != [] ->
+            {:error, :unknown_option}
+
+          not (is_atom(Keyword.get(config, :module)) and Keyword.get(config, :module) != nil) ->
+            {:error, :checkpoint_store_required}
+
+          true ->
+            :ok
+        end
 
       _ ->
         {:error, :checkpoint_store_required}

@@ -189,6 +189,39 @@ defmodule Capstan.ConfigTest do
     end
   end
 
+  describe "validate/1 — unknown option keys are refused, never silently defaulted" do
+    test "an unknown top-level key is refused :unknown_option (the typo class)" do
+      # stream_timeout: for stream_timeout_ms: would otherwise apply the 60_000 default
+      # silently — the exact ignored-config class the fail-closed posture forbids.
+      assert {:error, :unknown_option} = Config.validate(opts(stream_timeout: 5_000))
+      assert {:error, :unknown_option} = Config.validate(opts(heartbeat_period: 5_000))
+    end
+
+    test "child_spec's :id is accepted (child_spec/1 consumes it from the same opts)" do
+      assert {:ok, resolved} = Config.validate(opts(id: :orders_pipeline))
+      assert resolved.server_id == 5115
+    end
+
+    test "an unknown connection key is refused :unknown_option" do
+      assert {:error, :unknown_option} = Config.validate(opts([], connect_timeout: 5_000))
+      assert {:error, :unknown_option} = Config.validate(opts([], usename: "root"))
+    end
+
+    test "an unknown snapshot block key is refused :unknown_option" do
+      snapshot = [store: [module: SomeStore], chunk_size: 100, chunksize: 100]
+
+      assert {:error, :unknown_option} =
+               Config.validate_snapshot(opts(tables: [{"a", "b"}], snapshot: snapshot))
+    end
+
+    test "an unknown snapshot store block key is refused :unknown_option" do
+      snapshot = [store: [module: SomeStore, otps: []]]
+
+      assert {:error, :unknown_option} =
+               Config.validate_snapshot(opts(tables: [{"a", "b"}], snapshot: snapshot))
+    end
+  end
+
   ## ---------------------------------------------------------------------------
   ## Option validation — ssl default + F6 fail-closed TLS verification
   ## ---------------------------------------------------------------------------

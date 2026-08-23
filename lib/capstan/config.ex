@@ -74,6 +74,44 @@ defmodule Capstan.Config do
 
   @server_uuid_query "SELECT @@server_uuid"
 
+  # The public `Capstan.start_link/1` option surface. `:id` is `child_spec/1`'s (it is
+  # consumed from the same forwarded opts, so it must pass). Anything outside this set is
+  # refused `:unknown_option` — a typo'd key (`stream_timeout:` for `stream_timeout_ms:`)
+  # must never silently fall back to a default.
+  @start_link_options [
+    :connection,
+    :server_id,
+    :sink,
+    :checkpoint_store,
+    :start_position,
+    :tables,
+    :snapshot,
+    :max_command_retries,
+    :reconnect_backoff,
+    :heartbeat_period_ms,
+    :stream_timeout_ms,
+    :id
+  ]
+
+  # The validated `connection:` block's keys (the block is REBUILT from exactly these, so
+  # an extra key has no passthrough today — refusing makes that drop loud).
+  @connection_options [
+    :host,
+    :port,
+    :username,
+    :password,
+    :database,
+    :ssl,
+    :ssl_opts,
+    :auth_plugins
+  ]
+
+  # The validated `snapshot:` block's keys; the store blocks (`checkpoint_store:`,
+  # snapshot `store:`) share `[:module, :options]` — `options` is implementation
+  # passthrough, never introspected.
+  @snapshot_options [:tables, :store, :chunk_size]
+  @store_block_options [:module, :options]
+
   @typedoc "The normalised configuration `validate/1` returns on success."
   @type t :: %{
           connection: keyword(),
@@ -90,6 +128,7 @@ defmodule Capstan.Config do
           | :server_id_required
           | :tls_verification_unspecified
           | :invalid_liveness_config
+          | :unknown_option
 
   @typedoc "A value-free precondition-gate refusal (ADR-0002)."
   @type precondition_error ::
@@ -121,8 +160,10 @@ defmodule Capstan.Config do
   `:tls_verification_unspecified` (`ssl: true` with no CA source and no explicit
   `verify:`), `:invalid_liveness_config` (`stream_timeout_ms <= heartbeat_period_ms`,
   compared after defaults are applied — a window at or below the heartbeat interval would
-  false-drop a healthy idle stream), and `:config_invalid` (any other missing or
-  mis-shaped option, including a liveness value beyond the schedulable timer ceiling).
+  false-drop a healthy idle stream), `:unknown_option` (a key outside the documented
+  surface — top level, `connection:`, `snapshot:`, or a store block — never silently
+  defaulted), and `:config_invalid` (any other missing or mis-shaped option, including a
+  liveness value beyond the schedulable timer ceiling).
   Defaults applied: `ssl` true, `ssl_opts` `[]`,
   `auth_plugins` `[:caching_sha2_password]`, `password` `""`, `database` `nil`,
   `max_command_retries` `5`, `reconnect_backoff` `1_000`, `heartbeat_period_ms` `15_000`,
@@ -130,7 +171,8 @@ defmodule Capstan.Config do
   """
   @spec validate(keyword()) :: {:ok, t()} | {:error, validation_error()}
   def validate(opts) when is_list(opts) do
-    with {:ok, server_id} <- fetch_server_id(opts),
+    with :ok <- reject_unknown_keys(opts, @start_link_options),
+         {:ok, server_id} <- fetch_server_id(opts),
          {:ok, connection} <- fetch_connection(opts),
          {:ok, max_command_retries} <- fetch_max_command_retries(opts),
          {:ok, liveness} <- fetch_liveness(opts) do
@@ -334,11 +376,28 @@ defmodule Capstan.Config do
     end
   end
 
+  # Fail closed on an unrecognized option key: a typo would otherwise silently apply the
+  # default — the exact ignored-config class the fail-closed posture forbids. The reason
+  # is value-free (it names the class, never the key). Non-tuple elements are skipped so
+  # a non-keyword list keeps its existing `:server_id_required` shape, not a raise.
+  defp reject_unknown_keys(opts, allowed) do
+    unknown =
+      Enum.flat_map(opts, fn
+        {key, _value} -> if key in allowed, do: [], else: [key]
+        _other -> []
+      end)
+
+    if unknown == [], do: :ok, else: {:error, :unknown_option}
+  end
+
   defp fetch_connection(opts) do
     conn = Keyword.get(opts, :connection)
 
     if Keyword.keyword?(conn) do
-      normalise_connection(conn)
+      case reject_unknown_keys(conn, @connection_options) do
+        :ok -> normalise_connection(conn)
+        {:error, _reason} = error -> error
+      end
     else
       {:error, :config_invalid}
     end
@@ -433,7 +492,8 @@ defmodule Capstan.Config do
   ## ---------------------------------------------------------------------------
 
   defp normalise_snapshot(snapshot, opts) do
-    with {:ok, tables} <- fetch_snapshot_tables(snapshot, opts),
+    with :ok <- reject_unknown_keys(snapshot, @snapshot_options),
+         {:ok, tables} <- fetch_snapshot_tables(snapshot, opts),
          {:ok, store} <- fetch_snapshot_store(snapshot),
          {:ok, chunk_size} <- fetch_snapshot_chunk_size(snapshot) do
       {:ok, %{tables: tables, store: store, chunk_size: chunk_size}}
@@ -465,11 +525,15 @@ defmodule Capstan.Config do
   defp fetch_snapshot_store(snapshot) do
     with store when is_list(store) <- Keyword.get(snapshot, :store),
          true <- Keyword.keyword?(store),
+         :ok <- reject_unknown_keys(store, @store_block_options),
          module when is_atom(module) and not is_nil(module) <- Keyword.get(store, :module),
          options when is_list(options) <- Keyword.get(store, :options, []),
          true <- Keyword.keyword?(options) do
       {:ok, {module, options}}
     else
+      # An explicit value-free refusal (:unknown_option) passes through; only the
+      # shape-match failures map to the generic :config_invalid.
+      {:error, _reason} = error -> error
       _ -> {:error, :config_invalid}
     end
   end
