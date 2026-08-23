@@ -234,6 +234,24 @@ defmodule Capstan.FixtureCapture do
         ]
       },
       %{
+        # C5: a full two-phase XA — the prepare transaction (rows + XA END + XA_prepare
+        # type 38) and the separate resolution transaction (QUERY "XA COMMIT X'..',X'..',N").
+        # p1 − p0 covers BOTH GTIDs (G_p enters @@gtid_executed at prepare).
+        name: "xa",
+        server_id: 4007,
+        setup: [
+          "DROP TABLE IF EXISTS xa_widgets",
+          "CREATE TABLE xa_widgets (id INT PRIMARY KEY, name VARCHAR(50)) ENGINE=InnoDB"
+        ],
+        statements: [
+          "XA START 'xa-gtrid','xa-bqual',7",
+          "INSERT INTO xa_widgets (id, name) VALUES (1, 'xa-one')",
+          "XA END 'xa-gtrid','xa-bqual',7",
+          "XA PREPARE 'xa-gtrid','xa-bqual',7",
+          "XA COMMIT 'xa-gtrid','xa-bqual',7"
+        ]
+      },
+      %{
         name: "myisam",
         server_id: 4006,
         setup: [

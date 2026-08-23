@@ -82,6 +82,7 @@ defmodule Capstan.Assembler do
 
   alias Capstan.Binlog.{Decoder, Event, Rows, TableMap, TableRegistry}
   alias Capstan.{Change, Gtid, Position, SchemaChange, Transaction}
+  alias Capstan.Xa
 
   @typedoc "An emitted committed unit."
   @type output :: Transaction.t() | SchemaChange.t()
@@ -99,21 +100,53 @@ defmodule Capstan.Assembler do
            begun?: boolean()
          }
 
+  @type xa_policy :: :refuse | :track
+
+  # A pooled prepare (ADR-0006): the buffered transaction awaiting its resolution,
+  # keyed by the XID digest (`Capstan.Xa.Id`). Never emitted, never inspected.
+  @typep pooled :: %{txn: inflight()}
+
   @type t :: %__MODULE__{
           gtid_set: Gtid.t(),
           file: String.t() | nil,
           pos: non_neg_integer() | nil,
           registry: TableRegistry.t(),
           filter: filter(),
-          txn: inflight() | nil
+          txn: inflight() | nil,
+          xa: xa_policy(),
+          prepared: %{optional(Capstan.Xa.Id.t()) => pooled()},
+          max_prepared: pos_integer(),
+          startup_xids: MapSet.t()
         }
 
-  defstruct [:gtid_set, :file, :pos, :registry, :filter, :txn]
+  # Rule 1: `txn` carries row values and `prepared` carries row values + XID digests
+  # (a digest is not emittable either — dictionary-reversible for low-entropy XIDs).
+  @derive {Inspect, only: [:gtid_set, :file, :pos, :filter, :xa, :max_prepared]}
+  defstruct [
+    :gtid_set,
+    :file,
+    :pos,
+    :registry,
+    :filter,
+    :txn,
+    :xa,
+    :max_prepared,
+    :prepared,
+    :startup_xids
+  ]
+
+  @typedoc "The XA-related fail-closed halts (`step/2` / `run/3`)."
+  @type xa_halt ::
+          :unsupported_transaction_shape
+          | :xa_prepared_pool_exhausted
+          | :xa_prepared_gtid_mismatch
+          | :xa_commit_without_prepare
+          | :xa_rollback_without_prepare
 
   @typedoc "The result of `step/2`."
   @type step_result ::
           {:cont, [output()], t()}
-          | {:halt, :unsupported_transaction_shape}
+          | {:halt, xa_halt()}
           | {:error, term()}
 
   @typedoc """
@@ -124,15 +157,24 @@ defmodule Capstan.Assembler do
   """
   @type run_result ::
           {:ok, [output()], Position.t()}
-          | {:halt, :unsupported_transaction_shape, [output()], Position.t()}
+          | {:halt, xa_halt(), [output()], Position.t()}
           | {:error, term(), [output()], Position.t()}
+
+  @default_max_prepared 10_000
 
   @doc """
   Builds a fresh assembler state resuming from `start_position`.
 
   `opts` accepts `tables: :all` (default) or `tables: [{schema, table}, ...]` — the
-  allowlist of tables whose rows are delivered; everything else is filtered before
-  row decode.
+  allowlist of tables whose rows are delivered (everything else is filtered before row
+  decode) — plus the XA policy (ADR-0006): `xa: :refuse` (default — an `XA_PREPARE`
+  halts `:unsupported_transaction_shape`, the C1 posture byte-for-byte) or
+  `xa: :track`; `max_prepared_transactions:` (positive integer, default
+  #{@default_max_prepared}) bounds the in-memory prepared pool (halt
+  `:xa_prepared_pool_exhausted` — never evict, eviction is the silent-loss class); and
+  `startup_xids:` (a list of `Capstan.Xa.Id` digests from the connect-time `XA RECOVER`)
+  pre-seeds the dangling-prepare discriminator so a pre-start prepare's resolution is a
+  correct row-less watermark advance.
   """
   @spec new(Position.t(), keyword()) :: t()
   def new(%Position{} = start_position, opts \\ []) do
@@ -142,7 +184,11 @@ defmodule Capstan.Assembler do
       pos: start_position.pos,
       registry: TableRegistry.new(),
       filter: build_filter(Keyword.get(opts, :tables, :all)),
-      txn: nil
+      txn: nil,
+      xa: Keyword.get(opts, :xa, :refuse),
+      prepared: %{},
+      max_prepared: Keyword.get(opts, :max_prepared_transactions, @default_max_prepared),
+      startup_xids: MapSet.new(Keyword.get(opts, :startup_xids, []))
     }
   end
 
@@ -170,9 +216,6 @@ defmodule Capstan.Assembler do
   def step(%__MODULE__{} = state, %Event{} = event) do
     case Decoder.decode(event) do
       {:ok, decoded} -> apply_decoded(state, event, decoded)
-      # A transaction-shape halt (XA_PREPARE) or a refused event discards the
-      # in-flight buffer by short-circuiting before it can be released.
-      {:halt, :unsupported_transaction_shape} -> {:halt, :unsupported_transaction_shape}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -248,6 +291,20 @@ defmodule Capstan.Assembler do
   # XID — transactional commit terminator.
   defp apply_decoded(state, event, {:xid, _xid}), do: commit_dml(state, event)
 
+  # XA_PREPARE (type 38). one_phase = true is an ordinary single-GTID commit (the
+  # prepare IS the commit; no pool entry — ADR-0006 §2). Two-phase is the policy split:
+  # :refuse keeps the C1 halt byte-for-byte; :track pools the buffered transaction
+  # under its XID digest and holds the watermark (the core invariant: G_p enters the
+  # durable set ONLY in the same write as its resolver G_c).
+  defp apply_decoded(state, event, {:xa_prepare, %{one_phase: true}}),
+    do: commit_dml(state, event)
+
+  defp apply_decoded(%__MODULE__{xa: :refuse}, _event, {:xa_prepare, _xid}),
+    do: {:halt, :unsupported_transaction_shape}
+
+  defp apply_decoded(%__MODULE__{xa: :track} = state, _event, {:xa_prepare, xid}),
+    do: on_xa_prepare(state, xid)
+
   # A file boundary resets the table_id space: drop every binding so a stale id can
   # never resolve to the wrong table (design Q3). Neither event can occur mid-txn.
   defp apply_decoded(state, _event, {:rotate, next_name, _pos}) do
@@ -278,7 +335,16 @@ defmodule Capstan.Assembler do
       else: {:error, :query_without_gtid}
   end
 
-  defp on_query(state, event, schema, sql) do
+  defp on_query(%__MODULE__{xa: :track} = state, event, schema, sql) do
+    case Xa.Id.parse_resolution(sql) do
+      {:ok, {verb, digest}} -> on_xa_resolution(state, event, verb, digest)
+      :error -> on_query_default(state, event, schema, sql)
+    end
+  end
+
+  defp on_query(state, event, schema, sql), do: on_query_default(state, event, schema, sql)
+
+  defp on_query_default(state, event, schema, sql) do
     cond do
       keyword?(sql, "BEGIN") -> {:cont, [], %{state | txn: %{state.txn | begun?: true}}}
       # An `XA START`/`XA END` opens/continues an XA transaction block — it is NOT a
@@ -303,6 +369,101 @@ defmodule Capstan.Assembler do
   # verbs. No DDL statement begins with `XA `, so a prefix match is unambiguous.
   defp xa_statement?(sql),
     do: sql |> String.trim() |> String.upcase() |> String.starts_with?("XA ")
+
+  ## ---------------------------------------------------------------------------
+  ## XA prepare pool + resolution (ADR-0006 — :track only)
+  ## ---------------------------------------------------------------------------
+
+  # A prepare with no open transaction is a desync, same as any other terminator.
+  defp on_xa_prepare(%__MODULE__{txn: nil}, _xid),
+    do: {:error, :terminator_without_transaction}
+
+  defp on_xa_prepare(%__MODULE__{txn: txn} = state, xid) do
+    digest = Xa.Id.digest(xid)
+
+    cond do
+      # A re-presented prepare for an already-pooled XID: same G_p = our own reconnect
+      # resend (idempotent — the duplicate in-flight buffer is dropped, the pool entry
+      # stands); a different G_p is a server anomaly we refuse to guess at.
+      Map.has_key?(state.prepared, digest) ->
+        if state.prepared[digest].txn.gtid == txn.gtid do
+          {:cont, [], %{state | txn: nil}}
+        else
+          {:halt, :xa_prepared_gtid_mismatch}
+        end
+
+      # Never evict: evicting a prepare that later commits is exactly the silent loss
+      # C5 exists to prevent (ADR-0006 rejected-alternatives).
+      map_size(state.prepared) >= state.max_prepared ->
+        {:halt, :xa_prepared_pool_exhausted}
+
+      true ->
+        # The held-out watermark: NO output, NO advance — G_p enters the durable set
+        # only in the same checkpoint write as its resolver G_c.
+        {:cont, [], %{state | prepared: Map.put(state.prepared, digest, %{txn: txn}), txn: nil}}
+    end
+  end
+
+  # (A resolution QUERY can only arrive inside an open G_c transaction — the
+  # nil-txn dispatch arm has already failed closed before we get here.)
+  defp on_xa_resolution(%__MODULE__{txn: txn} = state, event, verb, digest) do
+    case Map.pop(state.prepared, digest) do
+      {nil, _prepared} ->
+        # Not pooled. A pre-start dangling prepare (seen in the connect-time XA RECOVER)
+        # resolves as a correct ROW-LESS advance — its rows predate the pipeline (the
+        # snapshot's domain); anything else is a desync we refuse to guess at.
+        if MapSet.member?(state.startup_xids, digest) do
+          rowless_advance(state, event, txn, [])
+        else
+          {:halt, xa_desync(verb)}
+        end
+
+      {%{txn: pooled}, prepared} ->
+        state = %{state | prepared: prepared}
+
+        case verb do
+          :commit ->
+            # Deliver the pooled changes as one transaction; the position (and the
+            # durable set) carries G_p ∪ G_c in a SINGLE advance — the held-out
+            # watermark's payoff arm.
+            {new_set, position} = advance_union(state, [txn_gtid(pooled), txn_gtid(txn)], event)
+
+            transaction = %Transaction{
+              gtid: pooled.gtid,
+              position: position,
+              changes: Enum.reverse(pooled.changes),
+              commit_ts: DateTime.from_unix!(event.timestamp)
+            }
+
+            {:cont, [transaction], %{state | gtid_set: new_set, pos: event.log_pos, txn: nil}}
+
+          :rollback ->
+            # The rows are discarded, NEVER delivered; both GTIDs advance in one write.
+            rowless_advance(state, event, txn, [txn_gtid(pooled)])
+        end
+    end
+  end
+
+  defp xa_desync(:commit), do: :xa_commit_without_prepare
+  defp xa_desync(:rollback), do: :xa_rollback_without_prepare
+
+  defp txn_gtid(txn), do: "#{txn.uuid}:#{txn.gno}"
+
+  # A row-less watermark advance: an EMPTY-changes transaction (the AssemblerServer's
+  # filtered path checkpoints it without calling the sink) over this GTID plus any
+  # held-out extras — the rollback and the dangling-resolution arms.
+  defp rowless_advance(state, event, txn, extra_gtids) do
+    {new_set, position} = advance_union(state, [txn_gtid(txn) | extra_gtids], event)
+
+    transaction = %Transaction{
+      gtid: txn.gtid,
+      position: position,
+      changes: [],
+      commit_ts: DateTime.from_unix!(event.timestamp)
+    }
+
+    {:cont, [transaction], %{state | gtid_set: new_set, pos: event.log_pos, txn: nil}}
+  end
 
   ## ---------------------------------------------------------------------------
   ## terminators — the ONLY place the in-flight buffer is released
@@ -336,8 +497,16 @@ defmodule Capstan.Assembler do
   # Union this transaction's GTID into the running processed set and build the
   # `%Position{}` that INCLUDES it. `pos` is the terminator's header `log_pos`
   # (diagnostic); the gtid_set is the authoritative watermark.
-  defp advance(state, txn, event) do
-    new_set = Gtid.union(state.gtid_set, Gtid.parse("#{txn.uuid}:#{txn.gno}"))
+  defp advance(state, txn, event), do: advance_union(state, [txn_gtid(txn)], event)
+
+  # Union one or more GTIDs into the running processed set in a SINGLE advance — the
+  # XA resolution path carries G_p ∪ G_c atomically (the held-out watermark).
+  defp advance_union(state, gtids, event) do
+    new_set =
+      Enum.reduce(gtids, state.gtid_set, fn gtid, acc ->
+        Gtid.union(acc, Gtid.parse(gtid))
+      end)
+
     position = %Position{gtid_set: Gtid.render(new_set), file: state.file, pos: event.log_pos}
     {new_set, position}
   end

@@ -30,6 +30,8 @@ Capstan.start_link(
   start_position: :checkpoint,                  # C1: :checkpoint (default) only
   tables: [{"orders", "line_items"}],           # or :all (default); filter applied before decode
   max_command_retries: 5,                       # default 5; pre-establish failures only
+  xa: :track,                                   # default :refuse; see "XA transactions"
+  max_prepared_transactions: 10_000,            # the :track prepared-pool bound
   reconnect_backoff: 1_000,                     # default; ms between reconnect attempts
   heartbeat_period_ms: 15_000,                  # default; server heartbeat on a quiet stream
   stream_timeout_ms: 60_000                     # default; MUST be > heartbeat_period_ms
@@ -135,6 +137,25 @@ Three load-bearing rules — each guards a silent-loss class the type signature 
 `handle_schema_change/2` receives only structured `schema`/`table`/`kind` — the raw DDL statement
 text is redacted before it reaches the sink (Rule 1). Return `{:error, term()}` from either
 delivery callback to halt the pipeline fail-closed **without** advancing the checkpoint.
+
+### XA transactions (ADR-0006)
+
+Two-phase XA is opt-in: `xa: :track` (default `:refuse` halts
+`:unsupported_transaction_shape` at the prepare, the original posture). Under `:track` a
+prepared transaction's rows are pooled in memory (bounded by `max_prepared_transactions`,
+default 10 000 — exceeding halts `:xa_prepared_pool_exhausted`, never evicted) and
+delivered **exactly once at the resolution**: `XA COMMIT` delivers the pooled rows as one
+transaction; `XA ROLLBACK` delivers zero rows (both advance the watermark over the prepare
+AND resolution GTIDs in a single write — a prepare never checkpoints alone, the
+crash-safe held-out watermark). A prepare that predates the pipeline resolves row-lessly
+(capstan enumerates `XA RECOVER` at every connect). `XA COMMIT`/`ROLLBACK` with no known
+prepare halts `:xa_commit_without_prepare` / `:xa_rollback_without_prepare`. The XID bytes
+are application data (Rule 1): pooled under a sha256 key, never logged, emitted, or
+telemetered — errors correlate on GTIDs. One-phase XA commits immediately. **The source
+account needs `XA_RECOVER_ADMIN`** for the connect-time enumeration (the preflight
+checks it). During an initial snapshot, a prepared XA on a snapshot table blocks the
+brief per-chunk lock (its row locks serialize against `LOCK TABLES … READ`), so a chunk
+is never captured over an unresolved XA.
 
 **Memory shape.** A transaction is buffered whole in pipeline memory between assembly and
 delivery, so peak memory scales with the source's largest single transaction; in snapshot mode
@@ -264,8 +285,10 @@ via `[:capstan, :connection, :halt]` / `[:capstan, :assembler, :halt]` telemetry
   `:rows_without_transaction`, …) or a row the pipeline refuses to decode:
   `:unmapped_table_id`, `{:unsupported_column_type, detail}` (spatial, `SET`, pre-5.6
   temporals), a compressed transaction payload, an unknown event type.
-- `:unsupported_transaction_shape` — an XA transaction (`XA PREPARE`); the buffered rows are
-  discarded, never delivered (ADR-0003).
+- `:unsupported_transaction_shape` — an XA transaction under the default `xa: :refuse`
+  (the buffered rows are discarded, never delivered; ADR-0003). With `xa: :track`
+  (ADR-0006) XA no longer halts here — see "XA transactions" for the `:xa_*` halts
+  (pool exhaustion, prepare-GTID mismatch, resolution without prepare).
 - `{:event_parse_failed, reason}` — CRC mismatch or truncated event.
 - `{:event_decode_crashed, %Capstan.Error{}}` / `{:event_processing_crashed, %Capstan.Error{}}`
   — an unexpected raise, captured value-free.
@@ -346,4 +369,6 @@ binlog_transaction_compression = OFF  # compression is source-unilateral (no con
 `enforce_gtid_consistency = ON` is recommended (implied by `gtid_mode = ON`) but is **not**
 separately checked. Multi-source replication is supported — a GTID set expresses multiple source
 UUIDs natively. The replication account authenticates via `caching_sha2_password` by default and
-needs `REPLICATION SLAVE`, `REPLICATION CLIENT`, and `SELECT`.
+needs `REPLICATION SLAVE`, `REPLICATION CLIENT`, and `SELECT`; `LOCK TABLES` for the
+snapshot path; and `XA_RECOVER_ADMIN` for `xa: :track` (the connect-time `XA RECOVER`
+enumeration).

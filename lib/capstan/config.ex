@@ -95,6 +95,8 @@ defmodule Capstan.Config do
     :reconnect_backoff,
     :heartbeat_period_ms,
     :stream_timeout_ms,
+    :xa,
+    :max_prepared_transactions,
     :id
   ]
 
@@ -124,7 +126,9 @@ defmodule Capstan.Config do
           max_command_retries: non_neg_integer(),
           reconnect_backoff: pos_integer(),
           heartbeat_period_ms: pos_integer(),
-          stream_timeout_ms: pos_integer()
+          stream_timeout_ms: pos_integer(),
+          xa: :refuse | :track,
+          max_prepared_transactions: pos_integer()
         }
 
   @typedoc "A value-free option-validation refusal."
@@ -181,7 +185,8 @@ defmodule Capstan.Config do
          {:ok, server_id} <- fetch_server_id(opts),
          {:ok, connection} <- fetch_connection(opts),
          {:ok, max_command_retries} <- fetch_max_command_retries(opts),
-         {:ok, liveness} <- fetch_liveness(opts) do
+         {:ok, liveness} <- fetch_liveness(opts),
+         {:ok, xa} <- fetch_xa(opts) do
       {:ok,
        %{
          connection: connection,
@@ -189,7 +194,9 @@ defmodule Capstan.Config do
          max_command_retries: max_command_retries,
          reconnect_backoff: liveness.reconnect_backoff,
          heartbeat_period_ms: liveness.heartbeat_period_ms,
-         stream_timeout_ms: liveness.stream_timeout_ms
+         stream_timeout_ms: liveness.stream_timeout_ms,
+         xa: xa.xa,
+         max_prepared_transactions: xa.max_prepared_transactions
        }}
     end
   end
@@ -360,6 +367,26 @@ defmodule Capstan.Config do
   # silent fallback). The window comparison fires BEFORE any socket opens: in snapshot
   # mode the bootstrap opens a query connection before the connection child starts,
   # so leaning on Connection.init would open a socket on a bad config.
+  # The XA policy (ADR-0006): :refuse (default — the C1 halt posture) or :track.
+  # The prepared-pool bound is a POSITIVE integer (zero exhausts the pool on the first
+  # prepare — a mis-set bound, not a useful configuration).
+  defp fetch_xa(opts) do
+    case Keyword.get(opts, :xa, :refuse) do
+      policy when policy in [:refuse, :track] -> fetch_max_prepared(opts, policy)
+      _ -> {:error, :config_invalid}
+    end
+  end
+
+  defp fetch_max_prepared(opts, policy) do
+    case Keyword.get(opts, :max_prepared_transactions, 10_000) do
+      n when is_integer(n) and n > 0 ->
+        {:ok, %{xa: policy, max_prepared_transactions: n}}
+
+      _ ->
+        {:error, :config_invalid}
+    end
+  end
+
   defp fetch_liveness(opts) do
     with {:ok, reconnect_backoff} <-
            fetch_schedulable_ms(opts, :reconnect_backoff, @default_reconnect_backoff),

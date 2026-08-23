@@ -233,7 +233,9 @@ defmodule Capstan.Pipeline do
     server_opts = [
       sink: Keyword.fetch!(opts, :sink),
       checkpoint_store: checkpoint_store,
-      tables: Keyword.get(opts, :tables, :all)
+      tables: Keyword.get(opts, :tables, :all),
+      xa: Keyword.get(opts, :xa, :refuse),
+      max_prepared_transactions: Keyword.get(opts, :max_prepared_transactions, 10_000)
     ]
 
     %{id: :assembler, start: {AssemblerServer, :start_link, [server_opts]}, restart: :temporary}
@@ -269,7 +271,8 @@ defmodule Capstan.Pipeline do
           :connect_fun,
           :reconnect_backoff,
           :heartbeat_period_ms,
-          :stream_timeout_ms
+          :stream_timeout_ms,
+          :xa
         ])
 
     %{id: :connection, start: {Connection, :start_link, [connection_opts]}, restart: :temporary}

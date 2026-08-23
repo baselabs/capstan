@@ -106,6 +106,7 @@ defmodule Capstan.Connection do
   alias Capstan.Protocol.Handshake
   alias Capstan.Protocol.Packet
   alias Capstan.Telemetry
+  alias Capstan.Xa
 
   @default_max_command_retries 5
   @default_reconnect_backoff 1_000
@@ -147,6 +148,7 @@ defmodule Capstan.Connection do
     :checkpoint_str,
     :checkpoint_store,
     :connect_fun,
+    :xa,
     :reconnect_backoff,
     :heartbeat_period_ms,
     :stream_timeout_ms,
@@ -285,6 +287,7 @@ defmodule Capstan.Connection do
         checkpoint_str: checkpoint_string(Keyword.get(opts, :start_position)),
         checkpoint_store: Keyword.get(opts, :checkpoint_store),
         connect_fun: Keyword.get(opts, :connect_fun, &default_connect/1),
+        xa: Keyword.get(opts, :xa, :refuse),
         reconnect_backoff: reconnect_backoff,
         heartbeat_period_ms: heartbeat_period_ms,
         stream_timeout_ms: stream_timeout_ms
@@ -406,6 +409,7 @@ defmodule Capstan.Connection do
     with :ok <- preconditions(state.socket),
          {:ok, executed, purged} <- gtid_sets(state.socket),
          :ok <- gap_check(executed, purged, state.checkpoint_str),
+         :ok <- maybe_xa_recover(state),
          :ok <- set_checksum(state.socket),
          :ok <- set_heartbeat(state.socket, state.heartbeat_period_ms),
          :ok <- send_dump(state) do
@@ -475,6 +479,63 @@ defmodule Capstan.Connection do
       {:error, reason} -> {:command_error, reason}
     end
   end
+
+  # ADR-0006 §4: enumerate the source's currently-prepared XIDs and forward their
+  # digests to the receiver BEFORE the dump, so a pre-start dangling prepare's later
+  # resolution is a correct row-less advance instead of a desync halt. `XA RECOVER`
+  # returns formatID / gtrid_length / bqual_length / data — the data column carries
+  # the raw gtrid++bqual bytes, exactly the type-38 body's tail.
+  defp maybe_xa_recover(%__MODULE__{xa: :refuse}), do: :ok
+
+  defp maybe_xa_recover(%__MODULE__{xa: :track} = state) do
+    q = Command.query(state.socket, "XA RECOVER")
+
+    case q do
+      {:ok, rows} ->
+        # Every row must be the documented 4-column shape — a row we cannot parse is
+        # a prepared XID we cannot identify, which would later surface as a spurious
+        # desync halt. Fail the establish instead (budgeted), never guess.
+        case parse_recover_rows(rows) do
+          {:ok, digests} ->
+            send(state.receiver, {:xa_recover, digests})
+            :ok
+
+          :error ->
+            {:command_error, :xa_recover_unexpected_shape}
+        end
+
+      {:error, reason} ->
+        {:command_error, reason}
+    end
+  end
+
+  defp parse_recover_rows(rows) do
+    if Enum.all?(rows, &recover_row?/1) do
+      {:ok,
+       for [format_id, gtrid_len, _bqual_len, data] <- rows do
+         # Simple-query results are ALL text (Critical Rule 2): coerce before use.
+         gtrid_len = String.to_integer(gtrid_len)
+
+         gtrid = binary_part(data, 0, gtrid_len)
+         bqual = binary_part(data, gtrid_len, byte_size(data) - gtrid_len)
+
+         Xa.Id.digest(%{
+           one_phase: false,
+           format_id: String.to_integer(format_id),
+           gtrid: gtrid,
+           bqual: bqual
+         })
+       end}
+    else
+      :error
+    end
+  end
+
+  defp recover_row?([f, gl, _bl, data])
+       when is_binary(f) and is_binary(gl) and is_binary(data),
+       do: Integer.parse(f) != :error and Integer.parse(gl) != :error
+
+  defp recover_row?(_), do: false
 
   defp send_dump(state) do
     checkpoint_set = Gtid.parse(state.checkpoint_str)

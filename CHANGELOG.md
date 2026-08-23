@@ -6,6 +6,22 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — C5 XA transaction tracking (ADR-0006)
+
+- `xa: :track` (default `:refuse`): two-phase XA transactions deliver **exactly once at
+  the resolution** under the held-out watermark — the prepare GTID enters the durable
+  checkpoint only in the same single write as its resolver. `XA ROLLBACK` delivers zero
+  rows. Prepared state pools in memory bounded by `max_prepared_transactions` (default
+  10 000, halt `:xa_prepared_pool_exhausted` — never evicted). Pre-start dangling
+  prepares (connect-time `XA RECOVER` enumeration) resolve row-lessly; unknown
+  resolutions halt `:xa_commit_without_prepare` / `:xa_rollback_without_prepare`.
+  One-phase XA commits immediately. The decoder's type-38 halt moved to the fold's
+  policy layer; the default posture is byte-for-byte unchanged. XID bytes are pooled
+  under a sha256 digest and never logged, emitted, or telemetered (Rule 1). The source
+  account needs `XA_RECOVER_ADMIN` (granted by the seed script). Live-proven: 5
+  marquees on MySQL 8.0 plus real-byte fixture conformance and the XID-encoding digest
+  equivalence (type-38 body vs the resolution SQL's hex literal, same session).
+
 ## [1.1.1] - 2026-08-23
 
 ### Fixed

@@ -142,6 +142,8 @@ defmodule Capstan.AssemblerServer do
     {impl, store} = Keyword.fetch!(opts, :checkpoint_store)
     tables = Keyword.get(opts, :tables, :all)
     max_retries = Keyword.get(opts, :max_retries, CheckpointStore.default_max_retries())
+    xa = Keyword.get(opts, :xa, :refuse)
+    max_prepared = Keyword.get(opts, :max_prepared_transactions, 10_000)
     watermark_observer = Keyword.get(opts, :watermark_observer)
 
     case CheckpointStore.read_position(impl, store) do
@@ -149,7 +151,12 @@ defmodule Capstan.AssemblerServer do
         start_position = resumed || %Position{gtid_set: "", file: nil, pos: nil}
 
         state = %__MODULE__{
-          assembler: Assembler.new(start_position, tables: tables),
+          assembler:
+            Assembler.new(start_position,
+              tables: tables,
+              xa: xa,
+              max_prepared_transactions: max_prepared
+            ),
           sink: sink,
           checkpoint_impl: impl,
           checkpoint_store: store,
@@ -204,6 +211,16 @@ defmodule Capstan.AssemblerServer do
         %__MODULE__{coordinator_ref: ref} = state
       ) do
     halt(state, :snapshot_coordinator_down)
+  end
+
+  # The Connection runs XA RECOVER at each establish (xa: :track) and forwards the
+  # digest set BEFORE the dump, so a pre-start dangling prepare's resolution is a
+  # correct row-less advance rather than a desync halt (ADR-0006 §4).
+  @impl true
+  def handle_info({:xa_recover, digests}, state) when is_list(digests) do
+    asm = state.assembler
+    merged = %{asm | startup_xids: MapSet.union(asm.startup_xids, MapSet.new(digests))}
+    {:noreply, %{state | assembler: merged}}
   end
 
   def handle_info(_message, state), do: {:noreply, state}

@@ -59,8 +59,12 @@ hand-rolling membership is unsafe. Do not claim naked exactly-once without an id
 **5. Transaction shape is explicit; unknown shapes halt (design Q13).** Three terminators close a
 transaction: `XID`; `QUERY("COMMIT")` (non-transactional engines); and the **self-committing DDL
 `QUERY`** (`GTID → QUERY(DDL)` with no `BEGIN`/`XID`, live-verified) which advances the checkpoint and
-yields `%SchemaChange{}`. **`XA_PREPARE_LOG_EVENT` halts `:unsupported_transaction_shape` — its rows
-must NEVER be delivered** (they may later roll back). Compressed transactions
+yields `%SchemaChange{}`. **`XA_PREPARE_LOG_EVENT` halts `:unsupported_transaction_shape`
+under the default `xa: :refuse` — its rows must NEVER be delivered** (they may later
+roll back). The opt-in `xa: :track` (ADR-0006) replaces the halt with prepare-pool
+tracking under the held-out watermark: a prepare GTID checkpoints ONLY in the same
+write as its resolution GTID; XID bytes are pooled under a sha256 key and never
+emitted (Rule 1). Compressed transactions
 (`TRANSACTION_PAYLOAD_EVENT`) halt loudly. Any unknown event type fails closed, never silently
 skipped.
 
@@ -123,7 +127,9 @@ either — they drive the same definition.
 - 8.0 `mysql-cdc-probe` @ `127.0.0.1:$MYSQL_PORT_80` — root is `mysql_native_password` (the `probe/`
   diagnostics authenticate as native root); replication user `capstan_sha2` / `capstan_sha2_pw`.
 - 8.4 `mysql-cdc-probe-84` @ `127.0.0.1:$MYSQL_PORT_84` — 8.4 removed built-in `mysql_native_password`,
-  so root is `caching_sha2` (exercises the default auth posture); same `capstan_sha2` user.
+  so root is `caching_sha2` (exercises the default auth posture); same `capstan_sha2` user
+(the seed script grants it `XA_RECOVER_ADMIN` for the `xa: :track` connect-time
+enumeration; long-lived containers seeded before that grant need it applied live).
 - **Never restart or duplicate a running server** — a live server is left untouched (`docker compose
   up -d` is idempotent). No server UUID is hard-coded (a recreated container gets a new one; read it
   live). Container names are stable (`handshake_test.exs` does `docker exec mysql-cdc-probe …`).

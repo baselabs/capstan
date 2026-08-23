@@ -18,6 +18,9 @@ mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" <<SQL
 CREATE USER IF NOT EXISTS '${USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${PASS}';
 ALTER USER '${USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${PASS}';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT, LOCK TABLES ON *.* TO '${USER}'@'%';
+# XA_RECOVER_ADMIN: capstan's connect-time XA RECOVER enumeration (ADR-0006 §4 —
+# the xa: :track pre-seed; MySQL 8.0+ gates XA RECOVER behind this dynamic privilege).
+GRANT XA_RECOVER_ADMIN ON *.* TO '${USER}'@'%';
 SQL
 
 echo "[capstan-init] caching_sha2 user '${USER}' seeded (REPLICATION SLAVE, REPLICATION CLIENT, SELECT, LOCK TABLES)"

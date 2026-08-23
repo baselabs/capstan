@@ -47,6 +47,9 @@ defmodule Capstan.AssemblerTest do
   # like decoder_test's `event/2` helper and passed through Decoder.decode — never a
   # hand-written {:halt, _} atom (design F9).
   defp xa_prepare_event do
+    # A well-formed type-38 body (server-source layout): one_phase=0, format 1,
+    # gtrid 'g'/1 byte, bqual 'b'/1 byte. The fold's :refuse policy halts BEFORE the
+    # XID matters, so any valid body proves the posture.
     %Event{
       type: 38,
       timestamp: 0,
@@ -54,7 +57,7 @@ defmodule Capstan.AssemblerTest do
       event_size: 19,
       log_pos: 0,
       flags: 0,
-      body: <<>>
+      body: <<0, 1::32-little, 1::32-little, 1::32-little, "g", "b">>
     }
   end
 
@@ -86,8 +89,15 @@ defmodule Capstan.AssemblerTest do
   # =========================================================================
 
   describe "SAFETY — XA_PREPARE halts fail-closed with ZERO rows emitted (F9)" do
-    test "the marker originates from the REAL Decoder, not a hand-written atom" do
-      assert Decoder.decode(xa_prepare_event()) == {:halt, :unsupported_transaction_shape}
+    test "the REAL Decoder decodes the type-38 XID; the FOLD produces the :refuse halt" do
+      # ADR-0006 moved the loud refusal from the decoder to the fold's policy layer:
+      # the decoder now returns the decoded XID (layout per the server source), and
+      # the default :refuse fold halts on it — proven by the tests around this one.
+      assert {:ok, {:xa_prepare, %{one_phase: false, format_id: 1, gtrid: "g", bqual: "b"}}} =
+               Decoder.decode(xa_prepare_event())
+
+      assert {:halt, :unsupported_transaction_shape} =
+               empty_start() |> Assembler.new() |> Assembler.step(xa_prepare_event())
     end
 
     test "an XA transaction with rows already accumulated emits NOTHING and halts" do

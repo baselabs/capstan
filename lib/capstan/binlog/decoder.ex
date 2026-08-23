@@ -168,6 +168,7 @@ defmodule Capstan.Binlog.Decoder do
           | :stop
           | :heartbeat
           | {:rows_query, :discarded}
+          | {:xa_prepare, Capstan.Xa.Id.xid()}
 
   @typedoc "A reason C1 refuses an event outright."
   @type error_reason :: :compressed_payload_unsupported | {:unknown_event_type, byte()}
@@ -203,7 +204,23 @@ defmodule Capstan.Binlog.Decoder do
 
   # Q13/F9 SAFETY: XA prepare rows may later be rolled back. Halt fail-closed on the
   # type byte alone; the body is never inspected.
-  defp do_decode(@xa_prepare, _body), do: {:halt, :unsupported_transaction_shape}
+  # Layout read from the MySQL server source (control_events.cpp, the from-buffer
+  # constructor): one_phase (1 byte), format_id / gtrid_length / bqual_length as
+  # little-endian u32s, then the raw gtrid + bqual bytes. The gtrid/bqual are
+  # application-chosen bytes — Rule-1 row-value class: they flow to the assembler's
+  # fold (which digests them via Capstan.Xa.Id) and are never logged or emitted.
+  defp do_decode(@xa_prepare, body) do
+    case body do
+      <<one_phase, format_id::32-little, gtrid_len::32-little, bqual_len::32-little,
+        gtrid::binary-size(gtrid_len), bqual::binary-size(bqual_len)>> ->
+        {:ok,
+         {:xa_prepare,
+          %{one_phase: one_phase == 1, format_id: format_id, gtrid: gtrid, bqual: bqual}}}
+
+      _ ->
+        {:error, {:xa_prepare_malformed, byte_size(body)}}
+    end
+  end
 
   defp do_decode(@transaction_payload, _body), do: {:error, :compressed_payload_unsupported}
 

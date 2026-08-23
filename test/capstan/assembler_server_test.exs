@@ -798,8 +798,10 @@ defmodule Capstan.AssemblerServerTest do
     raw_event(19, body, 0)
   end
 
-  # An XA_PREPARE (type 38): the Decoder halts on the type byte alone.
-  defp xa_prepare_raw, do: raw_event(38, <<>>, 0)
+  # An XA_PREPARE (type 38) with a well-formed body — the fold's :refuse policy
+  # (the default) produces the halt.
+  defp xa_prepare_raw,
+    do: raw_event(38, <<0, 1::32-little, 1::32-little, 1::32-little, "g", "b">>, 0)
 
   # An unknown event type: the Decoder fails closed with {:unknown_event_type, 99}.
   defp unknown_raw, do: raw_event(99, <<0, 0, 0, 0>>, 0)

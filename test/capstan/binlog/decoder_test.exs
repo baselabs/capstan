@@ -226,13 +226,28 @@ defmodule Capstan.Binlog.DecoderTest do
     end
   end
 
-  describe "SAFETY tripwire — XA_PREPARE_LOG_EVENT (38) halts fail-closed (Q13/F9)" do
-    test "type 38 returns the exact halting marker, keyed purely on the type byte" do
-      # Its rows may later XA ROLLBACK; treating them as committed delivers phantom
-      # data. No fixture exists — the marker is keyed on the type byte alone, so a
-      # synthetic body must not change the verdict.
-      assert Decoder.decode(event(38)) == {:halt, :unsupported_transaction_shape}
-      assert Decoder.decode(event(38, <<1, 2, 3, 4>>)) == {:halt, :unsupported_transaction_shape}
+  describe "SAFETY tripwire — XA_PREPARE_LOG_EVENT (38) fail-closed (Q13/F9, ADR-0006)" do
+    # The decoder DECODES the XID (layout per the server source); the loud default
+    # :refuse halt lives in the assembler fold (assembler_test proves it) — and a
+    # malformed body is a decode refusal, never a guess.
+    test "a well-formed type-38 body decodes its XID exactly" do
+      body = <<0, 7::32-little, 8::32-little, 5::32-little, "gtrid-42", "bqual">>
+
+      assert {:ok,
+              {:xa_prepare, %{one_phase: false, format_id: 7, gtrid: "gtrid-42", bqual: "bqual"}}} =
+               Decoder.decode(event(38, body))
+    end
+
+    test "the REAL captured fixture decodes (conformance — live 8.0 bytes)" do
+      assert {:ok, {:xa_prepare, %{one_phase: false} = xid}} =
+               decode_fixture("xa", "10-xa_prepare.bin")
+
+      assert xid.format_id == 7 and xid.gtrid == "xa-gtrid" and xid.bqual == "xa-bqual"
+    end
+
+    test "a malformed body is refused, never guessed at" do
+      assert {:error, {:xa_prepare_malformed, 0}} = Decoder.decode(event(38))
+      assert {:error, {:xa_prepare_malformed, 4}} = Decoder.decode(event(38, <<1, 2, 3, 4>>))
     end
   end
 
