@@ -462,7 +462,11 @@ defmodule Capstan.Zstd do
   defp sequences_section(<<0, _rest::binary>>, st), do: {:ok, [], st}
 
   defp sequences_section(<<b0::8, rest::binary>>, st) do
-    with {n, rest} <- sequence_count(b0, rest),
+    # The guard is load-bearing: sequence_count's error clauses return
+    # {:error, reason} — a 2-tuple the unguarded {n, rest} pattern would match
+    # as success (n = :error), crashing in sequence_modes instead of failing
+    # closed on a truncated count.
+    with {n, rest} when is_integer(n) <- sequence_count(b0, rest),
          {:ok, modes, rest2} <- sequence_modes(rest),
          {:ok, st2, rest3} <- sequence_tables(modes, st, rest2),
          {:ok, sequences} <- decode_sequences(n, st2, rest3) do

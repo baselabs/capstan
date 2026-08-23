@@ -10,6 +10,8 @@ defmodule Capstan.Binlog.TransactionPayloadTest do
 
   use ExUnit.Case, async: true
 
+  import Bitwise
+
   alias Capstan.Assembler
   alias Capstan.Binlog.{Event, TransactionPayload}
   alias Capstan.Position
@@ -190,6 +192,89 @@ defmodule Capstan.Binlog.TransactionPayloadTest do
 
       assert {:error, {:payload_header, :payload_too_large}} =
                TransactionPayload.decode(tampered)
+    end
+  end
+
+  # -- TLV-walk refusals: crafted bodies, each ending exactly at its boundary --
+
+  describe "TLV header walk — every divergence fails closed" do
+    test "a TLV value shorter than its declared length is refused" do
+      # type 1 declares 5 value bytes; only 3 follow.
+      assert {:error, {:payload_header, :truncated_header}} =
+               TransactionPayload.decode(<<1, 5, 1, 2, 3>>)
+    end
+
+    test "a TLV length byte needing more bytes than remain is refused" do
+      # 0xFC opens a 2-byte length; the frame ends.
+      assert {:error, {:payload_header, :truncated_header}} = TransactionPayload.decode(<<1>>)
+    end
+
+    test "a field value that is not a length-encoded integer is refused" do
+      # payload_size's value must itself be net_field_length; <<252, 0>> is a
+      # truncated 2-byte length, not an integer.
+      assert {:error, {:payload_header, {:malformed_field, 1}}} =
+               TransactionPayload.decode(<<1, 2, 252, 0>>)
+    end
+
+    test "an unknown field type is skipped by its declared length, not refused" do
+      # Forward compatibility, exactly as the server codec: an unknown type 9
+      # triple is skipped and the walk proceeds — proven by reaching the (empty)
+      # payload, which then fails at inflate, not at the header.
+      body = <<9, 3, "abc">> <> <<1, 1, 0>> <> <<2, 1, 0>> <> <<0>>
+
+      assert {:error, {:payload_inflate, :bad_magic}} = TransactionPayload.decode(body)
+    end
+
+    test "an end mark with no payload_size field is refused" do
+      assert {:error, {:payload_header, :missing_payload_size}} =
+               TransactionPayload.decode(<<2, 1, 0, 0>>)
+    end
+
+    test "an end mark with no compression_type field is refused" do
+      assert {:error, {:payload_header, :missing_compression_type}} =
+               TransactionPayload.decode(<<1, 1, 0, 0>>)
+    end
+
+    test "a header that simply ends without an end mark is refused" do
+      assert {:error, {:payload_header, :missing_end_mark}} =
+               TransactionPayload.decode(<<1, 1, 0>>)
+    end
+  end
+
+  # -- inner event splitting: the malformed/truncated inner shapes ---------------
+
+  describe "inner event stream splitting" do
+    # A minimal single-segment raw-block zstd frame (no checksum) carrying
+    # exactly `inner` — the payload TLV wraps it.
+    defp raw_frame(inner) do
+      fhd = 0b1110_0000
+      bh = byte_size(inner) <<< 3 ||| 1
+
+      <<0x28, 0xB5, 0x2F, 0xFD, fhd, byte_size(inner)::64-little, bh::24-little, inner::binary>>
+    end
+
+    # (type 1, len, lenenc-encoded size) + (type 2, len 1, zstd) + end mark + payload
+    defp wrap(frame) do
+      size = lenenc(byte_size(frame))
+      <<1, byte_size(size)>> <> size <> <<2, 1, 0>> <> <<0>> <> frame
+    end
+
+    test "an inner header declaring fewer than 19 bytes is malformed" do
+      # event_size 10 < the 19-byte header itself — no inner event can carry it.
+      inner = <<0::32-little, 30::8, 1::32-little, 10::32-little, 0::32-little, 0::16-little>>
+
+      assert {:error, {:payload_inner, :inner_event_malformed}} =
+               TransactionPayload.decode(wrap(raw_frame(inner)))
+    end
+
+    test "inner bytes left over below one header are truncated, never dropped" do
+      # A complete 21-byte event, then 3 bytes — too few for another header.
+      inner =
+        <<0::32-little, 15::8, 1::32-little, 21::32-little, 0::32-little, 0::16-little, 0xAA,
+          0xBB>> <> <<1, 2, 3>>
+
+      assert {:error, {:payload_inner, :inner_event_truncated}} =
+               TransactionPayload.decode(wrap(raw_frame(inner)))
     end
   end
 

@@ -6,6 +6,23 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — decoder robustness (found by the release gate's coverage battery)
+
+- A compressed block whose sequence-count bytes were truncated **crashed** the
+  zstd decoder (`FunctionClauseError` in the mode read — the count's error
+  tuple matched the `with`'s success pattern) instead of failing closed. A
+  malformed count now refuses `{:error, :truncated_frame}` like every other
+  corruption class (proven RED-first by the two crashing tests, now tripwires).
+- The zstd conformance suite gains the decoder arms the MySQL-captured corpus
+  cannot fire (repetitive SQL never produces them): a reference-encoder
+  `zstd_text/` fixture exercising **4-stream Huffman literals** and the large
+  literals size formats, a full truncation sweep over real frames, and crafted
+  refusal arms per corruption class (reserved block type, block-size bound,
+  lying Frame_Content_Size, skippable frames, treeless/FSE-table misuse). The
+  TRANSACTION_PAYLOAD TLV-walk refusals, the `:current` start-position
+  read-failure arms, and `Capstan.Error`'s pass-through contract get named
+  tests. Coverage over the full exercised surface: 88.62% → 91.49%.
+
 ### Added — C2a collation-ordered string primary keys (ADR-0012)
 
 - `CHAR`/`VARCHAR` primary keys (any charset, any collation, alone or in composites

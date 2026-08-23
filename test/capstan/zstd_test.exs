@@ -1,14 +1,17 @@
 defmodule Capstan.ZstdTest do
   @moduledoc """
-  Byte-exact conformance for `Capstan.Zstd.decompress/1` against REAL
-  MySQL-produced frames (RFC 8878; `binlog_transaction_compression=ON`
-  substrate), never self-signed fixtures.
+  Byte-exact conformance for `Capstan.Zstd.decompress/1` against frames whose
+  oracle is always a REFERENCE implementation (RFC 8878) — never self-signed
+  fixtures.
 
-  Each `zstd_*` fixture directory pairs the captured zstd frame (`.zst`,
-  sliced from the live TRANSACTION_PAYLOAD event) with `.inner` — the same
-  frame inflated by the REFERENCE `zstd` binary at capture time. A decoder
-  bit-error anywhere (literals, FSE, Huffman, sequences, repeat offsets)
-  cannot pass these.
+  Each MySQL-captured `zstd_*` directory pairs the zstd frame (`.zst`, sliced
+  from the live TRANSACTION_PAYLOAD event of a `binlog_transaction_compression=ON`
+  substrate) with `.inner` — the same frame inflated by the REFERENCE `zstd`
+  binary at capture time. `zstd_text/` is reference-encoder-produced directly
+  (see its README): MySQL row payloads are repetitive SQL whose literals never
+  take the 4-stream Huffman form, so that frame carries the decoder arms the
+  captured corpus cannot. A decoder bit-error anywhere (literals, FSE,
+  Huffman, sequences, repeat offsets) cannot pass these.
   """
 
   use ExUnit.Case, async: true
@@ -47,6 +50,232 @@ defmodule Capstan.ZstdTest do
     oracle = File.read!(Path.join(@fixtures, "zstd_large/06-transaction_payload.inner"))
     assert byte_size(oracle) > 128 * 1024 * 4
     assert {:ok, ^oracle} = Zstd.decompress(File.read!(zst))
+  end
+
+  test "the diverse-text reference frame is multi-block with oversized literals sections" do
+    # Non-degeneracy guard for the fixture the wildcard battery above decodes
+    # byte-exact: the point of `zstd_text/` is output beyond one 128 KB block
+    # and literals big enough for the 5-byte size format (sf=3) — the shapes
+    # repetitive SQL never produces.
+    oracle = File.read!(Path.join(@fixtures, "zstd_text/01-transaction_payload.inner"))
+    assert byte_size(oracle) > 128 * 1024 * 2
+  end
+
+  # -- truncation: every prefix of a real frame is refused ----------------------
+
+  test "every truncation point of a real MySQL frame is refused" do
+    [zst | _] =
+      @fixtures
+      |> Path.join("zstd_rows/*.zst")
+      |> Path.wildcard()
+      |> Enum.sort()
+
+    frame = File.read!(zst)
+
+    for len <- 0..(byte_size(frame) - 1) do
+      assert {:error, _reason} =
+               Zstd.decompress(binary_part(frame, 0, len)),
+             "prefix of length #{len} was not refused"
+    end
+  end
+
+  test "every truncation point inside a 4-stream literals block is refused" do
+    # The repetitive-SQL corpus truncates only through Raw/RLE literals; this
+    # sweep drives truncation THROUGH a compressed literals section — the
+    # Huffman header, the 4-stream jump table, and the sequences section of
+    # the text frame's first block.
+    frame = File.read!(Path.join(@fixtures, "zstd_text/01-transaction_payload.zst"))
+
+    for len <- 0..2000 do
+      assert {:error, _reason} =
+               Zstd.decompress(binary_part(frame, 0, len)),
+             "prefix of length #{len} was not refused"
+    end
+  end
+
+  test "a frame that is magic alone is :truncated_frame, not :bad_magic" do
+    assert {:error, :truncated_frame} = Zstd.decompress(<<0x28, 0xB5, 0x2F, 0xFD>>)
+  end
+
+  # -- crafted fail-closed arms (each a named corruption class) -----------------
+
+  # magic + FHD 0x00 (no FCS, not single-segment) + Window_Descriptor 0x38
+  # (128 KB window) — the bare header the rle_bomb builder also uses.
+  defp bare_header, do: <<0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x38>>
+
+  defp block_header(type, size, last),
+    do: <<size <<< 3 ||| type <<< 1 ||| ((last && 1) || 0)::24-little>>
+
+  test "a reserved block type is refused" do
+    frame = bare_header() <> block_header(3, 1, true) <> <<0x61>>
+
+    assert {:error, :reserved_block_type} = Zstd.decompress(frame)
+  end
+
+  test "an RLE block regenerating beyond Block_Maximum_Size is refused" do
+    # Block_Maximum_Size = min(window, 128 KB) = 128 KB here; 128 KB + 1 in one
+    # block is corruption by construction (RFC 3.1.1.2.4).
+    frame = bare_header() <> block_header(1, 128 * 1024 + 1, true) <> <<0x61>>
+
+    assert {:error, :block_size_exceeded} = Zstd.decompress(frame)
+  end
+
+  test "a truncated RLE block (header present, content byte gone) is refused" do
+    frame = bare_header() <> block_header(1, 8, true)
+
+    assert {:error, :truncated_frame} = Zstd.decompress(frame)
+  end
+
+  test "a raw block whose declared size overruns the frame is refused" do
+    frame = bare_header() <> block_header(0, 10, true) <> <<0x61, 0x62, 0x63>>
+
+    assert {:error, :truncated_frame} = Zstd.decompress(frame)
+  end
+
+  test "a lying declared Frame_Content_Size is refused" do
+    # Single-segment frame declaring 5 bytes of content, carrying 4.
+    frame =
+      <<0x28, 0xB5, 0x2F, 0xFD, 0xE0, 5::64-little>> <>
+        block_header(0, 4, true) <> "abcd"
+
+    assert {:error, :frame_content_size_mismatch} = Zstd.decompress(frame)
+  end
+
+  test "a skippable frame is skipped and the following frame decoded" do
+    payload = bare_header() <> block_header(0, 4, true) <> "abcd"
+
+    skip = <<0x50, 0x2A, 0x4D, 0x18, 3::32-little, "xyz">>
+    assert {:ok, "abcd"} = Zstd.decompress(skip <> payload)
+
+    # The skip size overruns the frame: corruption, never a silent partial skip.
+    # (The frame must genuinely END inside the skip — with a trailing frame
+    # appended, the skip would eat into it and the remnant fails :bad_magic.)
+    short = <<0x50, 0x2A, 0x4D, 0x18, 9::32-little, "xyz">>
+    assert {:error, :truncated_frame} = Zstd.decompress(short)
+  end
+
+  test "a treeless literals section with no previous Huffman table is refused" do
+    # Literals type 3 (Treeless_Literals_Block) with sf=0 (3-byte size header),
+    # regen 0 / comp 0, then a zero-sequence section — a VALID block shape
+    # whose tree must come from a previous block in the same frame. First
+    # block of the frame: there is no previous table (RFC 3.1.1.3.1.3).
+    content = <<0x03, 0x00, 0x00, 0x00>>
+    frame = bare_header() <> block_header(2, byte_size(content), true) <> content
+
+    assert {:error, :no_previous_huffman_table} = Zstd.decompress(frame)
+  end
+
+  # -- crafted literals / sequences section arms ---------------------------------
+  #
+  # Compressed-block builders for the section shapes the real corpus never
+  # truncates at exactly (RFC 3.1.1.3): `raw_sf0/1` wraps bytes as Raw
+  # literals in the 1-bit size format; the sequences suffix is appended per
+  # test so each arm ends the frame EXACTLY at the boundary it must refuse.
+
+  defp raw_sf0(bytes), do: <<byte_size(bytes) <<< 3::8, bytes::binary>>
+
+  defp comp_block(content),
+    do: bare_header() <> block_header(2, byte_size(content), true) <> content
+
+  test "a frame header missing its Window_Descriptor byte is refused" do
+    assert {:error, :truncated_frame} = Zstd.decompress(<<0x28, 0xB5, 0x2F, 0xFD, 0x00>>)
+  end
+
+  test "a checksummed frame truncated before its digest is refused" do
+    input = File.read!(Path.join(@fixtures, "../xxh64/vec_000100.bin"))
+    frame = checksummed_frame(input, 0x0)
+    undigested = binary_part(frame, 0, byte_size(frame) - 4)
+
+    assert {:error, :truncated_frame} = Zstd.decompress(undigested)
+  end
+
+  test "an empty compressed block content is refused at the literals section" do
+    assert {:error, :truncated_frame} = Zstd.decompress(bare_header() <> block_header(2, 0, true))
+  end
+
+  test "a 2-byte-size-format literals header with its second size byte gone" do
+    # sf=1: regen sits in (b0 >>> 4) + (b1 <<< 4) — the frame ends at b0.
+    assert {:error, :truncated_frame} = Zstd.decompress(comp_block(<<0x54>>))
+  end
+
+  test "raw literals whose declared regenerated size overruns the block" do
+    content = <<5 <<< 3::8>> <> "abc" <> <<0>>
+
+    assert {:error, :truncated_frame} = Zstd.decompress(comp_block(content))
+  end
+
+  test "RLE literals inflate to the repeated byte (sf=0 size format)" do
+    # The SUCCESS arm of RLE literals — a valid compressed block whose only
+    # content is one RLE literals section + a zero-sequence section.
+    content = <<1 ||| 6 <<< 3::8, "z">> <> <<0>>
+
+    assert {:ok, "zzzzzz"} = Zstd.decompress(comp_block(content))
+  end
+
+  test "RLE literals with the repeated byte missing is refused" do
+    assert {:error, :truncated_frame} = Zstd.decompress(comp_block(<<1 ||| 6 <<< 3::8>>))
+  end
+
+  test "a Huffman literals size header shorter than its size format" do
+    # sf=0 needs 3 bytes for the sizes; two is corruption.
+    assert {:error, :truncated_frame} = Zstd.decompress(comp_block(<<0x02, 0x00>>))
+  end
+
+  test "a Huffman literals section whose compressed size overruns the block" do
+    # b0 = 0x02 (type 2, sf 0); sizes encode regen=4, comp=10 — only 5 follow.
+    content = <<0x02, 0x40, 0x80, 0x02, "abcde">>
+
+    assert {:error, :truncated_frame} = Zstd.decompress(comp_block(content))
+  end
+
+  test "a Huffman literals section with a garbage tree description is refused" do
+    # Sizes encode regen=4, comp=3; the 3 "tree" bytes are not a valid
+    # description — the tree read itself must fail closed.
+    content = <<0x02, 0x40, 0xC0, 0x00, 0xFF, 0xFF, 0xFF>>
+
+    assert {:error, _reason} = Zstd.decompress(comp_block(content))
+  end
+
+  test "a compressed block with literals but no sequences section byte" do
+    assert {:error, :truncated_frame} = Zstd.decompress(comp_block(raw_sf0("abcd")))
+  end
+
+  test "a nonzero sequence count with no bitstream at all is refused" do
+    # n=1, all tables predefined (modes 0) — the bitstream is absent.
+    assert {:error, _reason} = Zstd.decompress(comp_block(raw_sf0("abcd") <> <<1, 0>>))
+  end
+
+  test "a 3-byte sequence count with its second length byte gone" do
+    assert {:error, :truncated_frame} = Zstd.decompress(comp_block(raw_sf0("abcd") <> <<255>>))
+  end
+
+  test "a 3-byte sequence count with only one of its two length bytes" do
+    assert {:error, :truncated_frame} =
+             Zstd.decompress(comp_block(raw_sf0("abcd") <> <<255, 1>>))
+  end
+
+  test "a sequence count with no Symbol_Compression_Modes byte" do
+    assert {:error, :truncated_frame} = Zstd.decompress(comp_block(raw_sf0("abcd") <> <<1>>))
+  end
+
+  test "an RLE-mode sequence table with no description byte" do
+    # modes 0x40: Literals_Length table in RLE_Mode — the symbol byte is absent.
+    assert {:error, :truncated_frame} =
+             Zstd.decompress(comp_block(raw_sf0("abcd") <> <<1, 0x40>>))
+  end
+
+  test "an FSE-mode sequence table with a garbage description is refused" do
+    # modes 0x80: Literals_Length table in FSE_Mode — 0xFF is not a valid
+    # accuracy log.
+    assert {:error, _reason} =
+             Zstd.decompress(comp_block(raw_sf0("abcd") <> <<1, 0x80, 0xFF>>))
+  end
+
+  test "a repeat-mode sequence table with no previous table is refused" do
+    # modes 0xC0: Literals_Length table in Repeat_Mode — first block of the
+    # frame has nothing to repeat.
+    assert {:error, :no_previous_fse_table} =
+             Zstd.decompress(comp_block(raw_sf0("abcd") <> <<1, 0xC0>>))
   end
 
   # -- fail-closed tripwires (protected mutations proven RED) -------------------

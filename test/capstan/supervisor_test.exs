@@ -268,6 +268,41 @@ defmodule Capstan.SupervisorTest do
       assert {:error, :server_id_required} = Capstan.start_link(lib_opts(server_id: nil))
     end
 
+    test "a :current start against a dead port fails closed on the GTID read (C1b)" do
+      # The one-shot @@gtid_executed read runs on the pipeline's own fresh
+      # socket BEFORE any dump: its failure must refuse the start (wrapped,
+      # value-free reason) — never start blind, never leak the socket.
+      assert {:error, {:start_position_current_read_failed, reason}} =
+               Capstan.start_link(lib_opts(start_position: :current))
+
+      assert is_atom(reason)
+    end
+
+    test "a :current start against a non-MySQL listener fails closed too" do
+      # A TCP endpoint that accepts and immediately closes: the handshake
+      # fails after connect, exercising the post-connect close-and-refuse arm.
+      {:ok, lsock} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+      {:ok, port} = :inet.port(lsock)
+      acceptor = Task.async(fn -> accept_and_close(lsock) end)
+
+      assert {:error, {:start_position_current_read_failed, _}} =
+               Capstan.start_link(
+                 lib_opts(
+                   start_position: :current,
+                   connection: [
+                     host: "127.0.0.1",
+                     port: port,
+                     username: "capstan",
+                     password: "pw",
+                     ssl: false
+                   ]
+                 )
+               )
+
+      Task.shutdown(acceptor)
+      :gen_tcp.close(lsock)
+    end
+
     test "a mis-shaped connection is refused (Config validation)" do
       assert {:error, :config_invalid} = Capstan.start_link(lib_opts(connection: :not_a_keyword))
     end
@@ -527,5 +562,18 @@ defmodule Capstan.SupervisorTest do
     if Process.alive?(sup), do: Supervisor.stop(sup)
   catch
     :exit, _ -> :ok
+  end
+
+  # Accepts connections and closes them immediately, so a handshake against
+  # this listener gets EOF instead of a greeting.
+  defp accept_and_close(lsock) do
+    case :gen_tcp.accept(lsock, 5_000) do
+      {:ok, s} ->
+        :gen_tcp.close(s)
+        accept_and_close(lsock)
+
+      _ ->
+        :ok
+    end
   end
 end
