@@ -21,21 +21,27 @@ defmodule Capstan.Telemetry do
   """
 
   # Exactly the value-free metadata keys of the design's Events / telemetry table. The
-  # allowlist guards METADATA, where a stray value would otherwise ride; the measurement
-  # channel guards VALUES (counts and monotonic durations only — numbers carry no
-  # identity, so a row value or password can never travel as a measurement either).
+  # allowlist guards METADATA, where a stray value would otherwise ride. The measurement
+  # channel is gated BOTH ways — allowlisted KEYS (a numeric row value like a balance is a
+  # non-negative number, so a type-only gate would let it ride) with non-negative numeric
+  # VALUES — and the refusals name the offending KEYS only, never the values (the gate's
+  # own exception must not become the leak vector).
   @allowed_meta_keys ~w(server_version server_uuid tls reason gtid schema table kind missing_gtids)a
+
+  # The structural measurement vocabulary: counts, ordinals, and monotonic durations only.
+  @allowed_measurement_keys ~w(change_count sink_ms establish_ms table_count row_count chunk_seq)a
 
   @doc "The permitted telemetry metadata keys."
   @spec allowed_meta_keys() :: [atom()]
   def allowed_meta_keys, do: @allowed_meta_keys
 
   @doc """
-  Emit a telemetry event with allowlist-validated metadata and numeric-only measurements.
+  Emit a telemetry event with allowlist-validated metadata and measurements.
 
-  Raises `ArgumentError` if `meta` carries any key outside `allowed_meta_keys/0`, or if
-  any measurement value is not a non-negative number — the fail-closed points that keep
-  a value off a payload on both channels.
+  Raises `ArgumentError` if `meta` carries any key outside `allowed_meta_keys/0`, if a
+  measurement key is outside `allowed_measurement_keys/0`, or if a measurement value is
+  not a non-negative number — the fail-closed points that keep a value off a payload on
+  both channels. The refusals name the offending KEYS only, never the values.
   """
   @spec event([atom(), ...], map(), map()) :: :ok
   def event(name, measurements, meta)
@@ -43,15 +49,32 @@ defmodule Capstan.Telemetry do
     :telemetry.execute(name, validate_measurements!(measurements), validate!(meta))
   end
 
+  @doc "The permitted telemetry measurement keys (counts and monotonic durations)."
+  @spec allowed_measurement_keys() :: [atom()]
+  def allowed_measurement_keys, do: @allowed_measurement_keys
+
   @doc false
   @spec validate_measurements!(map()) :: map()
   def validate_measurements!(measurements) when is_map(measurements) do
-    if Enum.all?(measurements, fn {_k, v} -> is_number(v) and v >= 0 end) do
-      measurements
-    else
-      raise ArgumentError,
-            "telemetry measurements must be numeric (non-negative counts and durations), " <>
-              "got #{inspect(measurements)} (no row values or passwords in telemetry)"
+    bad_keys = Map.keys(measurements) -- @allowed_measurement_keys
+
+    non_numeric =
+      for {key, value} <- measurements, not (is_number(value) and value >= 0), do: key
+
+    cond do
+      bad_keys != [] ->
+        raise ArgumentError,
+              "telemetry measurement keys #{inspect(bad_keys)} are not in the value-free " <>
+                "allowlist #{inspect(@allowed_measurement_keys)} (numeric values cannot ride " <>
+                "measurements — only structural counts and durations)"
+
+      non_numeric != [] ->
+        raise ArgumentError,
+              "telemetry measurements must be numeric (non-negative counts and durations) " <>
+                "under keys #{inspect(non_numeric)} (no row values or passwords in telemetry)"
+
+      true ->
+        measurements
     end
   end
 

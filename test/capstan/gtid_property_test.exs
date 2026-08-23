@@ -20,11 +20,11 @@ defmodule Capstan.GtidPropertyTest do
 
   defp hex_digits(n) do
     StreamData.map(StreamData.list_of(StreamData.integer(0..15), length: n), fn digits ->
-      digits |> Enum.map(&Integer.to_string(&1, 16)) |> Enum.join()
+      Enum.map_join(digits, &Integer.to_string(&1, 16))
     end)
   end
 
-  defp uuid_gen() do
+  defp uuid_gen do
     StreamData.map(
       {hex_digits(8), hex_digits(4), hex_digits(4), hex_digits(4), hex_digits(12)},
       fn {a, b, c, d, e} -> "#{a}-#{b}-#{c}-#{d}-#{e}" end
@@ -33,7 +33,7 @@ defmodule Capstan.GtidPropertyTest do
 
   @max_gno 500
 
-  defp interval_gen() do
+  defp interval_gen do
     StreamData.map({StreamData.integer(1..@max_gno), StreamData.integer(0..60)}, fn {lo, span} ->
       {lo, lo + span}
     end)
@@ -41,18 +41,18 @@ defmodule Capstan.GtidPropertyTest do
 
   # A RAW (unnormalized) set: overlapping, adjacent, and duplicate intervals per uuid —
   # exactly the shapes normalization must coalesce.
-  defp raw_set_gen() do
+  defp raw_set_gen do
     StreamData.map_of(
       uuid_gen(),
-      StreamData.list_of(interval_gen(), min_length: 1, max_length: 5), max_tries: 20)
+      StreamData.list_of(interval_gen(), min_length: 1, max_length: 5),
+      max_tries: 20
+    )
   end
 
   defp render_raw(raw) do
-    raw
-    |> Enum.map(fn {uuid, intervals} ->
+    Enum.map_join(raw, ",", fn {uuid, intervals} ->
       uuid <> ":" <> Enum.map_join(intervals, ":", fn {lo, high} -> "#{lo}-#{high}" end)
     end)
-    |> Enum.join(",")
   end
 
   # The independent membership oracle: every {uuid, gno} the RAW intervals cover.

@@ -298,9 +298,10 @@ via `[:capstan, :connection, :halt]` / `[:capstan, :assembler, :halt]` telemetry
 
 ## Telemetry
 
-Both channels are fail-closed value-free: metadata keys pass an allowlist, and measurement
-values must be non-negative numbers (counts and monotonic durations — anything else raises
-rather than ships).
+Both channels are fail-closed value-free and BOTH are key-allowlisted (a numeric row value —
+a balance, an account number — is a non-negative number, so a type-only gate would let it
+ride): metadata keys and measurement keys each pass their own allowlist, measurement values
+must be non-negative numbers, and the refusals name keys only, never values.
 
 | Event | Measurements | Metadata |
 | --- | --- | --- |
@@ -311,6 +312,10 @@ rather than ships).
 | `[:capstan, :transaction, :filtered]` | — | `gtid` |
 | `[:capstan, :transaction, :skipped]` | — | `gtid`, `reason` (`:already_processed`) |
 | `[:capstan, :schema_change, :received]` | — | `schema`, `table`, `kind` |
+| `[:capstan, :snapshot, :started]` | `table_count` | — |
+| `[:capstan, :snapshot, :chunk_completed]` | `row_count`, `chunk_seq` | `schema`, `table` |
+| `[:capstan, :snapshot, :completed]` | `table_count` | — |
+| `[:capstan, :snapshot, :halt]` | — | `reason` |
 | `[:capstan, :assembler, :halt]` | — | `reason` |
 
 `change_count` is computed before delivery (never by consuming the sink's single-pass

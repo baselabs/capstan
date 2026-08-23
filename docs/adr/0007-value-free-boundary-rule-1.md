@@ -41,9 +41,12 @@ The boundary is enforced at runtime and proven at test time, on both telemetry c
   raises on any key outside the allowlist (`server_version`, `server_uuid`, `tls`, `reason`,
   `gtid`, `schema`, `table`, `kind`, `missing_gtids` — telemetry.ex). A future emitter attaching
   a row value cannot ship it; the process raises instead.
-- **Measurements gate VALUES.** Measurement maps must be non-negative numbers (counts and
-  monotonic durations) — `validate_measurements!` raises on anything else, so a value cannot
-  travel as a measurement either (added 2026-08-23 with the first real measurements).
+- **Measurements gate KEYS and VALUES.** Measurement keys pass their own allowlist (the
+  structural vocabulary: `change_count`, `sink_ms`, `establish_ms`, `table_count`,
+  `row_count`, `chunk_seq`) and values must be non-negative numbers — a numeric row value
+  (a balance, an account number) is a non-negative number, so a type-only gate would let it
+  ride. The refusals name the offending KEYS only, never the values: the gate's own exception
+  must not become the leak vector (a review round caught exactly that in the first cut).
 - **Halts are value-free atoms or tagged outer atoms.** `{:sink_error, reason}` emits the OUTER
   atom only; a compound reason's payload is scrubbed through `Capstan.Error.from/1`.
 - **Test time:** `Capstan.ValueFree` (test/support/value_free.ex) plants sentinels — a row value,

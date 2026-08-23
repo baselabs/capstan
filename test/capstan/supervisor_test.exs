@@ -146,17 +146,9 @@ defmodule Capstan.SupervisorTest do
     end
 
     test "event/3 REFUSES a non-numeric measurement value (numbers carry no identity)" do
-      # The metadata channel gates KEYS; the measurement channel gates VALUES — only
-      # numbers (counts, monotonic durations) may ride, so a row value or password can
-      # never travel as a measurement either.
-      assert_raise ArgumentError, ~r/measurements must be numeric/, fn ->
-        Telemetry.event(
-          [:capstan, :transaction, :committed],
-          %{row_value: "secret_pii"},
-          %{gtid: "u:1"}
-        )
-      end
-
+      # The metadata channel gates KEYS; the measurement channel gates BOTH — only
+      # allowlisted keys with non-negative numbers may ride — so a row value or password
+      # can never travel as a measurement either.
       assert_raise ArgumentError, ~r/measurements must be numeric/, fn ->
         Telemetry.event(
           [:capstan, :transaction, :committed],
@@ -164,6 +156,35 @@ defmodule Capstan.SupervisorTest do
           %{gtid: "u:1"}
         )
       end
+    end
+
+    test "event/3 REFUSES an off-list measurement KEY even with a numeric value (numeric PII class)" do
+      # A numeric row value (a balance, an account number) IS a non-negative number — a
+      # type-only gate would let it ride. The measurement channel is key-allowlisted,
+      # symmetric with the metadata channel.
+      assert_raise ArgumentError, ~r/measurement keys/, fn ->
+        Telemetry.event(
+          [:capstan, :transaction, :committed],
+          %{balance: 123_456},
+          %{gtid: "u:1"}
+        )
+      end
+    end
+
+    test "the measurement-gate exception NEVER carries the offending VALUE (Rule 1)" do
+      # The refusal is the leak vector's last stand: interpolating the invalid map into
+      # the message would ship the secret in the crash report. Keys only.
+      err =
+        assert_raise ArgumentError, fn ->
+          Telemetry.event(
+            [:capstan, :transaction, :committed],
+            %{row_value: "secret_pii"},
+            %{gtid: "u:1"}
+          )
+        end
+
+      refute err.message =~ "secret_pii"
+      assert err.message =~ "row_value"
     end
 
     test "validate!/1 returns allowlisted metadata unchanged and raises on any off-list key" do
