@@ -6,6 +6,17 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — C3 batching
+
+- `batch: [max_transactions:, flush_ms:, mode:]` — `:lib_owned` (per-transaction
+  delivery, batched durable checkpoint writes: one write of the batch's newest position
+  at the bound or deadline) and `:sink_owned` (one atomic `handle_batch/2` per batch —
+  units + final position together; required in that mode, missing ⇒
+  `:sink_missing_handle_batch`). The crash-replay window widens to at most the un-flushed
+  batch tail, bounded by `max_transactions`; a quiet stream never holds the checkpoint
+  past `flush_ms`. Live-proven: bound-flush, atomic sink-batch delivery, and
+  deadline-flush marquees.
+
 ### Added — C1b explicit start positions
 
 - `start_position:` now accepts an explicit `%Capstan.Position{}` (the dump AND the

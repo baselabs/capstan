@@ -42,6 +42,7 @@ defmodule Capstan.Pipeline do
           | :sink_missing_checkpoint
           | :sink_missing_handle_schema_change
           | :sink_missing_handle_snapshot
+          | :sink_missing_handle_batch
 
   @doc """
   Validate the configured `:sink` against its checkpoint mode's required callbacks.
@@ -72,8 +73,11 @@ defmodule Capstan.Pipeline do
       # C2: in SNAPSHOT mode the sink must implement handle_snapshot/2 (upsert-by-PK backfill
       # delivery). Gated on snapshot_mode? so an absent :snapshot block leaves this byte-for-byte
       # the C1 required-set — a C1 sink is never forced to stub a callback its mode never calls.
-      snapshot_mode?(opts) and not function_exported?(sink, :handle_snapshot, 2) ->
+      snapshot_sink_missing?(opts, sink) ->
         {:error, :sink_missing_handle_snapshot}
+
+      batch_sink_missing?(opts, sink) ->
+        {:error, :sink_missing_handle_batch}
 
       true ->
         :ok
@@ -86,6 +90,26 @@ defmodule Capstan.Pipeline do
   @spec lib_mode?(keyword()) :: boolean()
   def lib_mode?(opts) when is_list(opts) do
     Keyword.has_key?(opts, :checkpoint_store) and Keyword.get(opts, :checkpoint_store) != nil
+  end
+
+  # C2: snapshot mode requires handle_snapshot/2 (the upsert-by-PK backfill delivery).
+  defp snapshot_sink_missing?(opts, sink) do
+    snapshot_mode?(opts) and not function_exported?(sink, :handle_snapshot, 2)
+  end
+
+  # C3: sink-owned BATCH mode requires handle_batch/2 (the atomic batch + position
+  # delivery); lib-owned batching keeps handle_transaction/1 delivery.
+  defp batch_sink_missing?(opts, sink) do
+    batch_mode?(opts) == :sink_owned and not function_exported?(sink, :handle_batch, 2)
+  end
+
+  @doc "The configured batch mode: nil (no batching), :lib_owned, or :sink_owned."
+  @spec batch_mode?(keyword()) :: nil | :lib_owned | :sink_owned
+  def batch_mode?(opts) when is_list(opts) do
+    case Keyword.get(opts, :batch) do
+      nil -> nil
+      batch -> Keyword.get(batch, :mode, :lib_owned)
+    end
   end
 
   @doc """
@@ -236,6 +260,7 @@ defmodule Capstan.Pipeline do
         tables: Keyword.get(opts, :tables, :all),
         xa: Keyword.get(opts, :xa, :refuse),
         max_prepared_transactions: Keyword.get(opts, :max_prepared_transactions, 10_000),
+        batch: Keyword.get(opts, :batch),
         checkpoint_mode: mode
       ] ++
         if(mode == :lib_owned, do: [checkpoint_store: checkpoint_store], else: []) ++

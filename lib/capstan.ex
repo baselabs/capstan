@@ -190,6 +190,7 @@ defmodule Capstan do
       max_command_retries: config.max_command_retries,
       xa: config.xa,
       max_prepared_transactions: config.max_prepared_transactions,
+      batch: config.batch,
       reconnect_backoff: config.reconnect_backoff,
       heartbeat_period_ms: config.heartbeat_period_ms,
       stream_timeout_ms: config.stream_timeout_ms,

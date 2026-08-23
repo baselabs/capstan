@@ -101,8 +101,19 @@ defmodule Capstan.Sink do
   @callback handle_snapshot([Capstan.Change.t()], Capstan.Snapshot.Meta.t()) ::
               :ok | {:error, term()}
 
+  @doc """
+  Batch delivery (C3, `batch: [mode: :sink_owned]`): the batch's delivered units plus
+  its final `%Capstan.Position{}`. The sink applies the batch and persists the position
+  atomically together — the batch effect-once contract, mirroring `handle_transaction/1`
+  in sink-owned mode. Return `{:error, term()}` to halt fail-closed before the
+  checkpoint side; the batch is re-delivered after a restart.
+  """
+  @callback handle_batch([term()], Capstan.Position.t()) ::
+              {:ok, Capstan.Position.t()} | {:error, term()}
+
   @optional_callbacks checkpoint: 0,
                       handle_transaction: 1,
                       handle_schema_change: 2,
-                      handle_snapshot: 2
+                      handle_snapshot: 2,
+                      handle_batch: 2
 end

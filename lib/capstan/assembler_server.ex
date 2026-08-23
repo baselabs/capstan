@@ -80,6 +80,11 @@ defmodule Capstan.AssemblerServer do
     :checkpoint_impl,
     :checkpoint_store,
     :checkpoint_mode,
+    :batch,
+    :batch_pending,
+    :batch_units,
+    :batch_flush_timer,
+    :last_output,
     :processed_set,
     :max_retries,
     # C2 snapshot spine hooks (both absent in all of C1 ⇒ byte-identical behavior):
@@ -149,6 +154,13 @@ defmodule Capstan.AssemblerServer do
     # dedup set (matching the Connection's dump position exactly); nil = authority-only.
     override = start_override(opts)
 
+    state_common = %{
+      batch: Keyword.get(opts, :batch),
+      batch_pending: [],
+      batch_units: [],
+      batch_flush_timer: nil
+    }
+
     case Keyword.get(opts, :checkpoint_mode, :lib_owned) do
       :lib_owned ->
         {impl, store} = Keyword.fetch!(opts, :checkpoint_store)
@@ -161,7 +173,11 @@ defmodule Capstan.AssemblerServer do
           max_retries,
           xa,
           max_prepared,
-          %{watermark_observer: watermark_observer, override: override}
+          %{
+            watermark_observer: watermark_observer,
+            override: override,
+            batch: Keyword.get(opts, :batch)
+          }
         )
 
       :sink_owned ->
@@ -185,6 +201,11 @@ defmodule Capstan.AssemblerServer do
               checkpoint_impl: nil,
               checkpoint_store: nil,
               checkpoint_mode: :sink_owned,
+              batch: state_common.batch,
+              batch_pending: [],
+              batch_units: [],
+              batch_flush_timer: nil,
+              last_output: nil,
               processed_set: Gtid.parse(start_position.gtid_set),
               max_retries: max_retries,
               watermark_observer: watermark_observer,
@@ -207,7 +228,7 @@ defmodule Capstan.AssemblerServer do
          max_retries,
          xa,
          max_prepared,
-         %{watermark_observer: watermark_observer, override: override}
+         %{watermark_observer: watermark_observer, override: override, batch: batch}
        ) do
     case CheckpointStore.read_position(impl, store) do
       {:ok, resumed} ->
@@ -224,6 +245,11 @@ defmodule Capstan.AssemblerServer do
           checkpoint_impl: impl,
           checkpoint_store: store,
           checkpoint_mode: :lib_owned,
+          batch: batch,
+          batch_pending: [],
+          batch_units: [],
+          batch_flush_timer: nil,
+          last_output: nil,
           processed_set: Gtid.parse(start_position.gtid_set),
           max_retries: max_retries,
           watermark_observer: watermark_observer,
@@ -295,6 +321,24 @@ defmodule Capstan.AssemblerServer do
     asm = state.assembler
     merged = %{asm | startup_xids: MapSet.union(asm.startup_xids, MapSet.new(digests))}
     {:noreply, %{state | assembler: merged}}
+  end
+
+  # The timer fires ⇒ close whatever is pending NOW (the deadline form of the bound).
+  def handle_info(:batch_flush, %__MODULE__{batch: %{}, batch_pending: []} = state),
+    do: {:noreply, %{state | batch_flush_timer: nil}}
+
+  def handle_info(:batch_flush, %__MODULE__{batch: %{mode: :lib_owned}} = state) do
+    case flush_batch(state) do
+      {:ok, state} -> {:noreply, state}
+      {:halt, reason} -> halt(state, reason)
+    end
+  end
+
+  def handle_info(:batch_flush, %__MODULE__{batch: %{mode: :sink_owned}} = state) do
+    case flush_sink_batch(state) do
+      {:ok, state} -> {:noreply, state}
+      {:halt, reason} -> halt(state, reason)
+    end
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -386,7 +430,9 @@ defmodule Capstan.AssemblerServer do
   # single-pass enumerable. When C3 lands, the Assembler must emit an explicit
   # filtered/empty signal rather than have this site infer it from the representation.
   defp dispatch(%Transaction{changes: []} = txn, state) do
-    with {:ok, state} <- checkpoint(state, txn.position) do
+    # C3: an empty/filtered transaction checkpoints through the batch too — the
+    # watermark advance IS the durable side effect here (no sink call).
+    with {:ok, state} <- batch_aware_checkpoint(state, txn.position) do
       emit_filtered(txn.gtid)
       {:ok, state}
     end
@@ -394,6 +440,16 @@ defmodule Capstan.AssemblerServer do
 
   # A delivered transaction: the sink FIRST, the checkpoint ONLY after `{:ok, _}`
   # (at-least-once). A sink error halts fail-closed WITHOUT advancing.
+  #
+  # In sink-owned BATCH mode the DELIVERY itself defers to the batch: no per-transaction
+  # sink call here — the unit + its position pool, and `handle_batch/2` delivers the
+  # whole batch atomically at the flush (the batch effect-once contract).
+  defp dispatch(%Transaction{} = txn, %__MODULE__{batch: %{mode: :sink_owned}} = state) do
+    state = %{state | last_output: txn}
+    emit_committed(txn.gtid, length(txn.changes), 0)
+    batch_aware_checkpoint(state, txn.position)
+  end
+
   defp dispatch(%Transaction{} = txn, state) do
     # change_count is computed on the CONCRETE pre-delivery list, never by enumerating
     # the sink's `changes` (the contract is single-pass; C3's lazy enumerable must carry
@@ -405,7 +461,7 @@ defmodule Capstan.AssemblerServer do
       {:ok, _position} ->
         sink_ms = monotonic_ms_since(started)
 
-        with {:ok, state} <- checkpoint(state, txn.position) do
+        with {:ok, state} <- batch_aware_checkpoint(state, txn.position) do
           emit_committed(txn.gtid, change_count, sink_ms)
           {:ok, state}
         end
@@ -435,6 +491,93 @@ defmodule Capstan.AssemblerServer do
         with {:ok, state} <- checkpoint(state, position) do
           emit_schema_change(schema_change)
           {:ok, state}
+        end
+
+      {:error, reason} ->
+        {:halt, {:sink_error, reason}}
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## C3 batching — the durable checkpoint write (and, in :sink_owned batch mode, the
+  ## delivery itself) is deferred to a bounded batch. Delivery stays per-transaction
+  ## in lib-owned batch mode (handle_transaction/1 unchanged); only the CHECKPOINT
+  ## write batches. In sink-owned batch mode the sink receives handle_batch/2 with the
+  ## batch's units + final position and persists both atomically.
+  ##
+  ## The batch closes on: the transaction bound, the flush deadline, ANY halt, and
+  ## snapshot coordination (the coordinator's watermark feed would desync a held-open
+  ## batch) — each closes IMMEDIATELY, never across.
+  ## ---------------------------------------------------------------------------
+
+  defp batch_aware_checkpoint(%__MODULE__{batch: nil} = state, position) do
+    checkpoint(state, position)
+  end
+
+  defp batch_aware_checkpoint(%__MODULE__{batch: %{mode: :lib_owned} = cfg} = state, position) do
+    pending = [%{position: position, enqueued_at: System.monotonic_time()} | state.batch_pending]
+    state = %{state | batch_pending: pending}
+
+    if length(pending) >= cfg.max_transactions or flush_due?(state) do
+      flush_batch(state)
+    else
+      arm_flush_timer(state)
+    end
+  end
+
+  defp batch_aware_checkpoint(%__MODULE__{batch: %{mode: :sink_owned} = cfg} = state, position) do
+    # The unit that produced this advance rides along for handle_batch/2.
+    pending = [
+      %{position: position, enqueued_at: System.monotonic_time(), unit: state.last_output}
+      | state.batch_pending
+    ]
+
+    state = %{state | batch_pending: pending}
+
+    if length(pending) >= cfg.max_transactions or flush_due?(state) do
+      flush_sink_batch(state)
+    else
+      arm_flush_timer(state)
+    end
+  end
+
+  # The flush deadline: the OLDEST pending write's age. A quiet stream therefore never
+  # holds the checkpoint longer than flush_ms.
+  defp flush_due?(%__MODULE__{batch: %{flush_ms: flush_ms}, batch_pending: pending}) do
+    oldest = pending |> Enum.reverse() |> hd()
+
+    System.monotonic_time() - oldest.enqueued_at >=
+      System.convert_time_unit(flush_ms, :millisecond, :native)
+  end
+
+  defp arm_flush_timer(%__MODULE__{batch: %{flush_ms: flush_ms}} = state) do
+    _ = state.batch_flush_timer && Process.cancel_timer(state.batch_flush_timer)
+    timer = Process.send_after(self(), :batch_flush, flush_ms)
+    {:ok, %{state | batch_flush_timer: timer}}
+  end
+
+  # Lib-owned flush: ONE durable write of the batch's FINAL position (the newest — the
+  # processed watermark is a set; the newest position subsumes the batch).
+  defp flush_batch(%__MODULE__{} = state) do
+    # pending is prepended — the NEWEST position is the head; it subsumes the batch.
+    newest = hd(state.batch_pending)
+
+    with {:ok, state} <- checkpoint(%{state | batch_pending: []}, newest.position) do
+      {:ok, %{state | batch_flush_timer: nil}}
+    end
+  end
+
+  # Sink-owned flush: the batch's units + final position, atomically, via handle_batch/2.
+  # The units are the pending entries' delivered outputs (last_output at each advance).
+  defp flush_sink_batch(%__MODULE__{} = state) do
+    entries = Enum.reverse(state.batch_pending)
+    %{position: position} = List.last(entries)
+    units = for %{unit: unit} <- entries, unit != nil, do: unit
+
+    case state.sink.handle_batch(units, position) do
+      {:ok, _pos} ->
+        with {:ok, state} <- checkpoint(%{state | batch_pending: [], batch_units: []}, position) do
+          {:ok, %{state | batch_flush_timer: nil}}
         end
 
       {:error, reason} ->

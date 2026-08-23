@@ -97,6 +97,7 @@ defmodule Capstan.Config do
     :stream_timeout_ms,
     :xa,
     :max_prepared_transactions,
+    :batch,
     :id
   ]
 
@@ -128,7 +129,8 @@ defmodule Capstan.Config do
           heartbeat_period_ms: pos_integer(),
           stream_timeout_ms: pos_integer(),
           xa: :refuse | :track,
-          max_prepared_transactions: pos_integer()
+          max_prepared_transactions: pos_integer(),
+          batch: batch_config() | nil
         }
 
   @typedoc "A value-free option-validation refusal."
@@ -138,6 +140,13 @@ defmodule Capstan.Config do
           | :tls_verification_unspecified
           | :invalid_liveness_config
           | :unknown_option
+
+  @typedoc "The normalised C3 batching configuration, or `nil` when absent (no batching)."
+  @type batch_config :: %{
+          max_transactions: pos_integer(),
+          flush_ms: pos_integer(),
+          mode: :lib_owned | :sink_owned
+        }
 
   @typedoc "A value-free precondition-gate refusal (ADR-0002)."
   @type precondition_error ::
@@ -186,7 +195,8 @@ defmodule Capstan.Config do
          {:ok, connection} <- fetch_connection(opts),
          {:ok, max_command_retries} <- fetch_max_command_retries(opts),
          {:ok, liveness} <- fetch_liveness(opts),
-         {:ok, xa} <- fetch_xa(opts) do
+         {:ok, xa} <- fetch_xa(opts),
+         {:ok, batch} <- fetch_batch(opts) do
       {:ok,
        %{
          connection: connection,
@@ -196,7 +206,8 @@ defmodule Capstan.Config do
          heartbeat_period_ms: liveness.heartbeat_period_ms,
          stream_timeout_ms: liveness.stream_timeout_ms,
          xa: xa.xa,
-         max_prepared_transactions: xa.max_prepared_transactions
+         max_prepared_transactions: xa.max_prepared_transactions,
+         batch: batch
        }}
     end
   end
@@ -367,6 +378,51 @@ defmodule Capstan.Config do
   # silent fallback). The window comparison fires BEFORE any socket opens: in snapshot
   # mode the bootstrap opens a query connection before the connection child starts,
   # so leaning on Connection.init would open a socket on a bad config.
+  # C3 batching: `batch: [max_transactions: n, flush_ms: ms, mode: :lib_owned | :sink_owned]`.
+  # Absent ⇒ no batching (per-transaction delivery AND checkpoint, byte-for-byte the
+  # C1/C2 behavior). A present block must be a keyword with a positive integer
+  # max_transactions (the batch bound — the crash-replay window), an optional positive
+  # flush_ms (a time bound so a quiet stream cannot hold the checkpoint forever), and a
+  # mode of :lib_owned (default; per-transaction delivery, batched durable CHECKPOINT
+  # writes) or :sink_owned (atomic handle_batch/2 delivery + position).
+  defp fetch_batch(opts) do
+    case Keyword.get(opts, :batch) do
+      nil ->
+        {:ok, nil}
+
+      batch when is_list(batch) ->
+        with :ok <- batch_shape(batch) do
+          {:ok,
+           %{
+             max_transactions: Keyword.get(batch, :max_transactions, 1000),
+             flush_ms: Keyword.get(batch, :flush_ms, 500),
+             mode: Keyword.get(batch, :mode, :lib_owned)
+           }}
+        end
+
+      _ ->
+        {:error, :config_invalid}
+    end
+  end
+
+  defp batch_shape(batch) do
+    positive = fn key, default ->
+      case Keyword.get(batch, key, default) do
+        n when is_integer(n) and n > 0 -> true
+        _ -> false
+      end
+    end
+
+    checks = [
+      Keyword.keyword?(batch),
+      positive.(:max_transactions, 1000),
+      positive.(:flush_ms, 500),
+      Keyword.get(batch, :mode, :lib_owned) in [:lib_owned, :sink_owned]
+    ]
+
+    if Enum.all?(checks), do: :ok, else: {:error, :config_invalid}
+  end
+
   # The XA policy (ADR-0006): :refuse (default — the C1 halt posture) or :track.
   # The prepared-pool bound is a POSITIVE integer (zero exhausts the pool on the first
   # prepare — a mis-set bound, not a useful configuration).

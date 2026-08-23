@@ -32,6 +32,7 @@ Capstan.start_link(
   tables: [{"orders", "line_items"}],           # or :all (default); filter applied before decode
   max_command_retries: 5,                       # default 5; pre-establish failures only
   xa: :track,                                   # default :refuse; see "XA transactions"
+  batch: [max_transactions: 1000, flush_ms: 500],  # optional; see "Batching"
   max_prepared_transactions: 10_000,            # the :track prepared-pool bound
   reconnect_backoff: 1_000,                     # default; ms between reconnect attempts
   heartbeat_period_ms: 15_000,                  # default; server heartbeat on a quiet stream
@@ -148,6 +149,24 @@ Three load-bearing rules — each guards a silent-loss class the type signature 
 `handle_schema_change/2` receives only structured `schema`/`table`/`kind` — the raw DDL statement
 text is redacted before it reaches the sink (Rule 1). Return `{:error, term()}` from either
 delivery callback to halt the pipeline fail-closed **without** advancing the checkpoint.
+
+### Batching
+
+`batch: [max_transactions: n, flush_ms: ms, mode: :lib_owned | :sink_owned]` batches the
+DURABLE side (absent — no batching; per-transaction delivery and checkpoint,
+byte-for-byte the C1 behavior).
+
+- **`:lib_owned`** (default): delivery stays per-transaction (`handle_transaction/1`
+  unchanged); only the durable CHECKPOINT write batches — one write of the batch's
+  newest position at the bound (`max_transactions`) or the deadline (`flush_ms`),
+  whichever first. The crash-replay window widens from one transaction to at most the
+  un-flushed batch tail; dedup on restart already covers replay (set membership).
+- **`:sink_owned`**: the DELIVERY itself batches — your sink receives ONE
+  `c:Capstan.Sink.handle_batch/2` carrying the batch's transactions plus its final
+  position, and must apply both **atomically together** (the batch effect-once contract;
+  required callback in this mode, `{:error, _}` halts before the checkpoint side).
+
+The batch closes IMMEDIATELY (never across) on any halt and on snapshot coordination.
 
 ### XA transactions (ADR-0006)
 
