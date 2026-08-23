@@ -6,6 +6,8 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-23
+
 ### Added
 
 - The precondition gate gains a sixth variable: `binlog_transaction_compression` must be OFF
