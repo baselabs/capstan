@@ -31,7 +31,7 @@ Elixir (`:gen_tcp`/`:ssl`/`:crypto` only).
 ```elixir
 def deps do
   [
-    {:capstan, "~> 1.1"}
+    {:capstan, "~> 1.2"}
   ]
 end
 ```

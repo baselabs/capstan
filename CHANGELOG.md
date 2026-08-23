@@ -6,6 +6,8 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-23
+
 ### Fixed — decoder robustness (found by the release gate's coverage battery)
 
 - A compressed block whose sequence-count bytes were truncated **crashed** the

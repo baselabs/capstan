@@ -14,11 +14,14 @@ fail-closed** on every condition that could otherwise lose or corrupt data silen
 in-library and probe-proven (`:gen_tcp`/`:ssl`/`:crypto` only; `decimal` + `jason` + `telemetry`).
 Elixir `~> 1.15`.
 
-**Current state:** C1 (streaming spine) and C2 (initial snapshot) are implemented
-and released as `capstan` 1.1.1. C2 adds cursor-gated, resumable initial
-backfill with the brief per-chunk read lock recorded in ADR 0005; omitting
-`:snapshot` preserves the C1 stream. C3–C6 and the named C1/C2 follow-up rows
-remain open in `docs/ROADMAP.md`. The rules below are binding invariants for the
+**Current state:** C1 (streaming spine), C2 (initial snapshot), C3 (batching),
+C4a/C4b (type breadth + compressed-transaction consumption), the C1a/C1b
+position-ownership/start-position rows, C2a (collation-ordered string PKs),
+C2b/C2c (`tables: :all` resolution + zero-row completion), and XA `:track` are
+implemented and released as `capstan` 1.2.0 (1.1.1 carried C1+C2; the 1.2.0
+span is additive — see CHANGELOG). Omitting `:snapshot` preserves the C1
+stream. C5–C6 and the named follow-up rows remain open in
+`docs/ROADMAP.md`. The rules below are binding invariants for the
 landed code and future rows, grounded in live MySQL probes under `probe/`.
 `docs/ROADMAP.md` carries authored definitions; `.forge/plans/` carries
 machine-local task state.
