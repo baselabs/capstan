@@ -280,20 +280,6 @@ defmodule Capstan.Binlog.TransactionPayloadTest do
 
   # -- TLV test helpers (value-length-aware; the triples' widths vary) ----------
 
-  # Returns {value_offset, decoded_value_int} for a field type in the TLV prefix.
-  defp tlv_field(bin, want) do
-    {triples, _rest} = parse_tlv(bin)
-
-    {offset, value} =
-      Enum.reduce_while(triples, {0, nil}, fn {type, value}, {off, _} ->
-        if type == want,
-          do: {:halt, {off + 1, decode_lenenc(value)}},
-          else: {:cont, {off + 1 + lenenc_size(byte_size(value)) + byte_size(value), nil}}
-      end)
-
-    {offset, value}
-  end
-
   # Rebuilds the body with one field's VALUE substituted (minimal lenenc). A
   # triple is (type, lenenc length, value bytes); the value bytes are the
   # lenenc encoding of the field's integer.
@@ -327,11 +313,6 @@ defmodule Capstan.Binlog.TransactionPayloadTest do
   defp split_lenenc(<<252, v::16-little, rest::binary>>), do: {v, rest}
   defp split_lenenc(<<253, v::24-little, rest::binary>>), do: {v, rest}
   defp split_lenenc(<<254, v::64-little, rest::binary>>), do: {v, rest}
-
-  defp lenenc_size(n) when n < 251, do: 1
-  defp lenenc_size(n) when n < 65_536, do: 3
-  defp lenenc_size(n) when n < 16_777_216, do: 4
-  defp lenenc_size(_n), do: 9
 
   defp lenenc(v) when v < 251, do: <<v>>
   defp lenenc(v) when v < 65_536, do: <<252, v::16-little>>
