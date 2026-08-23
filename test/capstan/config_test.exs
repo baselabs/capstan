@@ -173,6 +173,20 @@ defmodule Capstan.ConfigTest do
         assert {:error, :config_invalid} = Config.validate(opts(stream_timeout_ms: bad))
       end
     end
+
+    test "liveness values above the Process.send_after ceiling are refused :config_invalid" do
+      # The reconnect + liveness timers call Process.send_after/3, which raises past the
+      # 2^32-1 ms schedulable ceiling — refuse at config time, value-free, instead of
+      # crashing the connection later. The heartbeat case pairs an over-ceiling window so
+      # the window comparison stays valid and only the ceiling can refuse it.
+      over = 4_294_967_296
+
+      assert {:error, :config_invalid} = Config.validate(opts(reconnect_backoff: over))
+      assert {:error, :config_invalid} = Config.validate(opts(stream_timeout_ms: over))
+
+      assert {:error, :config_invalid} =
+               Config.validate(opts(heartbeat_period_ms: over, stream_timeout_ms: over + 1))
+    end
   end
 
   ## ---------------------------------------------------------------------------

@@ -119,6 +119,9 @@ defmodule Capstan.Connection do
   # stream dead. `@master_heartbeat_period` is set in NANOSECONDS (verified live: N=1e9 → ~1s).
   @default_heartbeat_period_ms 15_000
   @default_stream_timeout_ms 60_000
+  # Mirrors Capstan.Config's ceiling: the reconnect + liveness timers schedule via
+  # Process.send_after/3, which raises past 2^32-1 ms.
+  @max_timer_ms 4_294_967_295
 
   @gtid_query "SELECT @@global.gtid_executed, @@global.gtid_purged"
   @set_checksum_query "SET @master_binlog_checksum = @@global.binlog_checksum"
@@ -172,7 +175,9 @@ defmodule Capstan.Connection do
   1-arg override for the connect+auth step, default the real `gen_tcp` + `Handshake` path),
   `:reconnect_backoff` ms, `:heartbeat_period_ms` (default 15_000 — the master heartbeat
   interval; see "Streaming liveness"), `:stream_timeout_ms` (default 60_000 — the liveness
-  window; MUST be `> :heartbeat_period_ms` or start-up fails closed), and `:name`.
+  window; MUST be `> :heartbeat_period_ms` or start-up fails closed), and `:name`. Every
+  liveness/backoff value must be a positive integer within the schedulable
+  `Process.send_after` ceiling (2^32-1 ms), mirroring `Capstan.Config.validate/1`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -258,13 +263,17 @@ defmodule Capstan.Connection do
 
     heartbeat_period_ms = Keyword.get(opts, :heartbeat_period_ms, @default_heartbeat_period_ms)
     stream_timeout_ms = Keyword.get(opts, :stream_timeout_ms, @default_stream_timeout_ms)
+    reconnect_backoff = Keyword.get(opts, :reconnect_backoff, @default_reconnect_backoff)
 
-    if stream_timeout_ms <= heartbeat_period_ms do
-      # A liveness window at or below the heartbeat period would false-drop a HEALTHY idle
-      # stream — a full heartbeat interval can elapse between frames. Fail closed rather than
-      # run a liveness check that fires on a working pipeline.
-      {:stop, {:shutdown, {:halt, :invalid_liveness_config}}}
-    else
+    # The SAME shape Config.validate/1 enforces on the public path — positive integers
+    # within the schedulable timer ceiling, window strictly above the heartbeat — so the
+    # direct-wiring constructor cannot bypass the public refusal and crash
+    # Process.send_after/3 (or silently disable master heartbeats with a zero period)
+    # later instead. A liveness window at or below the heartbeat period would false-drop
+    # a HEALTHY idle stream — a full heartbeat interval can elapse between frames. Fail
+    # closed rather than run a liveness check that fires on a working pipeline.
+    if schedulable_ms?(reconnect_backoff) and schedulable_ms?(heartbeat_period_ms) and
+         schedulable_ms?(stream_timeout_ms) and stream_timeout_ms > heartbeat_period_ms do
       state = %__MODULE__{
         server_id: Keyword.fetch!(opts, :server_id),
         connection: Keyword.get(opts, :connection, []),
@@ -274,14 +283,21 @@ defmodule Capstan.Connection do
         checkpoint_str: checkpoint_string(Keyword.get(opts, :start_position)),
         checkpoint_store: Keyword.get(opts, :checkpoint_store),
         connect_fun: Keyword.get(opts, :connect_fun, &default_connect/1),
-        reconnect_backoff: Keyword.get(opts, :reconnect_backoff, @default_reconnect_backoff),
+        reconnect_backoff: reconnect_backoff,
         heartbeat_period_ms: heartbeat_period_ms,
         stream_timeout_ms: stream_timeout_ms
       }
 
       {:ok, monitor_receiver(state), {:continue, :connect}}
+    else
+      {:stop, {:shutdown, {:halt, :invalid_liveness_config}}}
     end
   end
+
+  # A liveness/backoff value Process.send_after/3 can actually schedule: a positive
+  # integer within the 2^32-1 ms timer ceiling.
+  defp schedulable_ms?(n) when is_integer(n) and n > 0 and n <= @max_timer_ms, do: true
+  defp schedulable_ms?(_n), do: false
 
   # Monitor the receiver (the `AssemblerServer`) so its death is not silent. The receiver's
   # fail-closed halt stops IT but sends no message back here (the forwarding is a bare

@@ -61,7 +61,9 @@ within `stream_timeout_ms` (default 60 000, tolerating three missed heartbeats).
 emits `[:capstan, :connection, :stream_timeout]`, drops the connection, and reconnects; a
 persistent partition halts `:stream_stalled`. `stream_timeout_ms` MUST exceed
 `heartbeat_period_ms`, or the pipeline refuses to start (`:invalid_liveness_config`) — a
-window at or below the heartbeat interval would false-drop a healthy idle stream.
+window at or below the heartbeat interval would false-drop a healthy idle stream. All three
+values must be positive integers within the schedulable timer ceiling (2^32−1 ms ≈ 49.7
+days); anything else is refused `:config_invalid` before any socket opens.
 
 ### First start — an empty checkpoint requests FULL retained history
 

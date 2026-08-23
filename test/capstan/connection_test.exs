@@ -556,6 +556,41 @@ defmodule Capstan.ConnectionTest do
                  stream_timeout_ms: 1000
                )
     end
+
+    test "start-up fails closed :invalid_liveness_config on a non-positive or over-ceiling liveness value" do
+      # Config.validate/1 refuses these on the public path; the direct-wiring constructor
+      # enforces the same set (constructor symmetry). A zero heartbeat silently disables
+      # master heartbeats — the liveness timer then false-drops a healthy idle stream — and
+      # a value above the Process.send_after ceiling crashes the timer call instead of
+      # refusing. Each case below keeps the window comparison VALID so only the
+      # value-shape guard can refuse it.
+      over_ceiling = 4_294_967_296
+
+      bad_configs = [
+        [heartbeat_period_ms: 0, stream_timeout_ms: 60_000],
+        [heartbeat_period_ms: -5, stream_timeout_ms: 60_000],
+        [heartbeat_period_ms: over_ceiling, stream_timeout_ms: over_ceiling + 1],
+        [stream_timeout_ms: over_ceiling],
+        [reconnect_backoff: over_ceiling]
+      ]
+
+      for extra <- bad_configs do
+        assert {:error, {:shutdown, {:halt, :invalid_liveness_config}}} =
+                 GenServer.start(
+                   Connection,
+                   Keyword.merge(
+                     [
+                       server_id: 63,
+                       connection: [],
+                       receiver: self(),
+                       start_position: nil,
+                       connect_fun: fn _ -> {:error, :refused} end
+                     ],
+                     extra
+                   )
+                 )
+      end
+    end
   end
 
   ## ---------------------------------------------------------------------------

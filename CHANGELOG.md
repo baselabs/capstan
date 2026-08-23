@@ -20,6 +20,11 @@ All notable changes to capstan are documented here. The format follows
   `:invalid_liveness_config` refusal for `stream_timeout_ms <= heartbeat_period_ms`
   was unreachable through the public entry point. The refusal now fires at config
   time, before any socket opens, and valid overrides reach the connection.
+- Bound the liveness/backoff values to the schedulable `Process.send_after` ceiling
+  (2^32-1 ms) and gave `Capstan.Connection`'s direct-wiring start the same value-shape
+  refusal the public path enforces — an over-ceiling, non-positive, or non-integer
+  value is a value-free refusal (`:config_invalid` / `:invalid_liveness_config`),
+  never a later timer crash or a silently disabled master heartbeat.
 - README install snippet pins `~> 0.2.0` (was `~> 0.1.0`, which cannot resolve the
   release the same README documents).
 

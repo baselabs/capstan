@@ -61,6 +61,10 @@ defmodule Capstan.Config do
   @default_reconnect_backoff 1_000
   @default_heartbeat_period_ms 15_000
   @default_stream_timeout_ms 60_000
+  # The reconnect + liveness timers schedule via Process.send_after/3, which raises past
+  # the 2^32-1 ms ceiling — an over-ceiling value is a config refusal here, never a
+  # later timer crash in the connection.
+  @max_timer_ms 4_294_967_295
   @default_snapshot_chunk_size 4096
   @known_auth_plugins [:caching_sha2_password, :mysql_native_password]
 
@@ -118,7 +122,8 @@ defmodule Capstan.Config do
   `verify:`), `:invalid_liveness_config` (`stream_timeout_ms <= heartbeat_period_ms`,
   compared after defaults are applied — a window at or below the heartbeat interval would
   false-drop a healthy idle stream), and `:config_invalid` (any other missing or
-  mis-shaped option). Defaults applied: `ssl` true, `ssl_opts` `[]`,
+  mis-shaped option, including a liveness value beyond the schedulable timer ceiling).
+  Defaults applied: `ssl` true, `ssl_opts` `[]`,
   `auth_plugins` `[:caching_sha2_password]`, `password` `""`, `database` `nil`,
   `max_command_retries` `5`, `reconnect_backoff` `1_000`, `heartbeat_period_ms` `15_000`,
   `stream_timeout_ms` `60_000`.
@@ -296,17 +301,18 @@ defmodule Capstan.Config do
   # Streaming liveness (usage-rules.md "Streaming liveness"): the three public options
   # normalize here, defaults 1_000 / 15_000 / 60_000 — the SAME values Capstan.Connection
   # falls back to on direct wiring, so both constructors compare identical defaults-applied
-  # values. A present value must be a POSITIVE integer (zero or negative is a mis-set bound,
-  # never a silent fallback). The window comparison fires BEFORE any socket opens: in
-  # snapshot mode the bootstrap opens a query connection before the connection child starts,
+  # values. A present value must be a positive integer within the schedulable timer
+  # ceiling (zero, negative, non-integer, or over-ceiling is a mis-set bound, never a
+  # silent fallback). The window comparison fires BEFORE any socket opens: in snapshot
+  # mode the bootstrap opens a query connection before the connection child starts,
   # so leaning on Connection.init would open a socket on a bad config.
   defp fetch_liveness(opts) do
     with {:ok, reconnect_backoff} <-
-           fetch_positive_ms(opts, :reconnect_backoff, @default_reconnect_backoff),
+           fetch_schedulable_ms(opts, :reconnect_backoff, @default_reconnect_backoff),
          {:ok, heartbeat_period_ms} <-
-           fetch_positive_ms(opts, :heartbeat_period_ms, @default_heartbeat_period_ms),
+           fetch_schedulable_ms(opts, :heartbeat_period_ms, @default_heartbeat_period_ms),
          {:ok, stream_timeout_ms} <-
-           fetch_positive_ms(opts, :stream_timeout_ms, @default_stream_timeout_ms) do
+           fetch_schedulable_ms(opts, :stream_timeout_ms, @default_stream_timeout_ms) do
       if stream_timeout_ms > heartbeat_period_ms do
         {:ok,
          %{
@@ -320,10 +326,10 @@ defmodule Capstan.Config do
     end
   end
 
-  defp fetch_positive_ms(opts, key, default) do
+  defp fetch_schedulable_ms(opts, key, default) do
     case Keyword.fetch(opts, key) do
       :error -> {:ok, default}
-      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
+      {:ok, n} when is_integer(n) and n > 0 and n <= @max_timer_ms -> {:ok, n}
       {:ok, _bad} -> {:error, :config_invalid}
     end
   end
