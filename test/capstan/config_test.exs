@@ -120,6 +120,62 @@ defmodule Capstan.ConfigTest do
   end
 
   ## ---------------------------------------------------------------------------
+  ## Option validation — streaming liveness (defaults + the fail-closed window)
+  ## ---------------------------------------------------------------------------
+
+  describe "validate/1 — streaming liveness options" do
+    test "defaults are normalized into the config (1_000 / 15_000 / 60_000)" do
+      assert {:ok, resolved} = Config.validate(opts())
+
+      assert resolved.reconnect_backoff == 1_000
+      assert resolved.heartbeat_period_ms == 15_000
+      assert resolved.stream_timeout_ms == 60_000
+    end
+
+    test "explicit liveness overrides are carried into the config" do
+      assert {:ok, resolved} =
+               Config.validate(
+                 opts(
+                   reconnect_backoff: 500,
+                   heartbeat_period_ms: 2_000,
+                   stream_timeout_ms: 3_000
+                 )
+               )
+
+      assert resolved.reconnect_backoff == 500
+      assert resolved.heartbeat_period_ms == 2_000
+      assert resolved.stream_timeout_ms == 3_000
+    end
+
+    test "stream_timeout_ms == heartbeat_period_ms is refused :invalid_liveness_config" do
+      assert {:error, :invalid_liveness_config} =
+               Config.validate(opts(heartbeat_period_ms: 1_000, stream_timeout_ms: 1_000))
+    end
+
+    test "stream_timeout_ms < heartbeat_period_ms is refused :invalid_liveness_config" do
+      assert {:error, :invalid_liveness_config} =
+               Config.validate(opts(heartbeat_period_ms: 2_000, stream_timeout_ms: 1_000))
+    end
+
+    test "a stream_timeout_ms below the DEFAULT heartbeat is refused (defaults apply first)" do
+      assert {:error, :invalid_liveness_config} = Config.validate(opts(stream_timeout_ms: 10_000))
+    end
+
+    test "a heartbeat_period_ms above the DEFAULT window is refused (defaults apply first)" do
+      assert {:error, :invalid_liveness_config} =
+               Config.validate(opts(heartbeat_period_ms: 61_000))
+    end
+
+    test "non-positive or non-integer liveness values are refused :config_invalid" do
+      for bad <- [0, -1, :one, "1000", 1.5] do
+        assert {:error, :config_invalid} = Config.validate(opts(reconnect_backoff: bad))
+        assert {:error, :config_invalid} = Config.validate(opts(heartbeat_period_ms: bad))
+        assert {:error, :config_invalid} = Config.validate(opts(stream_timeout_ms: bad))
+      end
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
   ## Option validation — ssl default + F6 fail-closed TLS verification
   ## ---------------------------------------------------------------------------
 

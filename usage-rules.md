@@ -87,7 +87,8 @@ is simply resumed from:
 ### Value-free start-up refusals
 
 `Capstan.start_link/1` returns `{:error, reason}` with one of:
-`:server_id_required`, `:config_invalid`, `:tls_verification_unspecified`, `:invalid_sink`,
+`:server_id_required`, `:config_invalid`, `:tls_verification_unspecified`,
+`:invalid_liveness_config`, `:invalid_sink`,
 `:sink_missing_handle_transaction`, `:sink_missing_checkpoint`,
 `:sink_missing_handle_schema_change`, `:checkpoint_store_required`, `:sink_owned_mode_unsupported`,
 `:start_position_override_unsupported`, `:start_position_current_unsupported`. In snapshot mode

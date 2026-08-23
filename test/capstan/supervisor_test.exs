@@ -291,6 +291,44 @@ defmodule Capstan.SupervisorTest do
     end
   end
 
+  describe "Capstan.start_link/1 — streaming liveness options (documented contract)" do
+    test "stream_timeout_ms == heartbeat_period_ms is refused :invalid_liveness_config" do
+      # usage-rules.md promises this refusal through start_link/1; wiring/3 dropping the
+      # keys made it unreachable (the pair below starts a pipeline only if IGNORED).
+      opts = lib_opts(heartbeat_period_ms: 15_000, stream_timeout_ms: 15_000)
+
+      assert {:error, :invalid_liveness_config} = Capstan.start_link(opts)
+    end
+
+    test "a stream_timeout_ms below the DEFAULT heartbeat is refused (defaults apply before the comparison)" do
+      # Only the window is overridden. The 15_000 default heartbeat must be applied and
+      # compared at config time, or the pair flows onward and surfaces as a wrapped
+      # failed-child reason instead of the documented bare atom.
+      assert {:error, :invalid_liveness_config} =
+               Capstan.start_link(lib_opts(stream_timeout_ms: 10_000))
+    end
+
+    test "valid liveness overrides propagate to the live Connection, never silently ignored" do
+      {:ok, sup} =
+        Capstan.start_link(
+          lib_opts(
+            reconnect_backoff: 2_000,
+            heartbeat_period_ms: 5_000,
+            stream_timeout_ms: 6_000
+          )
+        )
+
+      on_exit(fn -> stop_supervisor(sup) end)
+
+      # The closed-port Connection retries while its state is observed directly — the
+      # established wiring-observation pattern (see the snapshot :complete test above).
+      state = :sys.get_state(child_pid(sup, :connection))
+      assert state.reconnect_backoff == 2_000
+      assert state.heartbeat_period_ms == 5_000
+      assert state.stream_timeout_ms == 6_000
+    end
+  end
+
   describe "supervision — a fail-closed halt does not take down the host supervisor" do
     test "an AssemblerServer halt stops the pipeline without restarting it or killing the host" do
       # A connect that hangs keeps the Connection alive-but-idle, so the ONLY halt in the

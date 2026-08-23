@@ -35,8 +35,9 @@ defmodule Capstan.Supervisor do
   @doc """
   Start a supervised, lib-owned pipeline from an already-validated wiring keyword
   (`:sink`, `:checkpoint_store`, `:connection`, `:server_id`, `:max_command_retries`,
-  `:start_position`, `:tables`; plus optional `:connect_fun` / `:reconnect_backoff` test
-  seams that fail closed to the real connect when absent).
+  `:start_position`, `:tables`, and the validated streaming-liveness trio
+  `:reconnect_backoff` / `:heartbeat_period_ms` / `:stream_timeout_ms`; plus an optional
+  `:connect_fun` test seam that fails closed to the real connect when absent).
 
   Returns `{:ok, supervisor_pid}`, or `{:error, reason}` — a value-free store-read or
   start-position refusal — after tearing the partially-started tree back down.

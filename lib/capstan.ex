@@ -23,7 +23,9 @@ defmodule Capstan do
         sink: MyApp.OrdersSink,                # implements Capstan.Sink
         checkpoint_store: [module: MyApp.Store],   # lib-owned mode; see below
         start_position: :checkpoint,           # C1: :checkpoint (default) only — see below
-        max_command_retries: 5
+        max_command_retries: 5,
+        heartbeat_period_ms: 15_000,           # liveness: the window MUST exceed the heartbeat
+        stream_timeout_ms: 60_000              # (defaults shown; see "Streaming liveness")
       )
 
   `start_link/1` validates the options through `Capstan.Config`, enforces the per-mode
@@ -61,7 +63,8 @@ defmodule Capstan do
 
   `{:ok, supervisor_pid}` on success, or `{:error, reason}` — a value-free atom from
   `Capstan.Config` (`:server_id_required`, `:config_invalid`,
-  `:tls_verification_unspecified`), from `Capstan.Pipeline` (`:invalid_sink`,
+  `:tls_verification_unspecified`, `:invalid_liveness_config`), from `Capstan.Pipeline`
+  (`:invalid_sink`,
   `:sink_missing_handle_transaction`, `:sink_missing_checkpoint`,
   `:sink_missing_handle_schema_change`, `:sink_missing_handle_snapshot`,
   `:snapshot_table_not_captured`), or from this module
@@ -166,6 +169,9 @@ defmodule Capstan do
       connection: config.connection,
       server_id: config.server_id,
       max_command_retries: config.max_command_retries,
+      reconnect_backoff: config.reconnect_backoff,
+      heartbeat_period_ms: config.heartbeat_period_ms,
+      stream_timeout_ms: config.stream_timeout_ms,
       start_position: Keyword.get(opts, :start_position, :checkpoint),
       tables: Keyword.get(opts, :tables, :all)
     ]

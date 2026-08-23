@@ -56,6 +56,11 @@ defmodule Capstan.Config do
   alias Capstan.Protocol.Packet
 
   @default_max_command_retries 5
+  # Streaming liveness (usage-rules.md) — the same defaults Capstan.Connection falls back to
+  # on direct wiring; both constructors must apply identical values before comparing.
+  @default_reconnect_backoff 1_000
+  @default_heartbeat_period_ms 15_000
+  @default_stream_timeout_ms 60_000
   @default_snapshot_chunk_size 4096
   @known_auth_plugins [:caching_sha2_password, :mysql_native_password]
 
@@ -69,12 +74,18 @@ defmodule Capstan.Config do
   @type t :: %{
           connection: keyword(),
           server_id: pos_integer(),
-          max_command_retries: non_neg_integer()
+          max_command_retries: non_neg_integer(),
+          reconnect_backoff: pos_integer(),
+          heartbeat_period_ms: pos_integer(),
+          stream_timeout_ms: pos_integer()
         }
 
   @typedoc "A value-free option-validation refusal."
   @type validation_error ::
-          :config_invalid | :server_id_required | :tls_verification_unspecified
+          :config_invalid
+          | :server_id_required
+          | :tls_verification_unspecified
+          | :invalid_liveness_config
 
   @typedoc "A value-free precondition-gate refusal (ADR-0002)."
   @type precondition_error ::
@@ -104,20 +115,28 @@ defmodule Capstan.Config do
 
   Refuses: `:server_id_required` (missing or non-positive `server_id`),
   `:tls_verification_unspecified` (`ssl: true` with no CA source and no explicit
-  `verify:`), and `:config_invalid` (any other missing or mis-shaped option). Defaults
-  applied: `ssl` true, `ssl_opts` `[]`, `auth_plugins` `[:caching_sha2_password]`,
-  `password` `""`, `database` `nil`, `max_command_retries` `5`.
+  `verify:`), `:invalid_liveness_config` (`stream_timeout_ms <= heartbeat_period_ms`,
+  compared after defaults are applied — a window at or below the heartbeat interval would
+  false-drop a healthy idle stream), and `:config_invalid` (any other missing or
+  mis-shaped option). Defaults applied: `ssl` true, `ssl_opts` `[]`,
+  `auth_plugins` `[:caching_sha2_password]`, `password` `""`, `database` `nil`,
+  `max_command_retries` `5`, `reconnect_backoff` `1_000`, `heartbeat_period_ms` `15_000`,
+  `stream_timeout_ms` `60_000`.
   """
   @spec validate(keyword()) :: {:ok, t()} | {:error, validation_error()}
   def validate(opts) when is_list(opts) do
     with {:ok, server_id} <- fetch_server_id(opts),
          {:ok, connection} <- fetch_connection(opts),
-         {:ok, max_command_retries} <- fetch_max_command_retries(opts) do
+         {:ok, max_command_retries} <- fetch_max_command_retries(opts),
+         {:ok, liveness} <- fetch_liveness(opts) do
       {:ok,
        %{
          connection: connection,
          server_id: server_id,
-         max_command_retries: max_command_retries
+         max_command_retries: max_command_retries,
+         reconnect_backoff: liveness.reconnect_backoff,
+         heartbeat_period_ms: liveness.heartbeat_period_ms,
+         stream_timeout_ms: liveness.stream_timeout_ms
        }}
     end
   end
@@ -270,6 +289,41 @@ defmodule Capstan.Config do
     case Keyword.fetch(opts, :max_command_retries) do
       :error -> {:ok, @default_max_command_retries}
       {:ok, n} when is_integer(n) and n >= 0 -> {:ok, n}
+      {:ok, _bad} -> {:error, :config_invalid}
+    end
+  end
+
+  # Streaming liveness (usage-rules.md "Streaming liveness"): the three public options
+  # normalize here, defaults 1_000 / 15_000 / 60_000 — the SAME values Capstan.Connection
+  # falls back to on direct wiring, so both constructors compare identical defaults-applied
+  # values. A present value must be a POSITIVE integer (zero or negative is a mis-set bound,
+  # never a silent fallback). The window comparison fires BEFORE any socket opens: in
+  # snapshot mode the bootstrap opens a query connection before the connection child starts,
+  # so leaning on Connection.init would open a socket on a bad config.
+  defp fetch_liveness(opts) do
+    with {:ok, reconnect_backoff} <-
+           fetch_positive_ms(opts, :reconnect_backoff, @default_reconnect_backoff),
+         {:ok, heartbeat_period_ms} <-
+           fetch_positive_ms(opts, :heartbeat_period_ms, @default_heartbeat_period_ms),
+         {:ok, stream_timeout_ms} <-
+           fetch_positive_ms(opts, :stream_timeout_ms, @default_stream_timeout_ms) do
+      if stream_timeout_ms > heartbeat_period_ms do
+        {:ok,
+         %{
+           reconnect_backoff: reconnect_backoff,
+           heartbeat_period_ms: heartbeat_period_ms,
+           stream_timeout_ms: stream_timeout_ms
+         }}
+      else
+        {:error, :invalid_liveness_config}
+      end
+    end
+  end
+
+  defp fetch_positive_ms(opts, key, default) do
+    case Keyword.fetch(opts, key) do
+      :error -> {:ok, default}
+      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
       {:ok, _bad} -> {:error, :config_invalid}
     end
   end
