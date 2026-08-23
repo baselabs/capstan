@@ -304,10 +304,18 @@ defmodule Capstan.AssemblerServer do
   # A delivered transaction: the sink FIRST, the checkpoint ONLY after `{:ok, _}`
   # (at-least-once). A sink error halts fail-closed WITHOUT advancing.
   defp dispatch(%Transaction{} = txn, state) do
+    # change_count is computed on the CONCRETE pre-delivery list, never by enumerating
+    # the sink's `changes` (the contract is single-pass; C3's lazy enumerable must carry
+    # the count from assembly instead).
+    change_count = length(txn.changes)
+    started = System.monotonic_time()
+
     case state.sink.handle_transaction(txn) do
       {:ok, _position} ->
+        sink_ms = monotonic_ms_since(started)
+
         with {:ok, state} <- checkpoint(state, txn.position) do
-          emit_committed(txn.gtid)
+          emit_committed(txn.gtid, change_count, sink_ms)
           {:ok, state}
         end
 
@@ -426,8 +434,16 @@ defmodule Capstan.AssemblerServer do
   ## or password attached to a payload raises rather than shipping.
   ## ---------------------------------------------------------------------------
 
-  defp emit_committed(gtid) do
-    Telemetry.event([:capstan, :transaction, :committed], %{}, %{gtid: gtid})
+  defp emit_committed(gtid, change_count, sink_ms) do
+    Telemetry.event(
+      [:capstan, :transaction, :committed],
+      %{change_count: change_count, sink_ms: sink_ms},
+      %{gtid: gtid}
+    )
+  end
+
+  defp monotonic_ms_since(started) do
+    System.convert_time_unit(System.monotonic_time() - started, :native, :millisecond)
   end
 
   defp emit_filtered(gtid) do

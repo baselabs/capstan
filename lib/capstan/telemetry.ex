@@ -20,9 +20,10 @@ defmodule Capstan.Telemetry do
   Mirrors `replicant/lib/replicant/telemetry.ex`.
   """
 
-  # Exactly the value-free metadata keys of the design's Events / telemetry table.
-  # MEASUREMENTS (change_count, lag_ms) are numeric and carry no identity, so they are not
-  # gated here; the allowlist guards METADATA, where a stray value would otherwise ride.
+  # Exactly the value-free metadata keys of the design's Events / telemetry table. The
+  # allowlist guards METADATA, where a stray value would otherwise ride; the measurement
+  # channel guards VALUES (counts and monotonic durations only — numbers carry no
+  # identity, so a row value or password can never travel as a measurement either).
   @allowed_meta_keys ~w(server_version server_uuid tls reason gtid schema table kind missing_gtids)a
 
   @doc "The permitted telemetry metadata keys."
@@ -30,15 +31,28 @@ defmodule Capstan.Telemetry do
   def allowed_meta_keys, do: @allowed_meta_keys
 
   @doc """
-  Emit a telemetry event with allowlist-validated metadata.
+  Emit a telemetry event with allowlist-validated metadata and numeric-only measurements.
 
-  Raises `ArgumentError` if `meta` carries any key outside `allowed_meta_keys/0` — the
-  fail-closed point that keeps a value off a payload.
+  Raises `ArgumentError` if `meta` carries any key outside `allowed_meta_keys/0`, or if
+  any measurement value is not a non-negative number — the fail-closed points that keep
+  a value off a payload on both channels.
   """
   @spec event([atom(), ...], map(), map()) :: :ok
   def event(name, measurements, meta)
       when is_list(name) and is_map(measurements) and is_map(meta) do
-    :telemetry.execute(name, measurements, validate!(meta))
+    :telemetry.execute(name, validate_measurements!(measurements), validate!(meta))
+  end
+
+  @doc false
+  @spec validate_measurements!(map()) :: map()
+  def validate_measurements!(measurements) when is_map(measurements) do
+    if Enum.all?(measurements, fn {_k, v} -> is_number(v) and v >= 0 end) do
+      measurements
+    else
+      raise ArgumentError,
+            "telemetry measurements must be numeric (non-negative counts and durations), " <>
+              "got #{inspect(measurements)} (no row values or passwords in telemetry)"
+    end
   end
 
   @doc false

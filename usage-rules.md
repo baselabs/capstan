@@ -297,19 +297,26 @@ via `[:capstan, :connection, :halt]` / `[:capstan, :assembler, :halt]` telemetry
 
 ## Telemetry
 
-All events are emitted through a value-free metadata allowlist (a payload with a key outside
-it raises rather than ships). Measurements maps are empty in C1 — attach to the event names:
+Both channels are fail-closed value-free: metadata keys pass an allowlist, and measurement
+values must be non-negative numbers (counts and monotonic durations — anything else raises
+rather than ships).
 
-| Event | Metadata |
-| --- | --- |
-| `[:capstan, :connection, :established]` | `server_version`, `tls` |
-| `[:capstan, :connection, :stream_timeout]` | `reason` |
-| `[:capstan, :connection, :halt]` | `reason` |
-| `[:capstan, :transaction, :committed]` | `gtid` |
-| `[:capstan, :transaction, :filtered]` | `gtid` |
-| `[:capstan, :transaction, :skipped]` | `gtid`, `reason` (`:already_processed`) |
-| `[:capstan, :schema_change, :received]` | `schema`, `table`, `kind` |
-| `[:capstan, :assembler, :halt]` | `reason` |
+| Event | Measurements | Metadata |
+| --- | --- | --- |
+| `[:capstan, :connection, :established]` | `establish_ms` | `server_version`, `tls` |
+| `[:capstan, :connection, :stream_timeout]` | — | `reason` |
+| `[:capstan, :connection, :halt]` | — | `reason` |
+| `[:capstan, :transaction, :committed]` | `change_count`, `sink_ms` | `gtid` |
+| `[:capstan, :transaction, :filtered]` | — | `gtid` |
+| `[:capstan, :transaction, :skipped]` | — | `gtid`, `reason` (`:already_processed`) |
+| `[:capstan, :schema_change, :received]` | — | `schema`, `table`, `kind` |
+| `[:capstan, :assembler, :halt]` | — | `reason` |
+
+`change_count` is computed before delivery (never by consuming the sink's single-pass
+`changes` enumerable); `sink_ms` spans the sink call; `establish_ms` spans
+connect-to-streaming. Commit-to-delivery lag is deliberately NOT measured: the pipeline
+does not thread the binlog commit timestamp, and wall-clock skew would make a naive
+difference a lie.
 
 The only log line emitted in normal operation is a `Logger` warning when authenticating with
 the deprecated `mysql_native_password` plugin.

@@ -145,6 +145,27 @@ defmodule Capstan.SupervisorTest do
       end
     end
 
+    test "event/3 REFUSES a non-numeric measurement value (numbers carry no identity)" do
+      # The metadata channel gates KEYS; the measurement channel gates VALUES — only
+      # numbers (counts, monotonic durations) may ride, so a row value or password can
+      # never travel as a measurement either.
+      assert_raise ArgumentError, ~r/measurements must be numeric/, fn ->
+        Telemetry.event(
+          [:capstan, :transaction, :committed],
+          %{row_value: "secret_pii"},
+          %{gtid: "u:1"}
+        )
+      end
+
+      assert_raise ArgumentError, ~r/measurements must be numeric/, fn ->
+        Telemetry.event(
+          [:capstan, :transaction, :committed],
+          %{sink_ms: "12ms"},
+          %{gtid: "u:1"}
+        )
+      end
+    end
+
     test "validate!/1 returns allowlisted metadata unchanged and raises on any off-list key" do
       assert %{gtid: "u:1"} = Telemetry.validate!(%{gtid: "u:1"})
 

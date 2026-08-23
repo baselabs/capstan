@@ -151,6 +151,7 @@ defmodule Capstan.Connection do
     :stream_timeout_ms,
     :socket,
     :server_info,
+    :connect_started_at,
     :reader,
     :reconnect_timer,
     :liveness_timer,
@@ -372,6 +373,8 @@ defmodule Capstan.Connection do
   ## ---------------------------------------------------------------------------
 
   defp do_connect(state) do
+    state = %{state | connect_started_at: System.monotonic_time()}
+
     case state.connect_fun.(state.connection) do
       {:ok, socket, info} -> establish_guarded(%{state | socket: socket, server_info: info})
       {:error, _reason} -> note_command_failure(state)
@@ -686,14 +689,21 @@ defmodule Capstan.Connection do
   # every payload at runtime (Rule 1 completion, F11): a future emitter attaching a row
   # value or password raises rather than shipping it.
   defp emit_established(state) do
+    establish_ms = monotonic_ms_since(state)
+
     Telemetry.event(
       [:capstan, :connection, :established],
-      %{},
+      %{establish_ms: establish_ms},
       %{
         server_version: server_info(state, :server_version),
         tls: server_info(state, :tls)
       }
     )
+  end
+
+  defp monotonic_ms_since(%__MODULE__{connect_started_at: started})
+       when is_integer(started) do
+    System.convert_time_unit(System.monotonic_time() - started, :native, :millisecond)
   end
 
   defp emit_halt(reason) do

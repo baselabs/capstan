@@ -505,7 +505,20 @@ defmodule Capstan.ConnectionTest do
         test_pid
       )
 
-      on_exit(fn -> :telemetry.detach(handler) end)
+      # The established event carries the connect-to-streaming duration (monotonic ms).
+      est_handler = {__MODULE__, make_ref()}
+
+      :telemetry.attach(
+        est_handler,
+        [:capstan, :connection, :established],
+        fn _event, measurements, _meta, pid -> send(pid, {:established, measurements}) end,
+        test_pid
+      )
+
+      on_exit(fn ->
+        :telemetry.detach(handler)
+        :telemetry.detach(est_handler)
+      end)
 
       connect_fun = fn _ ->
         {port, _srv} =
@@ -535,6 +548,9 @@ defmodule Capstan.ConnectionTest do
 
       # The stream is alive (a frame arrived)...
       assert_receive {:binlog_event, "ALIVE-FRAME"}, 2000
+
+      assert_receive {:established, %{establish_ms: ms}}, 2000
+      assert is_number(ms) and ms >= 0
       # ...then it goes silent and the liveness timer fires within ~300ms, making it visible...
       assert_receive {:stream_timeout, %{reason: :stream_stalled}}, 2000
       # ...and it reconnects (a fresh mock server delivers the frame again).

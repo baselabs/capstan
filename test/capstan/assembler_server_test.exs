@@ -129,8 +129,15 @@ defmodule Capstan.AssemblerServerTest do
       assert [%Change{op: :insert, table: "widgets"}] = txn.changes
 
       # The committed telemetry fires AFTER the checkpoint write — a reliable barrier.
+      # Measurements: the change count (computed on the concrete pre-delivery list, never
+      # by consuming the sink's enumerable) and the monotonic sink-call duration.
       gtid = txn.gtid
-      assert_receive {:telemetry, [:capstan, :transaction, :committed], %{}, %{gtid: ^gtid}}, 2000
+
+      assert_receive {:telemetry, [:capstan, :transaction, :committed],
+                      %{change_count: 1, sink_ms: sink_ms}, %{gtid: ^gtid}},
+                     2000
+
+      assert is_number(sink_ms) and sink_ms >= 0
 
       assert {:ok, %Position{gtid_set: set}} = read_checkpoint(store)
       assert Gtid.member?(Gtid.parse(set), {uuid, gno})
