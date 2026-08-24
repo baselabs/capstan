@@ -1,0 +1,66 @@
+# The reference stack: MySQL source → capstan pipeline (one OTP release,
+# one container) → MySQL destination, with a durable GTID checkpoint.
+# All credentials are throwaway, local-only example values — not secrets.
+
+services:
+  source-mysql:
+    image: mysql:8.0
+    command:
+      # capstan's five fail-closed source preconditions, by design (Q5):
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-row-metadata=FULL
+      - --binlog-row-value-options=
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --server-id=1
+    environment:
+      MYSQL_ROOT_PASSWORD: probe
+      MYSQL_DATABASE: example_src
+    volumes:
+      - ./docker/source-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pprobe"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:13306:3306"
+
+  dest-mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: probe
+      MYSQL_DATABASE: example_dst
+    volumes:
+      - ./priv/schema.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pprobe"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:13307:3306"
+
+  pipeline:
+    # Path dep on capstan: the build context is the repo root.
+    build:
+      context: ../..
+      dockerfile: examples/replication_pipeline/Dockerfile
+    environment:
+      SOURCE_HOST: source-mysql
+      SOURCE_PORT: "3306"
+      SOURCE_USER: capstan_reader
+      SOURCE_PASSWORD: capstan_reader_pw
+      DEST_HOST: dest-mysql
+      DEST_PORT: "3306"
+      DEST_USER: root
+      DEST_PASSWORD: probe
+      CAPSTAN_SERVER_ID: "4242"
+      PIPELINE_ID: replication-pipeline-example
+    depends_on:
+      source-mysql:
+        condition: service_healthy
+      dest-mysql:
+        condition: service_healthy
+    restart: unless-stopped

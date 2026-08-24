@@ -1,7 +1,17 @@
 # capstan examples
 
 Runnable, minimal consumers that show how to integrate capstan end-to-end. They are **not** part of
-the test suite — run them by hand against the dev substrate.
+the test suite — run them by hand against the dev substrate. (Exception:
+`replication_pipeline/` IS wired into CI as the public sink API's canary.)
+
+## `replication_pipeline/` — the durable reference stack (docker)
+
+The complete production shape as one `docker compose up`: MySQL source (ROW
+binlog + GTID) → capstan as an OTP release in one container → MySQL
+destination, with a **value-free receipts ledger**, an **idempotent
+upsert mirror**, and a **durable GTID-set checkpoint** in the destination
+database. Restart the pipeline mid-life and watch resume-without-re-delivery.
+See [replication_pipeline/README.md](replication_pipeline/README.md).
 
 ## `print_consumer.exs` — stream changes to stdout
 

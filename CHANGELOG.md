@@ -6,6 +6,24 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — `examples/replication_pipeline`: the durable reference stack (docker)
+
+- One `docker compose up` runs the complete production shape: MySQL source
+  (ROW binlog + GTID, the five fail-closed preconditions) → capstan as an OTP
+  release in one container → MySQL destination, carrying the three reference
+  artifacts — a **value-free receipts ledger** (structure only, capstan Rule 1
+  upheld at the destination), an **idempotent upsert mirror** (at-least-once
+  delivery + idempotent apply = exactly-once effects), and a **durable
+  GTID-set checkpoint** in the destination database, seeded on first boot from
+  the source's `gtid_executed` (why: an empty checkpoint would request the
+  server's full retained history, which a purged server refuses).
+- A new `reference-example` CI job builds the stack and drives the README
+  sequence end-to-end — insert → mirror + receipts + checkpoint assertions →
+  pipeline restart → resume with no duplicate re-delivery. The example is the
+  public sink API's out-of-repo canary: breaking the consumer surface goes red
+  here, not in a downstream project. Repo-side only — the hex package is
+  unchanged.
+
 ## [1.2.1] - 2026-08-23
 
 ### Fixed — the last zstd conformance holes + CI floor-leg hygiene (no library change)

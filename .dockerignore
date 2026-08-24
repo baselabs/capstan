@@ -1,0 +1,17 @@
+# Keeps the reference-example release build (context = repo root) lean.
+.git
+deps
+_build
+cover
+priv/plts
+doc
+test
+probe
+scripts
+.kimosabe
+.forge
+.claude
+.serena
+graphify-out
+examples/replication_pipeline/_build
+examples/replication_pipeline/deps

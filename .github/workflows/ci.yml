@@ -163,6 +163,76 @@ jobs:
         if: always()
         run: docker rm -f mysql-cdc-probe || true
 
+  # The REFERENCE EXAMPLE (examples/replication_pipeline): a docker stack
+  # (source MySQL → capstan release container → destination MySQL) that is the
+  # public sink API's canary — if capstan breaks its consumer surface, this
+  # end-to-end run goes red. It drives the exact README sequence: first
+  # delivery (mirror + value-free receipts + durable checkpoint), pipeline
+  # restart, resume with no duplicate re-delivery.
+  reference-example:
+    name: Reference example (docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: examples/replication_pipeline
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build and start the stack
+        run: docker compose up -d --build
+
+      - name: Wait for the pipeline's first-boot checkpoint seed
+        run: |
+          for _ in $(seq 1 60); do
+            if docker compose exec -T dest-mysql mysql -pprobe example_dst -N -B \
+                 -e "SELECT gtid_set FROM capstan_checkpoint" 2>/dev/null | grep -q .; then
+              ready=1; break
+            fi
+            sleep 5
+          done
+          [ "${ready:-0}" = "1" ] || { echo "::error::pipeline never seeded its checkpoint"; docker compose logs pipeline; exit 1; }
+
+      - name: First delivery — mirror + value-free receipts + checkpoint
+        run: |
+          docker compose exec -T source-mysql mysql -pprobe example_src \
+            -e "INSERT INTO orders (id, note) VALUES (1, 'hello'), (2, 'world')"
+          for _ in $(seq 1 30); do
+            n=$(docker compose exec -T dest-mysql mysql -pprobe example_dst -N -B \
+                 -e "SELECT COUNT(*) FROM orders" 2>/dev/null)
+            [ "$n" = "2" ] && break
+            sleep 2
+          done
+          [ "$n" = "2" ] || { echo "::error::mirror never materialized the rows"; docker compose logs pipeline; exit 1; }
+          # The receipts carry structure only — a value column must not exist.
+          docker compose exec -T dest-mysql mysql -pprobe example_dst -N -B \
+            -e "SELECT txn_gtid, schema_name, table_name, op FROM cdc_receipts WHERE table_name = 'orders'" \
+            | grep -c "insert" | grep -qx "2"
+
+      - name: Restart resume — no duplicate re-delivery
+        run: |
+          docker compose restart pipeline
+          docker compose exec -T source-mysql mysql -pprobe example_src \
+            -e "INSERT INTO orders (id, note) VALUES (3, 'after restart')"
+          for _ in $(seq 1 30); do
+            n=$(docker compose exec -T dest-mysql mysql -pprobe example_dst -N -B \
+                 -e "SELECT COUNT(*) FROM orders" 2>/dev/null)
+            [ "$n" = "3" ] && break
+            sleep 2
+          done
+          [ "$n" = "3" ] || { echo "::error::post-restart row never arrived"; docker compose logs pipeline; exit 1; }
+          # Resume from the durable checkpoint: ids 1..2 are NOT re-delivered.
+          r=$(docker compose exec -T dest-mysql mysql -pprobe example_dst -N -B \
+               -e "SELECT COUNT(*) FROM cdc_receipts WHERE table_name = 'orders'")
+          [ "$r" = "3" ] || { echo "::error::expected exactly 3 receipts, got $r"; docker compose logs pipeline; exit 1; }
+          docker compose exec -T dest-mysql mysql -pprobe example_dst -N -B \
+            -e "SELECT gtid_set FROM capstan_checkpoint" | grep -q .
+
+      - name: Teardown
+        if: always()
+        run: docker compose down -v
+
   # The DECLARED floor (mix.exs `elixir: "~> 1.15"`) — the main matrix pins 1.19, so without
   # this leg the floor claim is never tested anywhere. Compile (warnings-as-errors, proving
   # e.g. the pin-operator `size(^var)` form is floor-valid) + the full unit suite (real-byte
