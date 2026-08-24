@@ -18,8 +18,8 @@ Elixir `~> 1.15`.
 C4a/C4b (type breadth + compressed-transaction consumption), the C1a/C1b
 position-ownership/start-position rows, C2a (collation-ordered string PKs),
 C2b/C2c (`tables: :all` resolution + zero-row completion), and XA `:track` are
-implemented and released as `capstan` 1.2.2 (1.1.1 carried C1+C2; the 1.2.0
-span is additive, 1.2.1/1.2.2 are test-suite and docs hardening — see
+implemented and released as `capstan` 1.2.3 (1.1.1 carried C1+C2; the 1.2.0
+span is additive; 1.2.1–1.2.3 are test-suite and docs hardening — see
 CHANGELOG). `examples/replication_pipeline/` is the durable reference docker
 stack (repo-side, CI-gated as the public sink API canary). Omitting
 `:snapshot` preserves the C1 stream. C5–C6 and the named follow-up rows remain
@@ -146,7 +146,10 @@ enumeration; long-lived containers seeded before that grant need it applied live
 ## Docs & lifecycle-artifact policy
 
 - **Tracked / publishable:** `AGENTS.md`, `CLAUDE.md`, `README.md`, `CHANGELOG.md`, `usage-rules.md`,
-  `docs/adr/`, `docs/ROADMAP.md`, `scripts/`, `LICENSE`.
+  `docs/adr/`, `docs/ROADMAP.md`, `docs/telemetry.md`, `docs/recipes.md`, `examples/README.md`,
+  `examples/replication_pipeline/README.md`, `notebooks/`, `scripts/`, `LICENSE` (the hex package's
+  files list in `mix.exs` ships every consumer doc the README links; relative links in shipped docs
+  must resolve inside the tarball — repo-only targets link absolutely).
 - **Never tracked (machine-local):** everything under `.forge/` — design specs, plans, closeout
   reviews, handoffs, per-project memory, metrics, the dispatch ledger. `.forge/` is gitignored (forge
   default); a bare clone/CI will not have them. `docs/ROADMAP.md` carries **authored** facts only —

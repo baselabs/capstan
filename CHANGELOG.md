@@ -6,6 +6,21 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-08-24
+
+### Fixed — every shipped doc's links resolve on hexdocs (doc sweep)
+
+- The tarball now ships every CONSUMER doc the README links —
+  `docs/telemetry.md`, `docs/recipes.md`, the `examples/` READMEs (including
+  the reference pipeline's), and the getting-started Livebook — so relative
+  links like `examples/README.md` and `docs/recipes.md` resolve in the
+  hexdocs/tarball preview instead of 404ing (they were repo-side-only since
+  their introduction).
+- A mechanical sweep over every shipped doc verifies every relative link
+  target exists in the shipped set (22 docs, zero broken); repo-only targets
+  (`scripts/capstan-preflight.sql`) and the ADR index are linked absolutely or
+  to shipped files.
+
 ## [1.2.2] - 2026-08-24
 
 ### Changed — docs point at the runnable reference stack

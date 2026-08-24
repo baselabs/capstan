@@ -39,7 +39,7 @@ end
 MySQL requirements, checked at every connect (one query, distinct refusal per
 violation): `binlog_format=ROW`, `binlog_row_image=FULL`, `binlog_row_metadata=FULL`,
 `binlog_row_value_options=''` (full JSON), `gtid_mode=ON`. Run
-[`scripts/capstan-preflight.sql`](scripts/capstan-preflight.sql) against a
+[`scripts/capstan-preflight.sql`](https://github.com/baselabs/capstan/blob/main/scripts/capstan-preflight.sql) against a
 prospective source for a read-only readiness report.
 
 ## A 30-second pipeline
@@ -81,11 +81,11 @@ it — it resumes from the durable checkpoint with no transaction lost (the sink
 sees replays at worst; make it idempotent — that is the contract).
 
 > Try it live (kill/restart resume included) in the
-> [getting-started Livebook](notebooks/getting_started.livemd), or run the
-> minimal printable consumer in [`examples/`](examples/README.md). For the
+> [getting-started Livebook](https://github.com/baselabs/capstan/blob/main/notebooks/getting_started.livemd), or run the
+> minimal printable consumer in [`examples/`](https://github.com/baselabs/capstan/tree/main/examples). For the
 > complete production shape as one runnable stack — receipts, idempotent
 > mirror, durable checkpoint, all in docker — see
-> [`examples/replication_pipeline`](examples/replication_pipeline/README.md).
+> [`examples/replication_pipeline`](https://github.com/baselabs/capstan/tree/main/examples/replication_pipeline).
 
 ## The three ways to own your position
 
@@ -141,19 +141,19 @@ payload — that boundary is enforced at runtime, not by convention.
 
 ## Where to go next
 
-- **[examples/replication_pipeline](examples/replication_pipeline/)** — the
+- **[examples/replication_pipeline](https://github.com/baselabs/capstan/tree/main/examples/replication_pipeline)** — the
   durable reference implementation as a docker stack: one `docker compose up`
   runs MySQL source → capstan (one OTP release container) → MySQL destination
   with value-free receipts, an idempotent upsert mirror, and a durable GTID
   checkpoint you can kill and restart mid-life.
 - **[usage-rules.md](usage-rules.md)** — the full operating contract: every
   option, every halt reason, delivery semantics, TLS posture, XA policy.
-- **[docs/telemetry.md](docs/telemetry.md)** — every telemetry event with its
+- **[docs/telemetry.md](https://github.com/baselabs/capstan/blob/main/docs/telemetry.md)** — every telemetry event with its
   measurements and metadata, plus attach examples.
-- **[docs/recipes.md](docs/recipes.md)** — idempotent sinks, warehouse loading,
+- **[docs/recipes.md](https://github.com/baselabs/capstan/blob/main/docs/recipes.md)** — idempotent sinks, warehouse loading,
   snapshot-then-stream migration, batching tradeoffs, TLS, "start from now",
   XA sources.
-- **[ADRs](docs/adr/)** — the decision record (position model, fail-closed
+- **[ADRs](docs/adr/README.md)** — the decision record (position model, fail-closed
   posture, snapshot cursor gate, XA tracking, zstd consumption, …).
 - **[CHANGELOG](CHANGELOG.md)**.
 
@@ -163,7 +163,7 @@ payload — that boundary is enforced at runtime, not by convention.
 | --- | --- |
 | `lib/` | The Elixir library (Hex package `capstan`) |
 | `notebooks/` | The getting-started Livebook |
-| `examples/` | Runnable minimal consumers ([examples/README.md](examples/README.md)) |
+| `examples/` | Runnable minimal consumers ([examples/README.md](https://github.com/baselabs/capstan/tree/main/examples)) |
 | `docker-compose.yml`, `scripts/` | The local MySQL test substrate + the read-only preflight report |
 | `probe/` | The executed protocol viability probe + committed evidence |
 | `docs/` | ADRs, telemetry reference, recipes |
