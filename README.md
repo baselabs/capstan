@@ -82,7 +82,10 @@ sees replays at worst; make it idempotent — that is the contract).
 
 > Try it live (kill/restart resume included) in the
 > [getting-started Livebook](notebooks/getting_started.livemd), or run the
-> minimal printable consumer in [`examples/`](examples/README.md).
+> minimal printable consumer in [`examples/`](examples/README.md). For the
+> complete production shape as one runnable stack — receipts, idempotent
+> mirror, durable checkpoint, all in docker — see
+> [`examples/replication_pipeline`](examples/replication_pipeline/README.md).
 
 ## The three ways to own your position
 
@@ -138,6 +141,11 @@ payload — that boundary is enforced at runtime, not by convention.
 
 ## Where to go next
 
+- **[examples/replication_pipeline](examples/replication_pipeline/)** — the
+  durable reference implementation as a docker stack: one `docker compose up`
+  runs MySQL source → capstan (one OTP release container) → MySQL destination
+  with value-free receipts, an idempotent upsert mirror, and a durable GTID
+  checkpoint you can kill and restart mid-life.
 - **[usage-rules.md](usage-rules.md)** — the full operating contract: every
   option, every halt reason, delivery semantics, TLS posture, XA policy.
 - **[docs/telemetry.md](docs/telemetry.md)** — every telemetry event with its
