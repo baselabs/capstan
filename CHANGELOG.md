@@ -6,6 +6,18 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-08-24
+
+### Changed — docs point at the runnable reference stack
+
+- README: "Where to go next" leads with the durable reference pipeline
+  (`examples/replication_pipeline` — one `docker compose up`: MySQL source →
+  capstan release container → MySQL destination, with value-free receipts, an
+  idempotent upsert mirror, and a durable GTID checkpoint), and the
+  30-second-pipeline note names it alongside the Livebook and print consumer.
+  The reference stack itself is repo-side (not in this tarball); this release
+  carries the pointers to it.
+
 ### Added — `examples/replication_pipeline`: the durable reference stack (docker)
 
 - One `docker compose up` runs the complete production shape: MySQL source

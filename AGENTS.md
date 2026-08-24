@@ -18,8 +18,10 @@ Elixir `~> 1.15`.
 C4a/C4b (type breadth + compressed-transaction consumption), the C1a/C1b
 position-ownership/start-position rows, C2a (collation-ordered string PKs),
 C2b/C2c (`tables: :all` resolution + zero-row completion), and XA `:track` are
-implemented and released as `capstan` 1.2.1 (1.1.1 carried C1+C2; the 1.2.0
-span is additive, 1.2.1 is test-suite hardening — see CHANGELOG). Omitting
+implemented and released as `capstan` 1.2.2 (1.1.1 carried C1+C2; the 1.2.0
+span is additive, 1.2.1/1.2.2 are test-suite and docs hardening — see
+CHANGELOG). `examples/replication_pipeline/` is the durable reference docker
+stack (repo-side, CI-gated as the public sink API canary). Omitting
 `:snapshot` preserves the C1 stream. C5–C6 and the named follow-up rows remain
 open in `docs/ROADMAP.md`. The rules below are binding invariants for the
 landed code and future rows, grounded in live MySQL probes under `probe/`.
