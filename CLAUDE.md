@@ -11,10 +11,12 @@ Quick pointers:
   `.env` — `MYSQL_PORT_80`/`MYSQL_PORT_84`, defaults 11619/15401 — with the `capstan_sha2`
   replication user). Never restart or duplicate a running container.
 - **Gates:** `mix compile --warnings-as-errors && mix test && mix quality`.
-- **Status / scope:** `docs/ROADMAP.md` (authored) + `.forge/plans/` (task-level, machine-local).
-  The plan is the source of truth — do not re-derive scope from the code.
-- **forge artifacts** (design specs, plans, reviews, handoffs, memory, metrics) live under `.forge/`,
-  which is **gitignored** — machine-local, not in a bare clone.
+- **Scope / pickup:** [`docs/ROADMAP.md`](docs/ROADMAP.md) defines authored scope and
+  acceptance. Current executable work uses the GitHub owner queue selected by
+  `.kimosabe/config.toml` (`baselabs/capstan`); reconcile existing work and receipts
+  before adding tasks. The roadmap does not assert completion.
+- **Local coordination:** `.kimosabe/` holds local memory/evidence/configuration.
+  `.forge/` plans and derived status are historical, not the current work queue.
 
 ## graphify (code knowledge graph)
 

@@ -1,11 +1,15 @@
 # ADR-0006 — XA prepare/commit tracking via a held-out watermark
 
 **Status:** Accepted (design approved 2026-07-22 via best-of-N + a fresh-context adversarial pass;
-**implementation pending the C5 plan** — not yet landed in `lib/`). · **Supersedes:**
+implementation recorded in the 1.2.0 release line; see the dated source amendment below). · **Supersedes:**
 [ADR-0003](0003-transaction-shape-and-checkpoint-semantics.md) §2 (XA refused) **for the opt-in
 `xa: :track` path only**; **weakens** ADR-0003 §3's "never stall into the retention gap" consequence for
 that path. · **Honors:** [0001](0001-position-and-dedup-model.md), [0002](0002-fail-closed-server-preconditions.md),
 [0004](0004-c1-scope-lib-owned-checkpoint-only.md), [0005](0005-initial-snapshot-cursor-gate-brief-lock.md).
+
+## September 21, 2026 implementation-currency amendment
+
+OBSERVED through `rg -n` source reads: `Assembler.apply_decoded` routes `:track` XA prepares into the bounded pool and keeps `:refuse` as a distinct refusal path; `Connection.maybe_xa_recover` performs the tracking-mode recovery setup. [CHANGELOG](../../CHANGELOG.md#120---2026-08-23) records C5 delivery in 1.2.0. The prior "implementation pending" status is superseded. These are source and recorded-release facts, not a new executed acceptance receipt. The held-out watermark, restart recovery, and consumer durability obligations below remain the contract.
 
 ## Context
 

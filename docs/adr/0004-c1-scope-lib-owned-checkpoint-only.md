@@ -3,6 +3,10 @@
 **Status:** Accepted (user deferral, 2026-07-21) · **Supersedes:** the C1 design's sink-owned /
 start-position scope (design § Scope item 7)
 
+## September 21, 2026 implementation-currency amendment
+
+The July 21 C1 scope below is historical. Its sink-owned checkpoint and explicit-start deferrals were discharged by the 1.2.0 changes recorded in [CHANGELOG](../../CHANGELOG.md#120---2026-08-23). OBSERVED through `nl -ba` and `rg -n` source reads: `AssemblerServer.init` handles `:sink_owned` by reading `sink.checkpoint/0`; `Pipeline.resolve_start_position/2` accepts a retained checkpoint, explicit `Position`, or `:current`, and the connection/assembler receive the selected position. These source facts supersede the old present-tense refusal and "only run-path wiring is owed" statements. Sink-owned effect-once still requires the consumer's atomic data-plus-position write and its own real acceptance; no fresh runtime or registry proof was run for this amendment.
+
 ## Context
 
 The C1 streaming-spine design scoped **two** checkpoint modes — sink-owned (the sink persists the

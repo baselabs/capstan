@@ -22,11 +22,13 @@ implemented and released as `capstan` 1.2.3 (1.1.1 carried C1+C2; the 1.2.0
 span is additive; 1.2.1–1.2.3 are test-suite and docs hardening — see
 CHANGELOG). `examples/replication_pipeline/` is the durable reference docker
 stack (repo-side, CI-gated as the public sink API canary). Omitting
-`:snapshot` preserves the C1 stream. C5–C6 and the named follow-up rows remain
-open in `docs/ROADMAP.md`. The rules below are binding invariants for the
+`:snapshot` preserves the C1 stream. C6 remains the generic sink-consumer conformance work definition;
+the historical roadmap definitions do not reopen the delivered C5 and follow-up mechanisms. The rules below are binding invariants for the
 landed code and future rows, grounded in live MySQL probes under `probe/`.
-`docs/ROADMAP.md` carries authored definitions; `.forge/plans/` carries
-machine-local task state.
+`docs/ROADMAP.md` carries authored scope and acceptance definitions. Current work
+pickup uses the GitHub owner queue configured in `.kimosabe/config.toml`
+(`baselabs/capstan`); reconcile existing work and receipts before adding tasks.
+Historical `.forge/` plans are not the current queue.
 
 ## Critical rules
 
@@ -150,10 +152,12 @@ enumeration; long-lived containers seeded before that grant need it applied live
   `examples/replication_pipeline/README.md`, `notebooks/`, `scripts/`, `LICENSE` (the hex package's
   files list in `mix.exs` ships every consumer doc the README links; relative links in shipped docs
   must resolve inside the tarball — repo-only targets link absolutely).
-- **Never tracked (machine-local):** everything under `.forge/` — design specs, plans, closeout
-  reviews, handoffs, per-project memory, metrics, the dispatch ledger. `.forge/` is gitignored (forge
-  default); a bare clone/CI will not have them. `docs/ROADMAP.md` carries **authored** facts only —
-  status is DERIVED by `forge-roadmap.py`, never hand-edited.
+- **Machine-local coordination:** `.kimosabe/` holds local configuration, memory, and
+  evidence under the repository's local exclusion policy. Historical `.forge/` artifacts
+  remain historical evidence, not current task state; neither is a bare-clone dependency.
+  `docs/ROADMAP.md` carries authored scope/acceptance. The configured GitHub owner
+  queue and actual receipts govern execution/completion; `forge-roadmap.py` is retired
+  as the current pickup rule.
 - AI-tool state dirs (`.claude/`, `.serena/`, `graphify-out/`, etc.) are gitignored.
 
 ## graphify (code knowledge graph)
