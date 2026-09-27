@@ -816,7 +816,17 @@ defmodule Capstan.Protocol.HandshakeTest do
   end
 
   defp fetch_substrate_ca do
-    {ca, 0} = System.cmd("docker", ["exec", "mysql-cdc-probe", "cat", "/var/lib/mysql/ca.pem"])
+    ca =
+      case Application.get_env(:capstan, :mysql_substrate, [])[:ca_file] do
+        nil ->
+          {ca, 0} =
+            System.cmd("docker", ["exec", "mysql-cdc-probe", "cat", "/var/lib/mysql/ca.pem"])
+
+          ca
+
+        ca_file ->
+          File.read!(ca_file)
+      end
 
     path =
       Path.join(

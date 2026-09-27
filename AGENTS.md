@@ -130,6 +130,11 @@ Elixir suite (Dotenvy in `config/runtime.exs` → `Capstan.MysqlCase.shared_port
 `scripts/dev-substrate.sh` is a thin, forge-safe wrapper over compose (same `--only-80` flag); prefer
 either — they drive the same definition.
 
+Any MySQL 8.0/8.4 pair serving the same flags, credentials and init script on those ports works
+too (for example a shared local cluster); never run it alongside compose on the same ports. When
+the 8.0 server is not the `mysql-cdc-probe` container, set `CAPSTAN_SUBSTRATE_CA_FILE` to its
+`ca.pem` so the TLS handshake test can verify it (unset, the test reads the CA from that container).
+
     scripts/dev-substrate.sh            # both servers
     scripts/dev-substrate.sh --only-80  # just 8.0
 

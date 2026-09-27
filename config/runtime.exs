@@ -25,5 +25,8 @@ if config_env() in [:dev, :test] do
   # the committed random high ports (also in .env.example); .env or a real env var overrides them.
   config :capstan, :mysql_substrate,
     port_80: env!("MYSQL_PORT_80", :integer, 11619),
-    port_84: env!("MYSQL_PORT_84", :integer, 15401)
+    port_84: env!("MYSQL_PORT_84", :integer, 15401),
+    # The 8.0 substrate's CA (for the TLS handshake test) when it does not run as the
+    # `mysql-cdc-probe` Compose container; unset reads it from that container.
+    ca_file: env!("CAPSTAN_SUBSTRATE_CA_FILE", :string, nil)
 end
