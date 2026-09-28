@@ -8,13 +8,7 @@ Tasks 8–11 decode against these bytes.
 
 ## Regenerating
 
-Bring the substrate up (idempotent — never restarts a running server):
-
-```
-scripts/dev-substrate.sh --only-80
-```
-
-Then, with `mysql-cdc-probe` reachable at `127.0.0.1:$MYSQL_PORT_80` (root/probe,
+With `mysql-cdc-probe` reachable at `127.0.0.1:$MYSQL_PORT_80` (root/probe,
 `mysql_native_password`, database `probe_db`):
 
 ```

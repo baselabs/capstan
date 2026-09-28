@@ -27,7 +27,7 @@ defmodule Capstan.Integration.SnapshotTest do
       choke-point observer hook) → the backfill completes, no stall.
 
   `:integration`-tagged (excluded by default; run with `mix test --only integration` against a
-  substrate from `scripts/dev-substrate.sh`). Never restarts or reconfigures the shared container.
+  substrate, the BaseLabs cluster). Never restarts or reconfigures the shared container.
   See the RED-drop procedures documented at each marquee — each named safety property has a
   provable RED (the brief-lock exact-`G` swap for tripwire 1; a forgetful snapshot store for
   tripwire 3).
@@ -56,7 +56,7 @@ defmodule Capstan.Integration.SnapshotTest do
   setup_all do
     MysqlCase.ensure_sha2_user!(MysqlCase.query_connection())
     # Self-sufficiency: the brief per-chunk lock needs LOCK TABLES (plan Task 0 grants it to the
-    # dev substrate, but the marquee grants it too so it never depends on dev-substrate.sh state).
+    # dev substrate, but the marquee grants it too so it never depends on the substrate's seed state).
     grant = MysqlCase.socket!(MysqlCase.query_connection())
     MysqlCase.run!(grant, "GRANT LOCK TABLES ON *.* TO 'capstan_sha2'@'%'")
     MysqlCase.close!(grant)

@@ -35,8 +35,8 @@ jobs:
             native_flag: "--mysql-native-password=ON"
     env:
       MIX_ENV: test
-      # Throwaway credentials for a disposable CI container — never a real secret (mirrors
-      # scripts/dev-substrate.sh). No port is hard-coded anywhere: MYSQL_PORT_80 is bound by the
+      # Throwaway credentials for a disposable CI container — never a real secret (the same
+      # values as .env.example). No port is hard-coded anywhere: MYSQL_PORT_80 is bound by the
       # container below AND read by the Elixir suite (Dotenvy in config/runtime.exs → shared_port/0),
       # so CI and the tests always agree on one value.
       MYSQL_PORT_80: "11619"
@@ -59,9 +59,9 @@ jobs:
           docker --version
 
       # Start MySQL now (non-blocking) so it initialises while BEAM/deps set up. The five Q5
-      # precondition variables + enforce-gtid-consistency mirror scripts/dev-substrate.sh COMMON_FLAGS.
+      # precondition variables + enforce-gtid-consistency match the BaseLabs cluster's capstan servers.
       # capstan_sha2 (with LOCK TABLES) is seeded at init by the SAME scripts/mysql-init/ mount
-      # docker-compose.yml uses — one definition of the replication user, so CI cannot drift from local.
+      # the cluster mounts — one definition of the replication user, so CI cannot drift from local.
       - name: Start MySQL ${{ matrix.mysql }} substrate
         run: |
           docker run -d --name mysql-cdc-probe \

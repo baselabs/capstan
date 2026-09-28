@@ -107,36 +107,26 @@ Per-file floor on every touched file, **prod AND test**: format, compile (warnin
   (`test/fixtures/binlog/`, captured from the live substrate) — never self-signed fixtures. Write the
   test first; prove it RED before GREEN.
 - **Integration** (`test/integration/**`, `:integration`-tagged): gate on the live substrate; a
-  marquee never observed running is not evidence. Bring the substrate up with
-  `scripts/dev-substrate.sh` (below) before running `mix test --only integration`.
+  marquee never observed running is not evidence. The substrate (below) must be reachable
+  before running `mix test --only integration`.
 - **Fail-closed properties get tripwire tests** — the protected mutation itself, proven RED first
   (rename the key, fabricate the foreign `table_id`, tamper a CRC byte, feed a purged range). A suite
   of happy paths passing green over a broken contract is the failure mode to avoid.
 
 ## Local substrate
 
-The MySQL servers the suite streams from are defined ONCE in **`docker-compose.yml`** (the single
-source of truth for the five precondition variables + ports + images). The `caching_sha2_password`
-replication user — with `LOCK TABLES`, which the C2 snapshot brief-lock needs — is seeded at first
-container init by **`scripts/mysql-init/`**. Tunables live in **`.env`** (gitignored; copy from
-`.env.example`), so an unedited checkout reproduces the substrate exactly. **No port is hard-coded** —
-`MYSQL_PORT_80` / `MYSQL_PORT_84` (default `11619` / `15401`) are read by docker-compose AND by the
-Elixir suite (Dotenvy in `config/runtime.exs` → `Capstan.MysqlCase.shared_port/0`).
+The MySQL 8.0 and 8.4 servers the suite streams from run in the BaseLabs cluster (namespace
+`capstan`, managed from `~/Developer/infra/baselabs`) with the five precondition variables. The
+`caching_sha2_password` replication user (with `LOCK TABLES`, which the C2 snapshot brief-lock
+needs) is seeded by **`scripts/mysql-init/`**, which the cluster and CI both mount. Ports live in
+**`.env`** (`MYSQL_PORT_80` / `MYSQL_PORT_84`, `11619` / `15401`), read by the Elixir suite through
+Dotenvy in `config/runtime.exs`. `CAPSTAN_SUBSTRATE_CA_FILE` points at the 8.0 server's `ca.pem`
+(the cluster exports it to `~/.config/baselabs/capstan/mysql-80-ca.pem`).
 
-    docker compose up -d --wait            # both servers (ports from MYSQL_PORT_80/84), ready + user seeded
-    docker compose up -d --wait mysql-80   # just 8.0
-    docker compose down                    # stop + remove (add -v to wipe the data volumes)
-
-`scripts/dev-substrate.sh` is a thin, forge-safe wrapper over compose (same `--only-80` flag); prefer
-either — they drive the same definition.
-
-Any MySQL 8.0/8.4 pair serving the same flags, credentials and init script on those ports works
-too (for example a shared local cluster); never run it alongside compose on the same ports. When
-the 8.0 server is not the `mysql-cdc-probe` container, set `CAPSTAN_SUBSTRATE_CA_FILE` to its
-`ca.pem` so the TLS handshake test can verify it (unset, the test reads the CA from that container).
-
-    scripts/dev-substrate.sh            # both servers
-    scripts/dev-substrate.sh --only-80  # just 8.0
+This repository ships no database container (the Compose file and its wrapper were removed
+September 28, 2026, after agent sessions kept starting databases outside the cluster). If a server
+is unreachable, stop and report it; never start a local MySQL and never move a port. Elsewhere,
+any MySQL 8.0/8.4 pair with the same flags, credentials and init script works.
 
 - 8.0 `mysql-cdc-probe` @ `127.0.0.1:$MYSQL_PORT_80` — root is `mysql_native_password` (the `probe/`
   diagnostics authenticate as native root); replication user `capstan_sha2` / `capstan_sha2_pw`.
@@ -144,9 +134,9 @@ the 8.0 server is not the `mysql-cdc-probe` container, set `CAPSTAN_SUBSTRATE_CA
   so root is `caching_sha2` (exercises the default auth posture); same `capstan_sha2` user
 (the seed script grants it `XA_RECOVER_ADMIN` for the `xa: :track` connect-time
 enumeration; long-lived containers seeded before that grant need it applied live).
-- **Never restart or duplicate a running server** — a live server is left untouched (`docker compose
-  up -d` is idempotent). No server UUID is hard-coded (a recreated container gets a new one; read it
-  live). Container names are stable (`handshake_test.exs` does `docker exec mysql-cdc-probe …`).
+- **Never restart, duplicate or start a server** — the servers are the BaseLabs cluster's. No server
+  UUID is hard-coded (a recreated server gets a new one; read it live). The TLS handshake test reads
+  the 8.0 CA from `CAPSTAN_SUBSTRATE_CA_FILE`.
 - Credentials are **throwaway** for disposable local containers — not secrets. `.env` is gitignored;
   never put a real password in it.
 

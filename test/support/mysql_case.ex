@@ -26,7 +26,7 @@ defmodule Capstan.MysqlCase do
     * `pipeline_connection/2` — `capstan_sha2` over the **default** `caching_sha2_password`
       posture (F7). The shared `root` is native-password, so a pipeline using the default
       `auth_plugins` MUST authenticate as the caching_sha2 replication user; `ensure_sha2_user!/1`
-      creates it idempotently so the suite never depends on `dev-substrate.sh` having run.
+      creates it idempotently so the suite never depends on the substrate's seed having run.
 
   ## Reusable scaffolding
 
@@ -45,7 +45,7 @@ defmodule Capstan.MysqlCase do
   @host "127.0.0.1"
   @root_password "probe"
   @sha2_user "capstan_sha2"
-  # Throwaway credential for disposable local containers — never a real secret (dev-substrate.sh).
+  # Throwaway credential for disposable local containers — never a real secret (.env.example).
   @sha2_password "capstan_sha2_pw"
   @connect_timeout 20_000
 
@@ -328,7 +328,7 @@ defmodule Capstan.MysqlCase do
   end
 
   # The five precondition variables + GTID + enforce-consistency (design Q5), matching
-  # scripts/dev-substrate.sh COMMON_FLAGS, plus a distinct server-id and native-root default so
+  # the substrate's precondition flags (CI and the BaseLabs cluster), plus a distinct server-id and native-root default so
   # the query connection authenticates the same way it does against the shared substrate.
   @common_flags [
     "--binlog-format=ROW",
@@ -362,7 +362,7 @@ defmodule Capstan.MysqlCase do
     end
   end
 
-  # Ready = the REAL networked server answers an authenticated TCP query (dev-substrate.sh's
+  # Ready = the REAL networked server answers an authenticated TCP query (the substrate's
   # wait_ready rationale — a socket-only init server answers ping but not this).
   defp wait_ready!(name, attempts \\ 60) do
     Enum.reduce_while(1..attempts, nil, fn n, _ ->
@@ -398,7 +398,7 @@ defmodule Capstan.MysqlCase do
   end
 
   # F7: create the caching_sha2 replication user the pipeline authenticates as, mirroring
-  # scripts/dev-substrate.sh's ensure_sha2_user (idempotent).
+  # scripts/mysql-init/'s replication user (idempotent).
   defp provision_throwaway!(name) do
     sql =
       "CREATE USER IF NOT EXISTS '#{@sha2_user}'@'%' IDENTIFIED WITH caching_sha2_password BY '#{@sha2_password}';" <>
@@ -433,7 +433,7 @@ defmodule Capstan.MysqlCase do
   @doc """
   Ensures the caching_sha2 replication user exists on the substrate reachable at `query_conn`
   (F7). Idempotent (`CREATE USER IF NOT EXISTS`); run once in a marquee `setup_all` so the suite
-  never depends on `scripts/dev-substrate.sh` having provisioned it.
+  never depends on the substrate's seed having provisioned it.
   """
   @spec ensure_sha2_user!(keyword()) :: :ok
   def ensure_sha2_user!(query_conn) do

@@ -164,7 +164,7 @@ payload — that boundary is enforced at runtime, not by convention.
 | `lib/` | The Elixir library (Hex package `capstan`) |
 | `notebooks/` | The getting-started Livebook |
 | `examples/` | Runnable minimal consumers ([examples/README.md](https://github.com/baselabs/capstan/tree/main/examples)) |
-| `docker-compose.yml`, `scripts/` | The local MySQL test substrate + the read-only preflight report |
+| `scripts/` | The MySQL init seed (`mysql-init/`) + the read-only preflight report |
 | `probe/` | The executed protocol viability probe + committed evidence |
 | `docs/` | ADRs, telemetry reference, recipes |
 | `usage-rules.md` | Consumer-facing usage contract |

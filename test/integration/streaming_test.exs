@@ -10,7 +10,7 @@ defmodule Capstan.Integration.StreamingTest do
     * `binlog_rows_query_log_events = ON` — the pipeline runs AND the ROWS_QUERY SQL leaks nowhere.
 
   `:integration`-tagged: excluded by default, run with `mix test --only integration` against a
-  substrate brought up by `scripts/dev-substrate.sh`. Never restarts or reconfigures the container.
+  substrate (the BaseLabs cluster). Never restarts or reconfigures the container.
   """
   use ExUnit.Case, async: false
 
