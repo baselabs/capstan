@@ -28,5 +28,8 @@ if config_env() in [:dev, :test] do
     port_84: env!("MYSQL_PORT_84", :integer, 15401),
     # The 8.0 substrate's CA (for the TLS handshake test) when it does not run as the
     # `mysql-cdc-probe` Compose container; unset reads it from that container.
-    ca_file: env!("CAPSTAN_SUBSTRATE_CA_FILE", :string, nil)
+    ca_file: env!("CAPSTAN_SUBSTRATE_CA_FILE", :string, nil),
+    # The disposable MySQL 8.0 the destructive (:disposable_mysql) marquees reset; unset (the
+    # default) leaves those marquees unable to run, and they are excluded unless selected.
+    disposable_port: env!("CAPSTAN_DISPOSABLE_MYSQL_PORT", :integer?, nil)
 end

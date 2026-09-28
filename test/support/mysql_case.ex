@@ -10,14 +10,14 @@ defmodule Capstan.MysqlCase do
       — every NON-destructive marquee streams from it read-mostly, on DEDICATED per-marquee
       tables (`DROP TABLE IF EXISTS` in setup). It is **never** restarted, reconfigured, or
       duplicated (forge substrate rule).
-    * **A throwaway `mysql:8.0` container** on a fresh ephemeral port — every DESTRUCTIVE
-      marquee (`PURGE BINARY LOGS`, a server configured with
-      `binlog_transaction_compression=ON` for the compressed-consumption marquee) spins one
-      via `with_throwaway_mysql/2`, provisions
-      it, runs, and tears it down with a guaranteed `after`. Those marquees are
-      `@moduletag :requires_docker`, so ExUnit EXCLUDES them (a genuine skip, never a spurious
-      pass) unless the run selects that tag; `with_throwaway_mysql/2` also raises a clear error
-      if Docker is somehow absent under an explicit `--only requires_docker`.
+    * **The disposable MySQL 8.0** (`127.0.0.1`, port `CAPSTAN_DISPOSABLE_MYSQL_PORT`), which
+      the environment provides and the suite may destroy. Every DESTRUCTIVE marquee
+      (`PURGE BINARY LOGS`, `binlog_transaction_compression=ON`, `binlog_row_value_options=PARTIAL_JSON`)
+      runs through `with_disposable_mysql/2`, which takes a server-scoped lease, refuses a server
+      not marked disposable, and resets binlog/GTID history and the managed variables so each
+      marquee starts from a new server's state. Those marquees are `@moduletag :disposable_mysql`,
+      so ExUnit EXCLUDES them (a genuine skip, never a spurious pass) unless the run selects that
+      tag; selected without the port configured, the helper raises naming the variable.
 
   ## Two connection identities
 
@@ -56,7 +56,7 @@ defmodule Capstan.MysqlCase do
   @doc """
   The shared substrate's TCP port — the SINGLE accessor every test uses (no port literal appears in
   lib/ or test/). Sourced from `MYSQL_PORT_80` via Dotenvy in config/runtime.exs (default in
-  .env.example); the same value docker-compose binds.
+  .env.example).
   """
   @spec shared_port() :: pos_integer()
   def shared_port, do: Application.fetch_env!(:capstan, :mysql_substrate)[:port_80]
@@ -278,152 +278,210 @@ defmodule Capstan.MysqlCase do
   end
 
   ## ---------------------------------------------------------------------------
-  ## docker / throwaway container lifecycle
+  ## the disposable server (destructive marquees)
   ## ---------------------------------------------------------------------------
 
+  # The schema that marks a server as deliberately disposable. The provisioning creates it
+  # (docs/testing.md); a server without it is never reset.
+  @disposable_marker "capstan_disposable"
+  # The one server-scoped lease a destructive marquee holds from before its reset until after its
+  # pipeline stopped (MySQL named lock: two test runs never share the server at once).
+  @disposable_lock "capstan_disposable_lease"
+  @disposable_lock_wait_s 600
+  # The dynamic server variables a destructive marquee may change, and the baseline every marquee
+  # starts from and is restored to (the shared substrate's own values).
+  @disposable_baseline [binlog_transaction_compression: "OFF", binlog_row_value_options: ""]
+
   @doc """
-  True iff the local Docker daemon answers `docker info`. The throwaway marquees gate on the
-  `:requires_docker` tag (excluded by ExUnit when not selected), so this is the last-resort clear
-  error inside `with_throwaway_mysql/2` for an explicit `--only requires_docker` run without Docker.
+  The disposable server's TCP port (`CAPSTAN_DISPOSABLE_MYSQL_PORT`), or raises naming the
+  variable. Only the `:disposable_mysql` marquees use it.
   """
-  @spec docker_available?() :: boolean()
-  def docker_available? do
-    case System.cmd("docker", ["info"], stderr_to_stdout: true) do
-      {_output, 0} -> true
-      _ -> false
+  @spec disposable_port!() :: pos_integer()
+  def disposable_port! do
+    case Application.get_env(:capstan, :mysql_substrate, [])[:disposable_port] do
+      port when is_integer(port) ->
+        port
+
+      _ ->
+        raise "capstan mysql_case: CAPSTAN_DISPOSABLE_MYSQL_PORT is not set. The :disposable_mysql " <>
+                "marquees reset the server they run on, so they need a MySQL 8.0 of their own " <>
+                "(see docs/testing.md); they are excluded unless selected."
     end
-  rescue
-    _ -> false
   end
 
   @doc """
-  Spins a throwaway `mysql:8.0` on a fresh ephemeral port with `extra_flags` (beyond the five
-  precondition variables + GTID), waits until it answers an authenticated query, provisions the
-  caching_sha2 user + `probe_db`, runs `fun.(port)`, and tears the container down with a
-  guaranteed `after` (`docker rm -f`). Callers must be `@moduletag :requires_docker` (the ExUnit
-  gate — excluded when not selected, so absent Docker is a genuine skip, never a pass); do NOT
-  wrap call sites in a `docker_available?/0` conditional — a pass-when-absent branch is exactly
-  the false green the tag replaced. This function raises a clear error as the last resort for an
-  explicit `--only requires_docker` run without Docker.
-  """
-  @spec with_throwaway_mysql([String.t()], (pos_integer() -> result)) :: result when result: var
-  def with_throwaway_mysql(extra_flags, fun) when is_list(extra_flags) and is_function(fun, 1) do
-    unless docker_available?() do
-      raise "capstan mysql_case: Docker unavailable — :requires_docker marquees need a throwaway " <>
-              "container. They are excluded by default; run them with Docker present " <>
-              "(`mix test --only requires_docker`)."
-    end
+  Runs `fun.(port)` against the disposable server, in the state of a new server: binlog and GTID
+  history reset, the managed variables at their baseline, then `settings` applied (a keyword list
+  over `binlog_transaction_compression` and `binlog_row_value_options` only), and the
+  `capstan_sha2` user present.
 
-    name = "capstan-throwaway-#{System.unique_integer([:positive])}"
-    port = free_port()
+  Before touching anything it takes the server-scoped lease and refuses a server that is not
+  deliberately disposable: one without the `#{@disposable_marker}` schema, one that is either shared
+  substrate (same port, or the same `@@server_uuid` reached another way), or one that is not
+  MySQL 8.0. The lease is released, and the baseline restored, by an `on_exit` registered here, so
+  it runs AFTER the `on_exit` callbacks the marquee registers later (its pipeline stops first).
+  Callers are `@moduletag :disposable_mysql` modules with `async: false`.
+  """
+  @spec with_disposable_mysql(keyword(), (pos_integer() -> result)) :: result when result: var
+  def with_disposable_mysql(settings, fun) when is_list(settings) and is_function(fun, 1) do
+    port = disposable_port!()
+    validate_disposable_settings!(settings)
+    lease = acquire_disposable_lease!(port)
+    ExUnit.Callbacks.on_exit(fn -> release_disposable_lease(lease) end)
+
+    admin = socket!(admin_connection(port))
 
     try do
-      start_throwaway!(name, port, extra_flags)
-      wait_ready!(name)
-      provision_throwaway!(name)
-      fun.(port)
+      guard_disposable!(admin, port)
+      run!(admin, "CREATE DATABASE IF NOT EXISTS probe_db")
+      # A new server's binlog and GTID history. The marquees read their watermarks live and pass
+      # without it (observed: removing the reset left two consecutive runs green); it keeps a
+      # long-lived server's binlogs from growing without bound and each marquee's history to its
+      # own statements.
+      run!(admin, "RESET MASTER")
+      apply_disposable_settings!(admin, Keyword.merge(@disposable_baseline, settings))
     after
-      System.cmd("docker", ["rm", "-f", name], stderr_to_stdout: true)
+      close!(admin)
     end
+
+    ensure_sha2_user!(query_connection(port))
+    fun.(port)
   end
 
-  # The five precondition variables + GTID + enforce-consistency (design Q5), matching
-  # the substrate's precondition flags (CI and the BaseLabs cluster), plus a distinct server-id and native-root default so
-  # the query connection authenticates the same way it does against the shared substrate.
-  @common_flags [
-    "--binlog-format=ROW",
-    "--binlog-row-image=FULL",
-    "--binlog-row-metadata=FULL",
-    "--binlog-row-value-options=",
-    "--gtid-mode=ON",
-    "--enforce-gtid-consistency=ON",
-    "--default-authentication-plugin=mysql_native_password"
-  ]
+  @doc false
+  # The identity checks, callable with an explicit list of shared server UUIDs (the test of the
+  # guard itself). Raises before any statement that changes server state.
+  @spec guard_disposable!(Packet.socket(), pos_integer(), [String.t()] | nil) :: :ok
+  def guard_disposable!(admin, port, shared_uuids \\ nil) do
+    substrate = Application.get_env(:capstan, :mysql_substrate, [])
+    shared_ports = [substrate[:port_80], substrate[:port_84]]
 
-  defp start_throwaway!(name, port, extra_flags) do
-    args =
-      [
-        "run",
-        "-d",
-        "--name",
-        name,
-        "-p",
-        "127.0.0.1:#{port}:3306",
-        "-e",
-        "MYSQL_ROOT_PASSWORD=#{@root_password}",
-        "-e",
-        "MYSQL_DATABASE=probe_db",
-        "mysql:8.0"
-      ] ++ @common_flags ++ ["--server-id=#{79 + rem(port, 200)}"] ++ extra_flags
-
-    case System.cmd("docker", args, stderr_to_stdout: true) do
-      {_output, 0} -> :ok
-      {output, code} -> raise "capstan mysql_case: throwaway create failed (#{code}): #{output}"
+    if port in shared_ports do
+      raise "capstan mysql_case: CAPSTAN_DISPOSABLE_MYSQL_PORT (#{port}) is a shared substrate port; " <>
+              "the disposable marquees would reset it"
     end
+
+    [[version, uuid, marked]] =
+      query_rows!(
+        admin,
+        "SELECT VERSION(), @@server_uuid, (SELECT COUNT(*) FROM information_schema.SCHEMATA " <>
+          "WHERE SCHEMA_NAME = '#{@disposable_marker}')"
+      )
+
+    unless marked == "1" do
+      raise "capstan mysql_case: the server on port #{port} has no `#{@disposable_marker}` schema, " <>
+              "so it is not marked disposable; refusing to reset it (docs/testing.md)"
+    end
+
+    unless String.starts_with?(version, "8.0.") do
+      raise "capstan mysql_case: the disposable server must be MySQL 8.0 (the version these " <>
+              "marquees are written and tested against); it is #{version}"
+    end
+
+    if uuid in (shared_uuids || shared_server_uuids(shared_ports)) do
+      raise "capstan mysql_case: the disposable server is a shared substrate server " <>
+              "(@@server_uuid #{uuid}); refusing to reset it"
+    end
+
+    :ok
   end
 
-  # Ready = the REAL networked server answers an authenticated TCP query (the substrate's
-  # wait_ready rationale — a socket-only init server answers ping but not this).
-  defp wait_ready!(name, attempts \\ 60) do
-    Enum.reduce_while(1..attempts, nil, fn n, _ ->
-      cmd =
-        System.cmd(
-          "docker",
-          [
-            "exec",
-            name,
-            "mysql",
-            "-h127.0.0.1",
-            "-uroot",
-            "-p#{@root_password}",
-            "-N",
-            "-e",
-            "SELECT 1"
-          ],
-          stderr_to_stdout: true
-        )
-
-      case cmd do
-        {_out, 0} ->
-          {:halt, :ok}
-
-        _ when n == attempts ->
-          raise "capstan mysql_case: throwaway #{name} never became ready"
-
-        _ ->
-          Process.sleep(2_000)
-          {:cont, nil}
-      end
-    end)
+  # The shared servers' UUIDs, from whichever of them answers (an unreachable one cannot be the
+  # server the disposable port reaches).
+  defp shared_server_uuids(ports) do
+    for port <- ports, is_integer(port), uuid = server_uuid(port), uuid != nil, do: uuid
   end
 
-  # F7: create the caching_sha2 replication user the pipeline authenticates as, mirroring
-  # scripts/mysql-init/'s replication user (idempotent).
-  defp provision_throwaway!(name) do
-    sql =
-      "CREATE USER IF NOT EXISTS '#{@sha2_user}'@'%' IDENTIFIED WITH caching_sha2_password BY '#{@sha2_password}';" <>
-        "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO '#{@sha2_user}'@'%';"
+  defp server_uuid(port) do
+    socket = socket!(admin_connection(port))
 
-    case System.cmd(
-           "docker",
-           ["exec", name, "mysql", "-uroot", "-p#{@root_password}", "-e", sql],
-           stderr_to_stdout: true
-         ) do
-      {_out, 0} ->
+    try do
+      [[uuid]] = query_rows!(socket, "SELECT @@server_uuid")
+      uuid
+    after
+      close!(socket)
+    end
+  rescue
+    _ -> nil
+  end
+
+  # root without a default database: the guard runs before `probe_db` is known to exist.
+  defp admin_connection(port), do: Keyword.delete(query_connection(port), :database)
+
+  defp validate_disposable_settings!(settings) do
+    managed = Keyword.keys(@disposable_baseline)
+
+    case Keyword.keys(settings) -- managed do
+      [] ->
         :ok
 
-      {output, code} ->
-        raise "capstan mysql_case: throwaway provision failed (#{code}): #{output}"
+      other ->
+        raise ArgumentError,
+              "with_disposable_mysql/2 manages only #{inspect(managed)}; got #{inspect(other)}"
     end
   end
 
-  # An ephemeral free TCP port: bind :0, read the assigned port, release it. A tiny TOCTOU
-  # window remains before docker binds it, acceptable for serially-run integration marquees.
-  defp free_port do
-    {:ok, listen} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}])
-    {:ok, port} = :inet.port(listen)
-    :ok = :gen_tcp.close(listen)
-    port
+  defp apply_disposable_settings!(admin, settings) do
+    for {name, value} <- settings do
+      run!(admin, "SET GLOBAL #{name} = '#{value}'")
+    end
+
+    :ok
+  end
+
+  # The lease lives in its own process, which owns the connection holding the named lock: the
+  # marquee's own process ends before its on_exit callbacks run, and the lock must outlive it.
+  defp acquire_disposable_lease!(port) do
+    parent = self()
+    ref = make_ref()
+
+    pid =
+      spawn(fn ->
+        socket = socket!(admin_connection(port))
+
+        case query_rows!(
+               socket,
+               "SELECT GET_LOCK('#{@disposable_lock}', #{@disposable_lock_wait_s})"
+             ) do
+          [["1"]] ->
+            send(parent, {ref, :leased})
+
+            receive do
+              {:release, from} ->
+                _ = apply_disposable_settings!(socket, @disposable_baseline)
+                _ = run_tolerant(socket, "DO RELEASE_LOCK('#{@disposable_lock}')")
+                close!(socket)
+                send(from, {ref, :released})
+            end
+
+          other ->
+            close!(socket)
+            send(parent, {ref, {:busy, other}})
+        end
+      end)
+
+    receive do
+      {^ref, :leased} ->
+        {pid, ref}
+
+      {^ref, {:busy, other}} ->
+        raise "capstan mysql_case: another test run held the disposable server for " <>
+                "#{@disposable_lock_wait_s}s (GET_LOCK returned #{inspect(other)})"
+    after
+      (@disposable_lock_wait_s + 30) * 1000 ->
+        Process.exit(pid, :kill)
+        raise "capstan mysql_case: timed out waiting for the disposable server's lease"
+    end
+  end
+
+  defp release_disposable_lease({pid, ref}) do
+    send(pid, {:release, self()})
+
+    receive do
+      {^ref, :released} -> :ok
+    after
+      30_000 -> Process.exit(pid, :kill)
+    end
   end
 
   ## ---------------------------------------------------------------------------

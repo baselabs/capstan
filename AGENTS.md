@@ -124,9 +124,16 @@ Dotenvy in `config/runtime.exs`. `CAPSTAN_SUBSTRATE_CA_FILE` points at the 8.0 s
 (the cluster exports it to `~/.config/baselabs/capstan/mysql-80-ca.pem`).
 
 This repository ships no database container (the Compose file and its wrapper were removed
-September 28, 2026, after agent sessions kept starting databases outside the cluster). If a server
-is unreachable, stop and report it; never start a local MySQL and never move a port. Elsewhere,
-any MySQL 8.0/8.4 pair with the same flags, credentials and init script works.
+September 28, 2026, after agent sessions kept starting databases outside the cluster). On the
+maintainer's machine, if a server is unreachable, stop and report it; never start a local MySQL
+and never move a port. Elsewhere, any MySQL 8.0/8.4 pair with the same flags, credentials and init
+script works (`docs/testing.md` gives the `docker run` lines).
+
+The destructive marquees (`:disposable_mysql`) run on a third server, the **disposable** MySQL 8.0
+on `CAPSTAN_DISPOSABLE_MYSQL_PORT`, which they reset through `Capstan.MysqlCase.with_disposable_mysql/2`
+(a server-scoped lease, then refusal unless the server is marked disposable by schema
+`capstan_disposable`, is not a shared server by port or `@@server_uuid`, and is MySQL 8.0). CI
+starts it as a runner container; `docs/testing.md` describes providing it.
 
 - 8.0 `mysql-cdc-probe` @ `127.0.0.1:$MYSQL_PORT_80` — root is `mysql_native_password` (the `probe/`
   diagnostics authenticate as native root); replication user `capstan_sha2` / `capstan_sha2_pw`.
@@ -134,7 +141,8 @@ any MySQL 8.0/8.4 pair with the same flags, credentials and init script works.
   so root is `caching_sha2` (exercises the default auth posture); same `capstan_sha2` user
 (the seed script grants it `XA_RECOVER_ADMIN` for the `xa: :track` connect-time
 enumeration; long-lived containers seeded before that grant need it applied live).
-- **Never restart, duplicate or start a server** — the servers are the BaseLabs cluster's. No server
+- **Never restart, duplicate or start a shared server** — on the maintainer's machine they are the
+  BaseLabs cluster's; the disposable server is the only one the suite may reset. No server
   UUID is hard-coded (a recreated server gets a new one; read it live). The TLS handshake test reads
   the 8.0 CA from `CAPSTAN_SUBSTRATE_CA_FILE`.
 - Credentials are **throwaway** for disposable local containers — not secrets. `.env` is gitignored;

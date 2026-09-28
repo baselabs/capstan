@@ -40,6 +40,9 @@ jobs:
       # container below AND read by the Elixir suite (Dotenvy in config/runtime.exs → shared_port/0),
       # so CI and the tests always agree on one value.
       MYSQL_PORT_80: "11619"
+      # The disposable MySQL 8.0 the :disposable_mysql marquees reset (started below), on its own
+      # port; the suite reads the same variable (config/runtime.exs → disposable_port!/0).
+      CAPSTAN_DISPOSABLE_MYSQL_PORT: "33061"
       ROOT_PW: probe
       SHA2_USER: capstan_sha2
       SHA2_PW: capstan_sha2_pw
@@ -48,10 +51,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      # DOCKER MANDATE (routed from Task 18). The :integration marquees stream from the shared
-      # substrate started below, and the :requires_docker marquees spin their own THROWAWAY
-      # mysql:8.0 containers — both need a working daemon. Absent Docker they'd surface later and
-      # noisier (`with_throwaway_mysql` raises; the substrate never comes up); fail loudly here
+      # DOCKER MANDATE (routed from Task 18). CI provides both servers as runner containers: the
+      # shared substrate the :live/:integration marquees stream from, and the disposable MySQL 8.0
+      # the :disposable_mysql marquees reset. Absent Docker neither comes up; fail loudly here
       # first with the clearest message.
       - name: Require Docker
         run: |
@@ -80,6 +82,25 @@ jobs:
             --enforce-gtid-consistency=ON \
             --server-id=1 \
             ${{ matrix.native_flag }}
+
+      # The disposable server: MySQL 8.0 on every leg (the version the destructive marquees are
+      # written against; the helper refuses any other), the substrate's flags, a distinct
+      # server-id. Marked disposable (schema capstan_disposable) once it is ready, below.
+      - name: Start disposable MySQL 8.0
+        run: |
+          docker run -d --name capstan-disposable \
+            -p "127.0.0.1:${CAPSTAN_DISPOSABLE_MYSQL_PORT}:3306" \
+            -e "MYSQL_ROOT_PASSWORD=${ROOT_PW}" \
+            -e MYSQL_DATABASE=probe_db \
+            mysql:8.0 \
+            --binlog-format=ROW \
+            --binlog-row-image=FULL \
+            --binlog-row-metadata=FULL \
+            --binlog-row-value-options= \
+            --gtid-mode=ON \
+            --enforce-gtid-consistency=ON \
+            --server-id=179 \
+            --default-authentication-plugin=mysql_native_password
 
       - name: Set up BEAM (Erlang/OTP + Elixir)
         uses: erlef/setup-beam@v1
@@ -130,6 +151,17 @@ jobs:
             ALTER USER 'root'@'%' IDENTIFIED WITH mysql_native_password BY '${ROOT_PW}';
             FLUSH PRIVILEGES;"
 
+      - name: Wait for the disposable MySQL and mark it disposable
+        run: |
+          for _ in $(seq 1 60); do
+            if docker exec capstan-disposable mysql -h127.0.0.1 -P3306 -uroot -p"${ROOT_PW}" \
+                 -N -e 'CREATE DATABASE IF NOT EXISTS capstan_disposable' >/dev/null 2>&1; then
+              ready=1; break
+            fi
+            sleep 2
+          done
+          [ "${ready:-0}" = "1" ] || { echo "::error::disposable MySQL never became ready"; docker logs capstan-disposable; exit 1; }
+
       - name: Unit tests
         run: mix test
 
@@ -142,27 +174,26 @@ jobs:
       - name: Integration marquees (shared substrate)
         run: mix test --only integration
 
-      # Docker-gated marquees (the two gap-purge, compression, PARTIAL_JSON), tagged
-      # `:requires_docker`. An absent-Docker run EXCLUDES them through ExUnit (a genuine skip in the
-      # summary, never a spurious pass); CI HAS Docker, so they must RUN here. If Docker were
-      # unavailable, `with_throwaway_mysql/2` raises and this step fails — a silently-untested run
-      # can never go green.
-      - name: Docker-gated marquees (throwaway containers)
-        run: mix test --only requires_docker
+      # Disposable-server marquees (the two gap-purge, compression, PARTIAL_JSON, the bootstrap
+      # purge race, the identity guard), tagged `:disposable_mysql`. A run that does not select the
+      # tag EXCLUDES them through ExUnit (a genuine skip, never a spurious pass); CI provides the
+      # server, so they must RUN here, and `with_disposable_mysql/2` raises if it is missing.
+      - name: Disposable-server marquees
+        run: mix test --only disposable_mysql
 
       # Enforces mix.exs's coverage threshold (Mix default 90) over the FULL exercised
       # surface — every tag, against the live substrate — with the test-support harness
       # excluded from the denominator (see test_coverage in mix.exs). A drop below the
       # threshold fails CI here, so the number stays honest.
       - name: Coverage (threshold-enforced, all tags)
-        run: mix test --cover --include integration --include live --include requires_docker
+        run: mix test --cover --include integration --include live --include disposable_mysql
 
       - name: Dialyzer
         run: mix dialyzer
 
       - name: Stop MySQL substrate
         if: always()
-        run: docker rm -f mysql-cdc-probe || true
+        run: docker rm -f mysql-cdc-probe capstan-disposable || true
 
   # The REFERENCE EXAMPLE (examples/replication_pipeline): a docker stack
   # (source MySQL → capstan release container → destination MySQL) that is the

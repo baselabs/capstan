@@ -14,10 +14,10 @@ defmodule Capstan.Integration.FailClosedTest do
       exposed a real assembler silent-loss defect (`XA START` misclassified as DDL,
       advancing the checkpoint past the XA GTID), now fixed in commit `3fe5e5a`.
 
-  The two THROWAWAY-container fail-closed shapes (`binlog_transaction_compression=ON` and the Q5
+  The two server-reconfiguring fail-closed shapes (`binlog_transaction_compression=ON` and the Q5
   `binlog_row_value_options=PARTIAL_JSON` precondition) live in
-  `Capstan.Integration.FailClosedDockerTest` (`:requires_docker`) so they are a genuine ExUnit
-  skip when Docker is absent — never a spurious pass.
+  `Capstan.Integration.FailClosedDisposableTest` (`:disposable_mysql`) so they are a genuine ExUnit
+  skip when no disposable server is configured — never a spurious pass.
 
   `:integration`-tagged. Never restarts or reconfigures the shared `mysql-cdc-probe`.
   """
@@ -219,11 +219,11 @@ defmodule Capstan.Integration.FailClosedTest do
   end
 end
 
-defmodule Capstan.Integration.FailClosedDockerTest do
+defmodule Capstan.Integration.FailClosedDisposableTest do
   @moduledoc """
   The THROWAWAY-container marquees — split from `Capstan.Integration.FailClosedTest`
-  because they require a purpose-configured `mysql:8.0` container the shared substrate
-  cannot provide:
+  because they reconfigure the server, which the shared substrate never allows; they run on the
+  disposable MySQL 8.0 (`CAPSTAN_DISPOSABLE_MYSQL_PORT`) with the variable set at runtime:
 
     * **`binlog_transaction_compression=ON`** → CONSUMED: the pipeline streams the
       compressed transactions, the pure-Elixir zstd decoder inflates each
@@ -233,16 +233,17 @@ defmodule Capstan.Integration.FailClosedDockerTest do
       precondition gate (`:binlog_row_value_options_not_empty`) before any dump, so a partial-JSON
       row image is never decoded.
 
-  `@moduletag :requires_docker`, so ExUnit EXCLUDES these (a genuine skip in the summary, never a
-  spurious pass) unless the run selects the tag. Run them with `mix test --only requires_docker`
-  (Docker required); `with_throwaway_mysql/2` raises a clear error if Docker is absent there.
+  `@moduletag :disposable_mysql`, so ExUnit EXCLUDES these (a genuine skip in the summary, never a
+  spurious pass) unless the run selects the tag. Run them with `mix test --only disposable_mysql`
+  and `CAPSTAN_DISPOSABLE_MYSQL_PORT` set (docs/testing.md); `with_disposable_mysql/2` raises
+  naming the variable when it is unset.
   """
   use ExUnit.Case, async: false
 
   alias Capstan.MysqlCase
   alias Capstan.MysqlCase.{SeededStore, Sink}
 
-  @moduletag :requires_docker
+  @moduletag :disposable_mysql
 
   setup do
     Sink.configure(%{pid: self()})
@@ -260,15 +261,20 @@ defmodule Capstan.Integration.FailClosedDockerTest do
     # (ADR-0011's consume arm). The marquee: DML committed under compression is
     # delivered to the sink with the exact row VALUES — the payload's inflated
     # inner events fold through the same assembler path as bare ones.
-    MysqlCase.with_throwaway_mysql(["--binlog-transaction-compression=ON"], fn port ->
+    MysqlCase.with_disposable_mysql([binlog_transaction_compression: "ON"], fn port ->
+      # Opened AFTER the global change, so the session inherits compression; asserted, not assumed.
       qconn = MysqlCase.socket!(MysqlCase.query_connection(port))
 
       try do
-        MysqlCase.run!(
-          qconn,
-          "CREATE TABLE IF NOT EXISTS probe_db.zcomp " <>
+        assert [["1"]] =
+                 MysqlCase.query_rows!(qconn, "SELECT @@SESSION.binlog_transaction_compression")
+
+        # The server outlives the marquee, so the table is recreated, never reused.
+        MysqlCase.run_all!(qconn, [
+          "DROP TABLE IF EXISTS probe_db.zcomp",
+          "CREATE TABLE probe_db.zcomp " <>
             "(id INT PRIMARY KEY, name VARCHAR(50), qty INT) ENGINE=InnoDB"
-        )
+        ])
 
         watermark = MysqlCase.read_gtid_executed!(qconn)
 
@@ -293,6 +299,11 @@ defmodule Capstan.Integration.FailClosedDockerTest do
         assert record["id"] == 1
         assert record["name"] == "zstd-one"
         assert record["qty"] == 10
+
+        # Non-vacuity: the delivered transaction really was compressed on the source.
+        [[binlog | _] | _] = MysqlCase.query_rows!(qconn, "SHOW MASTER STATUS")
+        events = MysqlCase.query_rows!(qconn, "SHOW BINLOG EVENTS IN '#{binlog}'")
+        assert Enum.any?(events, fn row -> Enum.at(row, 2) == "Transaction_payload" end)
       after
         MysqlCase.close!(qconn)
       end
@@ -300,11 +311,11 @@ defmodule Capstan.Integration.FailClosedDockerTest do
   end
 
   ## ---------------------------------------------------------------------------
-  ## binlog_row_value_options=PARTIAL_JSON → precondition refusal (Q5, throwaway)
+  ## binlog_row_value_options=PARTIAL_JSON → precondition refusal (Q5, disposable server)
   ## ---------------------------------------------------------------------------
 
   test "a PARTIAL_JSON substrate is refused at the precondition gate" do
-    MysqlCase.with_throwaway_mysql(["--binlog-row-value-options=PARTIAL_JSON"], fn port ->
+    MysqlCase.with_disposable_mysql([binlog_row_value_options: "PARTIAL_JSON"], fn port ->
       halts = MysqlCase.attach_halt_telemetry(self())
       on_exit(fn -> :telemetry.detach(halts) end)
 

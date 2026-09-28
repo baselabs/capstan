@@ -1,8 +1,8 @@
 defmodule Capstan.Integration.GapTest do
   @moduledoc """
   Live-substrate retention-gap marquees (plan Task 18, design F1/Q4) — BOTH directions of the
-  fail-closed gap gate, each against a THROWAWAY `mysql:8.0` container because `PURGE BINARY LOGS`
-  is server-wide and destroys binlog history other tests and fixtures depend on.
+  fail-closed gap gate, each against the disposable MySQL 8.0 because `PURGE BINARY LOGS` is
+  server-wide and destroys binlog history other tests and fixtures depend on.
 
     * **purge BELOW the checkpoint → the pipeline CONTINUES** — the purged range is already
       applied, so the unapplied remainder is intact; over-rejecting here is the false halt Q4
@@ -11,18 +11,19 @@ defmodule Capstan.Integration.GapTest do
       fell off the back of the log; continuing would silently skip it, so it halts fail-closed.
 
   These two are exact duals: each direction's non-vacuity mutation is the OTHER direction's purge.
-  Each spins its own container so its binlog state is clean and independent.
+  Each starts from a reset server (`with_disposable_mysql/2`: binlog and GTID history of a new
+  server), so its binlog state is clean and independent.
 
-  `:requires_docker`-tagged (every marquee here spins a throwaway container), so an absent-Docker
-  run EXCLUDES them through ExUnit — a genuine skip in the summary, never a spurious pass. Run
-  them with `mix test --only requires_docker` (Docker required).
+  `:disposable_mysql`-tagged, so a run that does not select the tag EXCLUDES them through ExUnit —
+  a genuine skip in the summary, never a spurious pass. Run them with
+  `mix test --only disposable_mysql` and `CAPSTAN_DISPOSABLE_MYSQL_PORT` set (docs/testing.md).
   """
   use ExUnit.Case, async: false
 
   alias Capstan.MysqlCase
   alias Capstan.MysqlCase.{SeededStore, Sink}
 
-  @moduletag :requires_docker
+  @moduletag :disposable_mysql
 
   test "purge BELOW the checkpoint: the pipeline continues past the gap" do
     with_gap_substrate(fn ctx ->
@@ -60,14 +61,14 @@ defmodule Capstan.Integration.GapTest do
   ## each isolated in its own binlog file so PURGE can target the boundary.
   ## ---------------------------------------------------------------------------
 
-  # `@moduletag :requires_docker` gates Docker availability at the ExUnit level (excluded when
-  # not selected), so this helper always runs the throwaway container; `with_throwaway_mysql`
-  # raises a clear error if Docker is somehow absent under an explicit `--only requires_docker`.
+  # `@moduletag :disposable_mysql` gates the disposable server at the ExUnit level (excluded when
+  # not selected); `with_disposable_mysql` raises naming CAPSTAN_DISPOSABLE_MYSQL_PORT when a run
+  # selects the tag without it.
   defp with_gap_substrate(body) do
     Sink.configure(%{pid: self()})
     on_exit(&Sink.clear/0)
 
-    MysqlCase.with_throwaway_mysql([], fn port ->
+    MysqlCase.with_disposable_mysql([], fn port ->
       qconn = MysqlCase.socket!(MysqlCase.query_connection(port))
 
       try do

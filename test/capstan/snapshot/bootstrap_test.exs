@@ -117,7 +117,7 @@ defmodule Capstan.Snapshot.BootstrapTest do
       MySQL server (the `Capstan.QueryTest` idiom) over a real loopback socket.
     * **Live** (`@tag :live`, `mix test --only live`) — the bootstrap marquee against
       `mysql-cdc-probe`: read `P0`, seed BOTH stores, return the readers + `processed_set = P0`.
-    * **Docker** (`@tag :requires_docker`) — retention purge racing the bootstrap: the seed leaves
+    * **Disposable server** (`@tag :disposable_mysql`) — retention purge racing the bootstrap: the seed leaves
       a stale-but-gapped checkpoint, so the EXISTING C1 gap gate fires `:data_gap` (tripwire 11).
   """
   use ExUnit.Case, async: false
@@ -559,17 +559,17 @@ defmodule Capstan.Snapshot.BootstrapTest do
   end
 
   ## ===========================================================================
-  ## Docker marquee — retention purge racing the bootstrap → :data_gap (tripwire 11)
+  ## Disposable-server marquee — retention purge racing the bootstrap → :data_gap (tripwire 11)
   ## ===========================================================================
 
-  describe "docker — retention purge racing the bootstrap" do
-    @describetag :requires_docker
+  describe "disposable server — retention purge racing the bootstrap" do
+    @describetag :disposable_mysql
 
     test "the seed leaves a stale-but-gapped checkpoint, so the C1 gap gate fires :data_gap" do
       SnapshotSink.configure(self())
       on_exit(&SnapshotSink.clear/0)
 
-      MysqlCase.with_throwaway_mysql([], fn port ->
+      MysqlCase.with_disposable_mysql([], fn port ->
         qconn = MysqlCase.socket!(MysqlCase.query_connection(port))
         grant_lock_tables!(qconn)
 

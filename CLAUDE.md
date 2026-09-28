@@ -9,7 +9,9 @@ Quick pointers:
 
 - **Local MySQL substrate:** the BaseLabs cluster (namespace `capstan`; 8.0 and 8.4 on `127.0.0.1`,
   ports from `.env`, `MYSQL_PORT_80`/`MYSQL_PORT_84` = 11619/15401, with the `capstan_sha2`
-  replication user). Never start a local MySQL; if a server is unreachable, stop and report it.
+  replication user). On the maintainer's machine never start a local MySQL; if a server is
+  unreachable, stop and report it. Destructive marquees (`:disposable_mysql`) use the disposable
+  MySQL 8.0 on `CAPSTAN_DISPOSABLE_MYSQL_PORT` (`docs/testing.md`).
 - **Gates:** `mix compile --warnings-as-errors && mix test && mix quality`.
 - **Scope / pickup:** [`docs/ROADMAP.md`](docs/ROADMAP.md) defines authored scope and
   acceptance. Current executable work uses the GitHub owner queue selected by
