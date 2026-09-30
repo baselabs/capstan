@@ -32,4 +32,19 @@ if config_env() in [:dev, :test] do
     # The disposable MySQL 8.0 the destructive (:disposable_mysql) marquees reset; unset (the
     # default) leaves those marquees unable to run, and they are excluded unless selected.
     disposable_port: env!("CAPSTAN_DISPOSABLE_MYSQL_PORT", :integer?, nil)
+
+  # ADR-0013: the Amazon Aurora MySQL cluster the `:aurora_mysql` marquees run against
+  # (excluded unless selected — like the disposable tier, never a silent pass). The base
+  # five keys are REQUIRED for that tier (MysqlCase.aurora_connection!/0 raises naming
+  # the missing ones); cluster_id/reader_host/misconfig are per-marquee prerequisites the
+  # marquee itself names. No value here is ever logged or telemetered (Rule 1).
+  config :capstan, :aurora_substrate,
+    host: env!("AURORA_MYSQL_HOST", :string, nil),
+    port: env!("AURORA_MYSQL_PORT", :integer?, nil),
+    user: env!("AURORA_MYSQL_USER", :string, nil),
+    password: env!("AURORA_MYSQL_PASSWORD", :string, nil),
+    ca_file: env!("AURORA_MYSQL_CA_FILE", :string, nil),
+    cluster_id: env!("AURORA_MYSQL_CLUSTER_ID", :string, nil),
+    reader_host: env!("AURORA_MYSQL_READER_HOST", :string, nil),
+    misconfig: env!("AURORA_MYSQL_MISCONFIG", :string, nil)
 end

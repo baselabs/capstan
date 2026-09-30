@@ -24,7 +24,7 @@ SELECT VERSION() AS mysql_version,
        @@global.super_read_only AS super_read_only,
        NOW() AS report_time;
 
-SELECT '== 1. CAPSTAN PRECONDITIONS (all five must PASS; checked again at every connect) ==' AS section;
+SELECT '== 1. CAPSTAN PRECONDITIONS (all six must PASS; checked again at every connect) ==' AS section;
 SELECT 'binlog_format' AS setting, @@global.binlog_format AS current_value, 'ROW' AS required,
        IF(@@global.binlog_format = 'ROW', 'PASS', 'FAIL') AS verdict
 UNION ALL
@@ -38,7 +38,13 @@ SELECT 'binlog_row_value_options', @@global.binlog_row_value_options, '(empty)',
        IF(@@global.binlog_row_value_options = '', 'PASS', 'FAIL')
 UNION ALL
 SELECT 'gtid_mode', @@global.gtid_mode, 'ON',
-       IF(@@global.gtid_mode = 'ON', 'PASS', 'FAIL');
+       IF(@@global.gtid_mode = 'ON', 'PASS', 'FAIL')
+UNION ALL
+-- log_bin is the binary log itself: ON SELF-MANAGED servers it catches --skip-log-bin;
+-- ON AURORA it is the ONLY variable that names a disabled binlog, because the cluster
+-- group's binlog_format=OFF leaves binlog_format reading ROW (ADR-0013).
+SELECT 'log_bin', @@global.log_bin, 'ON (1)',
+       IF(@@global.log_bin = 1, 'PASS', 'FAIL');
 
 -- Informational (NOT a precondition): compressed transactions are CONSUMED —
 -- capstan inflates TRANSACTION_PAYLOAD events itself (ADR-0011).
@@ -89,7 +95,7 @@ WHERE TABLE_SCHEMA NOT IN ('mysql', 'sys', 'information_schema', 'performance_sc
 GROUP BY DATA_TYPE
 ORDER BY columns_count DESC;
 
-SELECT 'columns capstan HALTS on today (SET, spatial) — each one blocks its table' AS census;
+SELECT 'columns decoded since C4a (SET members as text; spatial as raw SRID+WKB for the sink)' AS census;
 SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
 FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA NOT IN ('mysql', 'sys', 'information_schema', 'performance_schema')
@@ -122,7 +128,18 @@ WHERE t.TABLE_SCHEMA NOT IN ('mysql', 'sys', 'information_schema', 'performance_
   AND c.CONSTRAINT_NAME IS NULL
 ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME;
 
-SELECT '== 8. TLS AND AUTH ==' AS section;
+SELECT '== 8. AURORA (every statement here is skipped, with its own error, on a server that is not Aurora) ==' AS section;
+-- @@aurora_version exists only on Aurora MySQL; with --force the errors below ARE the
+-- "not Aurora" finding. Capstan itself is vendor-neutral — this section is operator
+-- diagnostics (ADR-0013): the cluster writer role, the binlog retention setting, and
+-- the instance server_ids a consumer's server_id must not collide with.
+SELECT @@aurora_version AS aurora_version,
+       @@aurora_server_id AS aurora_server_id,
+       @@innodb_read_only AS innodb_read_only,   -- ON means a READER: not a capstan source
+       @@server_uuid AS server_uuid;
+CALL mysql.rds_show_configuration;                -- binlog retention hours: NULL purges lazily (about a day)
+
+SELECT '== 9. TLS AND AUTH ==' AS section;
 SELECT @@global.require_secure_transport AS require_secure_transport,
        @@global.tls_version AS tls_version,
        @@global.character_set_server AS character_set_server;
@@ -130,7 +147,7 @@ SELECT VARIABLE_NAME, VARIABLE_VALUE
 FROM performance_schema.global_variables
 WHERE VARIABLE_NAME IN ('authentication_policy', 'default_authentication_plugin', 'have_ssl');
 
-SELECT '== 9. EXISTING DOWNSTREAM REPLICAS (capstan needs a server_id colliding with NONE of these) ==' AS section;
+SELECT '== 10. EXISTING DOWNSTREAM REPLICAS (capstan needs a server_id colliding with NONE of these; on Aurora run SHOW REPLICAS through the WRITER endpoint) ==' AS section;
 SHOW REPLICAS;
 
 SELECT '== DONE — see the questions below ==' AS section;

@@ -38,7 +38,12 @@ end
 
 MySQL requirements, checked at every connect (one query, distinct refusal per
 violation): `binlog_format=ROW`, `binlog_row_image=FULL`, `binlog_row_metadata=FULL`,
-`binlog_row_value_options=''` (full JSON), `gtid_mode=ON`. Run
+`binlog_row_value_options=''` (full JSON), `gtid_mode=ON`, `log_bin=ON` (the binary log
+enabled — on Aurora this is the one variable that names a disabled binlog, because
+`binlog_format` still reads `ROW` when the cluster group turns logging off; ADR-0013).
+Amazon Aurora MySQL version 3 through the cluster writer endpoint is a named, documented
+source ([ADR-0013](https://github.com/baselabs/capstan/blob/main/docs/adr/0013-aurora-mysql-source.md)).
+Run
 [`scripts/capstan-preflight.sql`](https://github.com/baselabs/capstan/blob/main/scripts/capstan-preflight.sql) against a
 prospective source for a read-only readiness report.
 

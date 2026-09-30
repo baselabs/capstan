@@ -36,9 +36,10 @@ defmodule Capstan.Connection do
   ## Lifecycle
 
       connect + auth  (via the injected connect_fun; default: gen_tcp + Handshake)
-        -> Config.check_preconditions/1        (fail-closed server gate, ADR-0002)
+        -> Config.check_preconditions/1        (fail-closed server gate, ADR-0002 + 0013)
         -> read @@gtid_executed / @@gtid_purged
         -> gap_check/3                          (proactive retention gap)
+        -> read @@server_uuid                   (source identity — ADR-0013 cycle reset)
         -> SET @master_binlog_checksum          (required BEFORE the dump)
         -> SET @master_heartbeat_period         (liveness — required BEFORE the dump)
         -> COM_BINLOG_DUMP_GTID                 (resume from the start position)
@@ -83,11 +84,16 @@ defmodule Capstan.Connection do
       transient pre-establish faults. Halts `:command_retries_exhausted` on the `max + 1`-th
       failure.
     * **Cycle counter**: counts **established-then-dropped** cycles. It is **NOT** reset
-      by frame arrival, and is reset only by clean shutdown. A duplicate `server_id`
-      makes MySQL evict this replica after each establish — authenticating and receiving
-      frames before dying — so a frame-reset counter would livelock
-      forever while emitting healthy `:established` telemetry. Halts `:server_id_conflict`
-      on the `max + 1`-th cycle.
+      by frame arrival, and is reset only by clean shutdown — or, since ADR-0013, by a
+      **server change**: a reconnect that passes `gap_check/3` while observing a
+      `@@server_uuid` DIFFERENT from the previous cycle's resets the counter to 0 (a
+      failover promoted a new writer — the drop was the failover's DNS change, not an
+      eviction), and the observed UUID becomes the comparison baseline. A cycle against
+      the SAME `@@server_uuid` still counts: a duplicate `server_id` makes MySQL evict
+      this replica after each establish — authenticating and receiving frames before
+      dying — so a frame-reset counter would livelock forever while emitting healthy
+      `:established` telemetry, and a uuid-reset would never fire (the evicting server's
+      UUID never changes). Halts `:server_id_conflict` on the `max + 1`-th cycle.
 
   ## Error 1236 is OVERLOADED (ADR-0003)
 
@@ -139,6 +145,7 @@ defmodule Capstan.Connection do
     :binlog_row_metadata_not_full,
     :binlog_row_value_options_not_empty,
     :gtid_mode_not_on,
+    :binlog_disabled,
     :precondition_query_failed
   ]
 
@@ -161,6 +168,9 @@ defmodule Capstan.Connection do
     :reader,
     :reconnect_timer,
     :liveness_timer,
+    # The previous cycle's @@server_uuid — structural identity (Rule-1-exempt, as
+    # Capstan.Query treats it), never in the Inspect allowlist above.
+    :server_uuid,
     command_failures: 0,
     cycle_count: 0,
     liveness_epoch: 0
@@ -412,6 +422,7 @@ defmodule Capstan.Connection do
     with :ok <- preconditions(state.socket),
          {:ok, executed, purged} <- gtid_sets(state.socket),
          :ok <- gap_check(executed, purged, state.checkpoint_str),
+         {:ok, state} <- track_source_identity(state),
          :ok <- maybe_xa_recover(state),
          :ok <- set_checksum(state.socket),
          :ok <- set_heartbeat(state.socket, state.heartbeat_period_ms),
@@ -420,6 +431,28 @@ defmodule Capstan.Connection do
     else
       {:halt, reason} -> halt(state, reason)
       {:command_error, _reason} -> note_command_failure(state)
+    end
+  end
+
+  # ADR-0013 §3 — a reconnect to a DIFFERENT server is a failover, not an eviction: a
+  # cluster endpoint's DNS change drops the socket, the promoted writer answers with its
+  # own @@server_uuid, and the established-then-dropped budget must not read that as a
+  # duplicate server_id. The read runs ONLY after gap_check/3 passed (a server whose
+  # executed set already fails the identity check halts there — a reset is moot on a
+  # halting establish), and only the SERVER CHANGED branch resets; a cycle against the
+  # same @@server_uuid (the eviction signature) keeps its count. The first establish
+  # merely records the baseline. Value-free by construction: @@server_uuid is structural
+  # identity, and a read fault spends the command budget as any establish fault does.
+  defp track_source_identity(%__MODULE__{} = state) do
+    case Config.read_server_uuid(state.socket) do
+      {:ok, uuid} when uuid == state.server_uuid ->
+        {:ok, state}
+
+      {:ok, uuid} ->
+        {:ok, %{state | server_uuid: uuid, cycle_count: 0}}
+
+      {:error, reason} ->
+        {:command_error, reason}
     end
   end
 

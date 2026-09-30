@@ -654,6 +654,51 @@ defmodule Capstan.MysqlCase do
   end
 
   ## ===========================================================================
+  ## ADR-0013: the Aurora source (the :aurora_mysql marquees)
+  ## ===========================================================================
+
+  @aurora_env_keys [
+    host: "AURORA_MYSQL_HOST",
+    port: "AURORA_MYSQL_PORT",
+    user: "AURORA_MYSQL_USER",
+    password: "AURORA_MYSQL_PASSWORD",
+    ca_file: "AURORA_MYSQL_CA_FILE"
+  ]
+
+  @doc """
+  The Aurora cluster WRITER endpoint connection (ADR-0013), built from the
+  `AURORA_MYSQL_*` environment (`config/runtime.exs` → `:aurora_substrate`): TLS with
+  the RDS CA bundle and hostname verification LEFT ON (the documented Aurora posture —
+  unlike the self-signed recipe, no `server_name_indication: :disable`) and the default
+  `caching_sha2_password` auth posture.
+
+  Raises naming every missing variable — an unset environment is an unconfigured
+  marquee, never a silent skip. The refusal carries variable NAMES only; the credential
+  value never reaches it, a log, or telemetry (Rule 1).
+  """
+  @spec aurora_connection!() :: keyword()
+  def aurora_connection! do
+    aurora = Application.get_env(:capstan, :aurora_substrate, [])
+
+    case for {key, env_name} <- @aurora_env_keys, is_nil(aurora[key]), do: env_name do
+      [] ->
+        [
+          host: aurora[:host],
+          port: aurora[:port],
+          username: aurora[:user],
+          password: aurora[:password],
+          ssl: true,
+          ssl_opts: [cacertfile: aurora[:ca_file]]
+        ]
+
+      missing ->
+        raise "capstan mysql_case: the :aurora_mysql marquees need " <>
+                "#{Enum.join(Enum.sort(missing), ", ")} (see .env.example); refusing to run " <>
+                "against nothing — an unset Aurora environment is an unconfigured marquee"
+    end
+  end
+
+  ## ===========================================================================
   ## C2 initial-snapshot marquee scaffolding (plan Task 11)
   ## ===========================================================================
 

@@ -15,9 +15,9 @@ defmodule Capstan.Config do
   byte-for-byte unchanged) and `read_server_uuid/1` (the source-identity read reused across
   BOTH connections, design Q-src / Ch8).
 
-  ## Server preconditions (ADR-0002)
+  ## Server preconditions (ADR-0002, extended by ADR-0013)
 
-  `check_preconditions/1` reads five global variables in a single query and refuses
+  `check_preconditions/1` reads six global variables in a single query and refuses
   with a DISTINCT reason per violation — degraded row decoding silently guesses
   column identity, so the gate fails closed rather than proceed:
 
@@ -27,6 +27,18 @@ defmodule Capstan.Config do
     * `binlog_row_value_options` must be empty (`""` = full JSON, not `PARTIAL_JSON`)
       — else `:binlog_row_value_options_not_empty`
     * `gtid_mode` must be `ON` — else `:gtid_mode_not_on`
+    * `log_bin` must be enabled (text `"1"`) — else `:binlog_disabled`
+
+  `log_bin` (ADR-0013) closes a hole the five-variable gate cannot see on managed
+  sources: AWS documents that an Aurora cluster group set `binlog_format=OFF` "disables
+  the `log_bin` session variable … which in turn resets the `binlog_format` session
+  variable to the default value of `ROW`" — so a binlog-disabled Aurora still answers
+  `binlog_format=ROW`, and only `log_bin` names the condition before the dump. On a
+  self-managed server the same check catches `--skip-log-bin`. A boolean flag's text
+  form over the simple-query protocol is `"1"`/`"0"` (OBSERVED live on MySQL 8.0.46;
+  `SHOW VARIABLES` renders `ON`/`OFF`, `SELECT @@log_bin` does not), so the enabled
+  literal is `"1"` — anything else, including a future engine's rendering, refuses
+  value-free with the variable's name in the reason.
 
   `binlog_transaction_compression` is deliberately NOT gated: compression is
   source-unilateral (a consumer cannot opt out; MySQL 8.0.20+) and capstan
@@ -76,7 +88,7 @@ defmodule Capstan.Config do
 
   @precondition_query "SELECT @@global.binlog_format, @@global.binlog_row_image, " <>
                         "@@global.binlog_row_metadata, @@global.binlog_row_value_options, " <>
-                        "@@global.gtid_mode"
+                        "@@global.gtid_mode, @@global.log_bin"
 
   @server_uuid_query "SELECT @@server_uuid"
 
@@ -149,13 +161,14 @@ defmodule Capstan.Config do
           mode: :lib_owned | :sink_owned
         }
 
-  @typedoc "A value-free precondition-gate refusal (ADR-0002)."
+  @typedoc "A value-free precondition-gate refusal (ADR-0002, extended by ADR-0013)."
   @type precondition_error ::
           :binlog_format_not_row
           | :binlog_row_image_not_full
           | :binlog_row_metadata_not_full
           | :binlog_row_value_options_not_empty
           | :gtid_mode_not_on
+          | :binlog_disabled
           | :precondition_query_failed
 
   @typedoc """
@@ -218,8 +231,9 @@ defmodule Capstan.Config do
   Reads the six server preconditions over `socket` and returns `:ok` iff all pass.
 
   Issues ONE `COM_QUERY` on the already-authenticated socket and compares each value
-  as text (ADR-0002). A wrong variable refuses with its distinct reason; a server or
-  transport error is surfaced fail-closed, never swallowed into a spurious `:ok`.
+  as text (ADR-0002; `log_bin` per ADR-0013). A wrong variable refuses with its
+  distinct reason; a server or transport error is surfaced fail-closed, never
+  swallowed into a spurious `:ok`.
   """
   @spec check_preconditions(Packet.socket()) ::
           :ok
@@ -236,7 +250,8 @@ defmodule Capstan.Config do
            binlog_row_image,
            binlog_row_metadata,
            binlog_row_value_options,
-           gtid_mode
+           gtid_mode,
+           log_bin
          ]
        ]} ->
         evaluate(
@@ -244,7 +259,8 @@ defmodule Capstan.Config do
           binlog_row_image,
           binlog_row_metadata,
           binlog_row_value_options,
-          gtid_mode
+          gtid_mode,
+          log_bin
         )
 
       {:ok, _unexpected} ->
@@ -324,13 +340,17 @@ defmodule Capstan.Config do
   ## ---------------------------------------------------------------------------
 
   # Every value is text; compare against the expected literal, never a typed term
-  # (replicant's A5 class). The first failing variable wins its distinct reason.
+  # (replicant's A5 class). The first failing variable wins its distinct reason. The
+  # five ADR-0002 refusals keep their names and order; log_bin (ADR-0013) evaluates
+  # LAST, so a server disabled in two ways still names the five-variable condition
+  # first. An enabled log_bin is the text "1" — see the moduledoc.
   defp evaluate(
          binlog_format,
          binlog_row_image,
          binlog_row_metadata,
          binlog_row_value_options,
-         gtid_mode
+         gtid_mode,
+         log_bin
        ) do
     cond do
       binlog_format != "ROW" -> {:error, :binlog_format_not_row}
@@ -338,6 +358,7 @@ defmodule Capstan.Config do
       binlog_row_metadata != "FULL" -> {:error, :binlog_row_metadata_not_full}
       binlog_row_value_options != "" -> {:error, :binlog_row_value_options_not_empty}
       gtid_mode != "ON" -> {:error, :gtid_mode_not_on}
+      log_bin != "1" -> {:error, :binlog_disabled}
       true -> :ok
     end
   end

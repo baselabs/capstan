@@ -156,6 +156,52 @@ Confidentiality without authentication is also an explicit choice:
 `ssl_opts: [verify: :verify_none]`. Either form or a plain connection — but
 never a silent default.
 
+## Amazon Aurora MySQL (version 3, the cluster writer endpoint)
+
+Aurora is a named source (ADR-0013). The three settings that differ from a
+self-managed server, and what each costs if skipped:
+
+1. **The binlog lives in the DB cluster parameter group** (`binlog_format=ROW`,
+   plus the same family as any MySQL source: `binlog_row_image=FULL`,
+   `binlog_row_metadata=FULL`, `gtid_mode=ON`, `enforce_gtid_consistency=ON`),
+   followed by a writer reboot. An instance-level group edit does nothing. With
+   the group's `binlog_format` left `OFF`, `binlog_format` still READS `ROW`
+   while `log_bin` is disabled — capstan's `log_bin` check refuses
+   `:binlog_disabled` at connect, which is exactly why it exists.
+2. **Retention is not a server variable**:
+   `CALL mysql.rds_set_configuration('binlog retention hours', N)` (read it back
+   with `CALL mysql.rds_show_configuration`). The default `NULL` purges lazily —
+   AWS documents the leftovers as "usually not longer than a day" — so set it
+   (the version 3 maximum is 2160 hours / 90 days) to cover your worst
+   acceptable pipeline downtime; a pause longer than the window halts
+   `:data_gap` on restart, and that halt is the correct outcome.
+3. **Connect to the cluster (writer) endpoint only.** Readers share the
+   parameter group and pass the value checks, but binary logs are served by the
+   writer alone.
+
+```elixir
+connection: [
+  host: "mydbcluster.cluster-c7tj4example.us-east-1.rds.amazonaws.com",
+  username: "capstan",
+  password: password,
+  ssl: true,
+  ssl_opts: [cacertfile: "/etc/myapp/global-bundle.pem"]   # the AWS RDS CA bundle
+]
+```
+
+Unlike the self-signed recipe above, hostname verification stays ON: Aurora's
+certificate chains to the AWS CA and names the endpoint host, so no
+`server_name_indication: :disable`. **First start:** prefer
+`start_position: :current` (or pre-seed the checkpoint from
+`SELECT @@global.gtid_executed`) — an empty checkpoint against Aurora's almost
+never-empty `gtid_purged` refuses `:data_gap` by design. **Failovers are not
+errors:** the endpoint's DNS change drops the socket, capstan reconnects to the
+promoted writer, the checkpoint set gains the new writer's UUID, and the
+established-then-dropped budget is reset (a failover is not a `server_id`
+conflict). If the old writer's GTIDs do not survive in the promoted writer's
+`gtid_executed`, the pipeline halts `:source_identity_mismatch` — re-seed the
+checkpoint rather than resume blindly.
+
 ## XA sources (two-phase transactions)
 
 XA-prepared rows must NEVER deliver as committed (they may still roll back).

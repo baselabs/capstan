@@ -6,6 +6,35 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — Amazon Aurora MySQL as a named source (ADR-0013); the gate gains `log_bin`
+
+- The connect-time precondition gate reads a SIXTH variable, `log_bin`, refusing
+  `:binlog_disabled` when the binary log itself is off. On self-managed servers this
+  catches `--skip-log-bin`; on Aurora it is the only variable that can: AWS documents
+  that a cluster group's `binlog_format=OFF` disables `log_bin` while `binlog_format`
+  still reads `ROW` — the five-variable gate provably cannot see that condition. The
+  enabled literal is the text `"1"` (a boolean flag's simple-query form — observed live
+  on MySQL 8.0.46 and 8.4.11; `SHOW VARIABLES` renders `ON`, `SELECT @@log_bin` does
+  not).
+- A failover is no longer counted toward `:server_id_conflict`: when a reconnect passes
+  the gap check and observes a DIFFERENT `@@server_uuid` (the promoted writer behind a
+  cluster endpoint — the Aurora failover shape), the established-then-dropped budget
+  resets; only cycles against the SAME `@@server_uuid` (the duplicate-`server_id`
+  eviction signature) still accumulate to the halt. The tracked UUID is structural
+  identity and never widens the `Connection` Inspect surface (Rule 1).
+- Amazon Aurora MySQL version 3 is a named, documented source: README, usage-rules,
+  `docs/recipes.md` (the cluster-parameter-group, retention-hours and writer-endpoint
+  recipe, TLS with the RDS CA bundle and hostname verification ON), and an Aurora
+  section in `scripts/capstan-preflight.sql` (guarded so it is skipped off Aurora).
+  ADR-0013's Aurora fact table is documentation-verified, with each remaining
+  live-probe question named. The library code itself stays vendor-neutral.
+- A tagged `:aurora_mysql` integration module (`test/integration/aurora_mysql_test.exs`,
+  excluded by default like `:disposable_mysql`) runs the ADR-0013 acceptance against a
+  real cluster through the `AURORA_MYSQL_*` environment (`.env.example` documents every
+  key). AUTHORED, NOT YET EXECUTED: no Aurora cluster exists for the repository today —
+  the run receipt (or the `ci/aurora/` workflow) is the outstanding half of the C7
+  roadmap row.
+
 ## [1.2.3] - 2026-08-24
 
 ### Fixed — every shipped doc's links resolve on hexdocs (doc sweep)

@@ -22,6 +22,22 @@ defmodule Capstan.ValueFreeTest do
     end
   end
 
+  describe "Rule 1 — structural identity never widens an Inspect surface" do
+    test "the Connection's tracked @@server_uuid (the ADR-0013 cycle reset) never renders" do
+      # The reset's previous-cycle UUID is structural identity (as Capstan.Query already
+      # treats it), not a row value — but the Connection struct's Inspect allowlist stays
+      # exactly its pre-reset fields, so an incidental inspect never carries it.
+      state =
+        struct(Capstan.Connection,
+          server_uuid: "3e11fa47-71ca-11e1-9e33-c80aa9429562",
+          connection: [password: "never-rendered"]
+        )
+
+      refute inspect(state) =~ "3e11fa47"
+      refute inspect(state) =~ "never-rendered"
+    end
+  end
+
   describe "Rule 1 — a planted sentinel survives no live pipeline output, log, or telemetry" do
     @describetag :live
 

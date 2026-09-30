@@ -17,6 +17,7 @@ context, the decision, and the consequences — including what was deliberately 
 | [0010](0010-exclusive-end-bound-of-com-binlog-dump-gtid.md) | The exclusive end bound of `COM_BINLOG_DUMP_GTID` — `high + 1` on the wire, probe-proven, tripwired live |
 | [0011](0011-transaction-compression-precondition.md) | Binary-log transaction compression is consumed by the in-library zstd decoder; the accepted amendment supersedes the original OFF precondition |
 | [0012](0012-collation-string-pk-weight-cursor.md) | Collation-ordered string PKs — the server as the only collation oracle; canonical weight bytes, a COLLATE-pinned dual cursor, resume-time weight recompute |
+| [0013](0013-aurora-mysql-source.md) | Amazon Aurora MySQL as a named source — the gate gains `log_bin`; a failover (`@@server_uuid` change) resets the cycle counter; every Aurora fact documentation-verified with the live-probe remainder named |
 
 A note on provenance markers: "Design refs" (`Q1`, `Q5`, `F6`, …) cite the numbered questions
 and findings of the pre-implementation design review, and "Task n" cites rows of the

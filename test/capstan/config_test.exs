@@ -352,41 +352,49 @@ defmodule Capstan.ConfigTest do
   end
 
   ## ---------------------------------------------------------------------------
-  ## Precondition gate (I/O) — the five variables, each a DISTINCT refusal (Q5)
+  ## Precondition gate (I/O) — the six variables, each a DISTINCT refusal (Q5, ADR-0013)
   ##
   ## The gate is fed a CONSTRUCTED text resultset over a mock socket — the required
   ## non-vacuity proof that each refusal can go RED (design § Tripwires). Every value
   ## on the wire is a TEXT STRING (MySQL simple-query results, replicant's A5 class);
-  ## an empty `binlog_row_value_options` arrives as "" (not nil, not 0).
+  ## an empty `binlog_row_value_options` arrives as "" (not nil, not 0), and an ENABLED
+  ## `log_bin` arrives as "1" — the boolean flag's text form (OBSERVED live on MySQL
+  ## 8.0.46; SHOW VARIABLES renders ON, SELECT @@ renders 1/0).
   ## ---------------------------------------------------------------------------
 
-  describe "check_preconditions/1 — fail-closed gate (Q5)" do
-    test "all five correct → :ok (empty binlog_row_value_options accepted as text)" do
-      assert :ok = check_result(["ROW", "FULL", "FULL", "", "ON"])
+  describe "check_preconditions/1 — fail-closed gate (Q5 + ADR-0013 log_bin)" do
+    test "all six correct → :ok (empty binlog_row_value_options and log_bin \"1\" as text)" do
+      assert :ok = check_result(["ROW", "FULL", "FULL", "", "ON", "1"])
+    end
+
+    test "log_bin disabled (\"0\") → :binlog_disabled" do
+      # ADR-0013: the Aurora-disabled binlog answers binlog_format=ROW (its documented
+      # OFF semantics) — log_bin is the one variable that names the condition pre-dump.
+      assert {:error, :binlog_disabled} = check_result(["ROW", "FULL", "FULL", "", "ON", "0"])
     end
 
     test "binlog_format ≠ ROW → :binlog_format_not_row" do
       assert {:error, :binlog_format_not_row} =
-               check_result(["STATEMENT", "FULL", "FULL", "", "ON"])
+               check_result(["STATEMENT", "FULL", "FULL", "", "ON", "1"])
     end
 
     test "binlog_row_image ≠ FULL → :binlog_row_image_not_full" do
       assert {:error, :binlog_row_image_not_full} =
-               check_result(["ROW", "MINIMAL", "FULL", "", "ON"])
+               check_result(["ROW", "MINIMAL", "FULL", "", "ON", "1"])
     end
 
     test "binlog_row_metadata ≠ FULL → :binlog_row_metadata_not_full" do
       assert {:error, :binlog_row_metadata_not_full} =
-               check_result(["ROW", "FULL", "MINIMAL", "", "ON"])
+               check_result(["ROW", "FULL", "MINIMAL", "", "ON", "1"])
     end
 
     test "binlog_row_value_options non-empty (PARTIAL_JSON) → :binlog_row_value_options_not_empty" do
       assert {:error, :binlog_row_value_options_not_empty} =
-               check_result(["ROW", "FULL", "FULL", "PARTIAL_JSON", "ON"])
+               check_result(["ROW", "FULL", "FULL", "PARTIAL_JSON", "ON", "1"])
     end
 
     test "gtid_mode ≠ ON → :gtid_mode_not_on" do
-      assert {:error, :gtid_mode_not_on} = check_result(["ROW", "FULL", "FULL", "", "OFF"])
+      assert {:error, :gtid_mode_not_on} = check_result(["ROW", "FULL", "FULL", "", "OFF", "1"])
     end
 
     test "a server error while reading the variables propagates fail-closed, never :ok" do
@@ -397,16 +405,16 @@ defmodule Capstan.ConfigTest do
       assert {:error, :precondition_query_failed} = ok_packet_result()
     end
 
-    test "a wrong-width resultset (a 4-column row) → :precondition_query_failed" do
+    test "a wrong-width resultset (a 5-column row: the pre-log_bin shape) → :precondition_query_failed" do
       assert {:error, :precondition_query_failed} =
-               resultset_result(4, [["ROW", "FULL", "FULL", ""]])
+               resultset_result(5, [["ROW", "FULL", "FULL", "", "ON"]])
     end
 
     test "a multi-row resultset → :precondition_query_failed" do
       assert {:error, :precondition_query_failed} =
                resultset_result(6, [
-                 ["ROW", "FULL", "FULL", "", "ON", "0"],
-                 ["ROW", "FULL", "FULL", "", "ON", "0"]
+                 ["ROW", "FULL", "FULL", "", "ON", "1"],
+                 ["ROW", "FULL", "FULL", "", "ON", "1"]
                ])
     end
   end
@@ -414,14 +422,14 @@ defmodule Capstan.ConfigTest do
   ## ---------------------------------------------------------------------------
   ## Precondition gate — live PASS against mysql-cdc-probe (Step 3)
   ##
-  ## The substrate has all five variables correct (ROW/FULL/FULL/''/ON). Excluded
-  ## from the default suite; run with `mix test --only live`.
+  ## The substrate has all six variables correct (ROW/FULL/FULL/''/ON/log_bin=1).
+  ## Excluded from the default suite; run with `mix test --only live`.
   ## ---------------------------------------------------------------------------
 
   describe "check_preconditions/1 — live PASS against mysql-cdc-probe" do
     @describetag :live
 
-    test "the substrate satisfies all five preconditions" do
+    test "the substrate satisfies all six preconditions" do
       socket = live_connect()
       assert :ok = Config.check_preconditions(socket)
       close(socket)

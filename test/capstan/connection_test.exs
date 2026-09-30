@@ -62,6 +62,15 @@ defmodule Capstan.ConnectionTest do
       checkpoint = "#{@uuid}:1-12,#{other}:1-6"
       assert :ok = Connection.gap_check(executed, purged, checkpoint)
     end
+
+    test "the failover shape — checkpoint under the OLD writer's UUID, executed carrying BOTH writers' — does NOT halt" do
+      # ADR-0013 (honoring ADR-0001): a failover promotes a new writer whose executed set
+      # carries both UUIDs; the checkpoint (the old writer's GTIDs) stays a subset, so the
+      # reconnect proceeds and the checkpoint set later gains the second source UUID.
+      promoted = "9f8b1e2c-0000-11e1-1111-c80aa9429562"
+      executed = "#{@uuid}:1-14,#{promoted}:1-8"
+      assert :ok = Connection.gap_check(executed, @purged, @checkpoint)
+    end
   end
 
   ## ---------------------------------------------------------------------------
@@ -142,11 +151,13 @@ defmodule Capstan.ConnectionTest do
         connect_fun: mock_connect_fun(port)
       )
 
-      # The command order on the wire: preconditions -> gtid read -> SET checksum -> SET
-      # heartbeat -> dump. Received in this exact order proves both SETs precede the dump (F4 +
-      # the liveness heartbeat period).
+      # The command order on the wire: preconditions -> gtid read -> source-identity read
+      # (ADR-0013 §3) -> SET checksum -> SET heartbeat -> dump. Received in this exact
+      # order proves the uuid read follows the gap check and both SETs precede the dump
+      # (F4 + the liveness heartbeat period).
       assert_receive {:server_recv, :preconditions}, 2000
       assert_receive {:server_recv, :gtid}, 2000
+      assert_receive {:server_recv, :server_uuid}, 2000
       assert_receive {:server_recv, :set}, 2000
       assert_receive {:server_recv, :heartbeat}, 2000
       assert_receive {:server_recv, :dump}, 2000
@@ -248,6 +259,10 @@ defmodule Capstan.ConnectionTest do
 
   ## ---------------------------------------------------------------------------
   ## Lifecycle — server_id conflict livelock (Q8 / C8)
+  ##
+  ## Also the SAME-uuid arm of the ADR-0013 cycle reset: this mock serves one fixed
+  ## @@server_uuid on every cycle, so the reset must NOT fire and the counter must
+  ## still accumulate to the halt.
   ## ---------------------------------------------------------------------------
 
   describe "lifecycle — a duplicate server_id livelock surfaces :server_id_conflict" do
@@ -286,6 +301,55 @@ defmodule Capstan.ConnectionTest do
       assert_receive {:binlog_event, "CYCLE-EVENT"}, 2000
       assert_receive {:capstan_halt, :server_id_conflict}, 2000
       refute_receive {:binlog_event, _}, 300
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## Lifecycle — a failover (different @@server_uuid) resets the cycle counter (ADR-0013 §3)
+  ## ---------------------------------------------------------------------------
+
+  describe "lifecycle — a failover resets the cycle counter; an eviction never does" do
+    test "a sequence of promoted writers streams indefinitely instead of halting :server_id_conflict" do
+      # The failover shape: every reconnect lands on a DIFFERENT server (a fresh
+      # @@server_uuid — the promoted writer), and every cycle ends with a drop (the
+      # endpoint's DNS change closes the socket). Without the uuid-aware reset the cycles
+      # accumulate: with max_command_retries: 1 the SECOND cycle halts
+      # :server_id_conflict — the misleading name ADR-0013 exists to remove. With the
+      # reset, each establish observes a changed server and the counter returns to 0.
+      counter = :counters.new(1, [:write_concurrency])
+
+      connect_fun = fn _connection ->
+        :counters.add(counter, 1, 1)
+        n = :counters.get(counter, 1)
+        uuid = "0000000f-0000-0000-0000-" <> String.pad_leading(Integer.to_string(n), 12, "0")
+
+        {port, _srv} =
+          start_mock_server(fn sock, inner ->
+            serve_full_establish(sock, @executed, @purged, inner, uuid)
+            stream_event(sock, "FAILOVER-EVENT", 1)
+          end)
+
+        {:ok, raw} = :gen_tcp.connect(@loopback, port, [:binary, active: false], 5000)
+        {:ok, {:gen_tcp, raw}, %{server_version: "mock", tls: false}}
+      end
+
+      start_conn(
+        server_id: 49,
+        connection: [],
+        max_command_retries: 1,
+        receiver: self(),
+        start_position: %Position{gtid_set: @checkpoint},
+        connect_fun: connect_fun,
+        reconnect_backoff: 20
+      )
+
+      # Four cycles across four different servers (RED without the reset: the second
+      # cycle's count of 2 > max 1 halts, so no third frame ever arrives).
+      assert_receive {:binlog_event, "FAILOVER-EVENT"}, 2000
+      assert_receive {:binlog_event, "FAILOVER-EVENT"}, 2000
+      assert_receive {:binlog_event, "FAILOVER-EVENT"}, 2000
+      assert_receive {:binlog_event, "FAILOVER-EVENT"}, 2000
+      refute_receive {:capstan_halt, _}, 300
     end
   end
 
@@ -452,7 +516,7 @@ defmodule Capstan.ConnectionTest do
           start_mock_server(fn sock, _inner ->
             # precondition resultset OK, then a MALFORMED gtid_executed the client will parse.
             {0, _precond} = recv_pkt(sock)
-            serve_resultset(sock, ["ROW", "FULL", "FULL", "", "ON"])
+            serve_resultset(sock, ["ROW", "FULL", "FULL", "", "ON", "1"])
             {0, _gtid} = recv_pkt(sock)
             serve_resultset(sock, ["!!not-a-valid-gtid!!", @purged])
             block_until_closed(sock)
@@ -750,10 +814,16 @@ defmodule Capstan.ConnectionTest do
   ## ---------------------------------------------------------------------------
 
   # Serves the full establish handshake: preconditions resultset -> gtid resultset ->
-  # SET OK -> reads the dump command. Reports each received command kind to `test` so
-  # the caller can assert the SET-before-dump ordering (F4).
-  defp serve_full_establish(sock, executed, purged, test) do
+  # source-identity resultset (ADR-0013 §3: the cycle-reset read) -> SET OKs -> reads the
+  # dump command. Reports each received command kind to `test` so the caller can assert
+  # the read-then-SET-before-dump ordering (F4). `uuid` is the @@server_uuid this mock
+  # server reports — a CONSTANT across cycles models one server (an eviction must count);
+  # a fresh value per cycle models a failover (the reset must fire).
+  defp serve_full_establish(sock, executed, purged, test, uuid \\ @uuid) do
     serve_through_gtid(sock, executed, purged, test)
+    {0, uuid_cmd} = recv_pkt(sock)
+    send(test, {:server_recv, classify_cmd(uuid_cmd)})
+    serve_resultset(sock, [uuid])
     # SET @master_binlog_checksum, then SET @master_heartbeat_period — BOTH precede the dump.
     {0, checksum_cmd} = recv_pkt(sock)
     send(test, {:server_recv, classify_cmd(checksum_cmd)})
@@ -767,11 +837,11 @@ defmodule Capstan.ConnectionTest do
   end
 
   # Serves only up to (and including) the gtid_executed/gtid_purged read — used by the
-  # gap-halt test, where the client halts before ever issuing the SET.
+  # gap-halt test, where the client halts before ever issuing the identity read or SET.
   defp serve_through_gtid(sock, executed, purged, test) do
     {0, precond_cmd} = recv_pkt(sock)
     send(test, {:server_recv, classify_cmd(precond_cmd)})
-    serve_resultset(sock, ["ROW", "FULL", "FULL", "", "ON"])
+    serve_resultset(sock, ["ROW", "FULL", "FULL", "", "ON", "1"])
     {0, gtid_cmd} = recv_pkt(sock)
     send(test, {:server_recv, classify_cmd(gtid_cmd)})
     serve_resultset(sock, [executed, purged])
@@ -786,6 +856,7 @@ defmodule Capstan.ConnectionTest do
       bin_contains?(sql, "SET @master_heartbeat_period") -> :heartbeat
       bin_contains?(sql, "binlog_format") -> :preconditions
       bin_contains?(sql, "gtid_executed") -> :gtid
+      bin_contains?(sql, "@@server_uuid") -> :server_uuid
       true -> :other_query
     end
   end

@@ -15,9 +15,9 @@ defmodule Capstan.Integration.FailClosedTest do
       advancing the checkpoint past the XA GTID), now fixed in commit `3fe5e5a`.
 
   The two server-reconfiguring fail-closed shapes (`binlog_transaction_compression=ON` and the Q5
-  `binlog_row_value_options=PARTIAL_JSON` precondition) live in
-  `Capstan.Integration.FailClosedDisposableTest` (`:disposable_mysql`) so they are a genuine ExUnit
-  skip when no disposable server is configured — never a spurious pass.
+  `binlog_row_value_options=PARTIAL_JSON` precondition) run through
+  `MysqlCase.with_disposable_mysql/2` (the disposable server), driven by this same tier when the
+  run provides `CAPSTAN_DISPOSABLE_MYSQL_PORT` (CI does).
 
   `:integration`-tagged. Never restarts or reconfigures the shared `mysql-cdc-probe`.
   """
@@ -126,6 +126,23 @@ defmodule Capstan.Integration.FailClosedTest do
     assert info.tls == true
     assert {:ok, tls_info} = :ssl.connection_information(ssl_socket, [:protocol])
     assert Keyword.get(tls_info, :protocol) in [:"tlsv1.2", :"tlsv1.3"]
+  end
+
+  ## ---------------------------------------------------------------------------
+  ## the six-variable precondition gate (ADR-0013) — live on the shared substrate
+  ## ---------------------------------------------------------------------------
+
+  test "the substrate answers all six preconditions healthy, log_bin as text \"1\"" do
+    # The gate's sixth variable (`log_bin`) is a boolean flag: its simple-query text form
+    # is "1"/"0" — NOT the ON/OFF that `SHOW VARIABLES` renders. This marquee pins the
+    # healthy form OBSERVED-live, so an engine whose rendering changes (one returning
+    # "ON") fails HERE, visibly, instead of as a fleet-wide :binlog_disabled refusal on
+    # healthy servers (the false-refusal failure mode of a guessed literal).
+    socket = MysqlCase.socket!(MysqlCase.query_connection())
+    on_exit(fn -> MysqlCase.close!(socket) end)
+
+    assert :ok = Capstan.Config.check_preconditions(socket)
+    assert [["1"]] = MysqlCase.query_rows!(socket, "SELECT @@global.log_bin")
   end
 
   ## ---------------------------------------------------------------------------

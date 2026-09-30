@@ -339,7 +339,10 @@ via `[:capstan, :connection, :halt]` / `[:capstan, :assembler, :halt]` telemetry
 
 **Server preconditions** (checked at every connect; a violation halts without retrying):
 `:binlog_format_not_row`, `:binlog_row_image_not_full`, `:binlog_row_metadata_not_full`,
-`:binlog_row_value_options_not_empty`, `:gtid_mode_not_on`, `:precondition_query_failed`.
+`:binlog_row_value_options_not_empty`, `:gtid_mode_not_on`, `:binlog_disabled` (the binary
+log itself is off — on Aurora the documented way this happens leaves `binlog_format`
+reading `ROW`, so `log_bin` is the variable that names it; ADR-0013),
+`:precondition_query_failed`.
 
 **Compressed transactions are consumed.** `binlog_transaction_compression=ON` sources stream
 normally: each `TRANSACTION_PAYLOAD` event is inflated by capstan's in-library pure-Elixir
@@ -366,7 +369,12 @@ with it).
   case above). Re-seed or reprovision; resuming would silently skip transactions.
 - `:source_identity_mismatch` — the checkpoint carries GTIDs this server never executed;
   almost always a checkpoint pointed at the wrong server.
-- `:server_id_conflict` — another replica with the same `server_id` is attached.
+- `:server_id_conflict` — another replica with the same `server_id` is attached. A
+  **failover is not counted toward it**: when a reconnect observes a different
+  `@@server_uuid` (the promoted writer behind a cluster endpoint — the Aurora shape,
+  ADR-0013) and the gap check passes, the established-then-dropped budget resets; only
+  cycles against the SAME `@@server_uuid` (the eviction signature) accumulate to this
+  halt.
 - `:stream_stalled` — a persistent network partition outlived the liveness reconnect budget.
 - `:command_retries_exhausted` — pre-establish failures (connect/auth/query) exceeded
   `max_command_retries`.
@@ -470,6 +478,7 @@ binlog_row_image              = FULL
 binlog_row_metadata           = FULL
 binlog_row_value_options      = ''   # PARTIAL_JSON is refused — it emits JSON diffs, not values
 gtid_mode                     = ON
+log_bin                       = enabled   # the binary log itself; see ADR-0013 for the Aurora case
 ```
 
 `binlog_transaction_compression` may be either OFF or ON: compression is source-unilateral

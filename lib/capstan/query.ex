@@ -28,7 +28,7 @@ defmodule Capstan.Query do
 
   ## Preconditions (ADR-0002, extended)
 
-  `establish/1` reuses `Capstan.Config.check_preconditions/1` on the query socket: the five
+  `establish/1` reuses `Capstan.Config.check_preconditions/1` on the query socket: the six
   binlog variables gate the query connection exactly as they gate the stream, because
   `binlog_row_image = FULL` is a HARD reconciliation dependency (a partial after-image would
   make a stream-delivered change unable to stand in for a suppressed chunk row). A precondition
@@ -71,6 +71,7 @@ defmodule Capstan.Query do
     :binlog_row_metadata_not_full,
     :binlog_row_value_options_not_empty,
     :gtid_mode_not_on,
+    :binlog_disabled,
     :precondition_query_failed
   ]
 
