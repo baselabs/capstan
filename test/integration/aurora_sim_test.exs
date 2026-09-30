@@ -327,9 +327,13 @@ defmodule Capstan.Integration.AuroraSimTest do
 
     IO.puts("[aurora-sim-receipt] snapshot across failover: #{inspect(outcome)}")
 
-    if {:halted, _} = outcome do
-      MysqlCase.stop_pipeline(sup)
-      _sup2 = start_pipeline.()
+    case outcome do
+      {:halted, _reason} ->
+        MysqlCase.stop_pipeline(sup)
+        _sup2 = start_pipeline.()
+
+      :completed_in_place ->
+        :ok
     end
 
     assert_receive {:snapshot_event, :completed, %{}, %{}}, 600_000
