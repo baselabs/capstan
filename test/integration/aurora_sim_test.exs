@@ -72,10 +72,13 @@ defmodule Capstan.Integration.AuroraSimTest do
     run!(reader, "SET GLOBAL super_read_only = ON")
 
     # The role shapes ARE the simulator's contract — a node that comes up in the wrong
-    # role is a broken harness, and every marquee below would lie.
-    assert [["0", "1"]] = query!(writer, "SELECT @@innodb_read_only, @@global.log_bin")
-    assert [["1", "1"]] = query!(promotable, "SELECT @@innodb_read_only, @@global.log_bin")
-    assert [["1", "0"]] = query!(reader, "SELECT @@innodb_read_only, @@global.log_bin")
+    # role is a broken harness, and every marquee below would lie. The read-only side of
+    # the shape is @@global.super_read_only: it is the DYNAMIC variable the posture above
+    # sets (read_only follows it; @@innodb_read_only is static, startup-only — Aurora sets
+    # it on readers, stock MySQL does not).
+    assert [["0", "1"]] = query!(writer, "SELECT @@global.super_read_only, @@global.log_bin")
+    assert [["1", "1"]] = query!(promotable, "SELECT @@global.super_read_only, @@global.log_bin")
+    assert [["1", "0"]] = query!(reader, "SELECT @@global.super_read_only, @@global.log_bin")
     assert :ok = Capstan.Config.check_preconditions(writer)
 
     # Wire the GTID replica chain (idempotent): promotable and reader follow the writer.
