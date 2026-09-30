@@ -17,8 +17,11 @@ Elixir `~> 1.15`.
 **Current state:** C1 (streaming spine), C2 (initial snapshot), C3 (batching),
 C4a/C4b (type breadth + compressed-transaction consumption), the C1a/C1b
 position-ownership/start-position rows, C2a (collation-ordered string PKs),
-C2b/C2c (`tables: :all` resolution + zero-row completion), and XA `:track` are
-implemented and released as `capstan` 1.2.3 (1.1.1 carried C1+C2; the 1.2.0
+C2b/C2c (`tables: :all` resolution + zero-row completion), XA `:track`, and the C7
+code half (ADR-0013: the six-variable gate, the failover-aware cycle reset, Aurora as
+a named source with the `:aurora_mysql` cluster tier and the local `:aurora_sim`
+simulator tier — `scripts/aurora-sim/`) are implemented; 1.2.3 is the latest release,
+the Aurora work ships in 1.3.0 (1.1.1 carried C1+C2; the 1.2.0
 span is additive; 1.2.1–1.2.3 are test-suite and docs hardening — see
 CHANGELOG). `examples/replication_pipeline/` is the durable reference docker
 stack (repo-side, CI-gated as the public sink API canary). Omitting
@@ -39,12 +42,15 @@ retained), (d) the **connection password**. Column names stay **strings** — ne
 (a wide or attacker-influenced schema would exhaust the atom table). Telemetry metadata is
 allowlisted (GTIDs, table names, counts, durations, error classes — never values).
 
-**2. Fail closed on server preconditions (design Q5).** Refuse to start unless the source's
-row-image binlog is configured for lossless CDC. The precondition gate checks **five** variables and
-refuses with a distinct reason per failure: `binlog_format=ROW`, `binlog_row_image=FULL`,
-`binlog_row_metadata=FULL`, `binlog_row_value_options=''` (full JSON, not PARTIAL_JSON),
-`gtid_mode=ON`. (`enforce_gtid_consistency=ON` is also required on the server and the dev substrate
-sets it; the Q5 gate itself checks the five above.) Simple-query results are all **strings** — coerce
+**2. Fail closed on server preconditions (design Q5; extended by ADR-0013).** Refuse to start
+unless the source's row-image binlog is configured for lossless CDC. The precondition gate checks
+**six** variables and refuses with a distinct reason per failure: `binlog_format=ROW`,
+`binlog_row_image=FULL`, `binlog_row_metadata=FULL`, `binlog_row_value_options=''` (full JSON, not
+PARTIAL_JSON), `gtid_mode=ON`, `log_bin=ON` (the binary log itself — text `"1"` over the protocol;
+on Aurora this is the one variable that names a disabled binlog, because `binlog_format` still
+reads `ROW` when the cluster group turns logging off; refusal `:binlog_disabled`).
+(`enforce_gtid_consistency=ON` is also required on the server and the dev substrate
+sets it; the Q5 gate itself checks the six above.) Simple-query results are all **strings** — coerce
 every value as text before comparing. `binlog_transaction_compression` is deliberately **not**
 gated: compressed transactions are **consumed** — the in-library pure-Elixir zstd decoder inflates
 each `TRANSACTION_PAYLOAD` event byte-exactly (ADR-0011's consume arm); a malformed or non-ZSTD
@@ -112,6 +118,11 @@ Per-file floor on every touched file, **prod AND test**: format, compile (warnin
 - **Fail-closed properties get tripwire tests** — the protected mutation itself, proven RED first
   (rename the key, fabricate the foreign `table_id`, tamper a CRC byte, feed a purged range). A suite
   of happy paths passing green over a broken contract is the failure mode to avoid.
+- **Managed-source tiers** (`test/integration/aurora_*`, `:aurora_mysql`/`:aurora_sim`-tagged,
+  excluded by default): the Aurora cluster tier runs only against a real cluster via the
+  `AURORA_MYSQL_*` environment; the simulator tier runs against the local
+  `scripts/aurora-sim/` stack (real MySQL nodes behind a flipping endpoint — no AWS account).
+  Both fail loudly when their environment is absent, never a silent pass.
 
 ## Local substrate
 

@@ -91,8 +91,15 @@ Name Aurora MySQL version 3 as a supported source, with these additions and rule
 
 ## Testing and what is documented as supported
 
-- The proof is a real Aurora MySQL version 3 cluster. No mock, no stand-in MySQL 8.0 configured
-  to look like Aurora, no canned failover. Two acceptable forms, in order of preference:
+- The proof of the **failover CONTRACT** (the endpoint flip, the promoted writer's
+  `gtid_executed` union, the cycle reset, the reader refusal) runs on REAL MySQL with no AWS
+  account: `scripts/aurora-sim/` (three MySQL 8.0 nodes behind an HAProxy endpoint the
+  `:aurora_sim` tier flips through its admin socket — real binlogs, real GTID promotion, no
+  canned responses). That arm verifies capstan's behavior; it does not verify Aurora's engine,
+  and its receipts are labeled simulator-observed, never OBSERVED-on-Aurora.
+- The proof of **Aurora itself** is a real Aurora MySQL version 3 cluster. No mock, no stand-in
+  MySQL 8.0 configured to look like Aurora, no canned failover. Two acceptable forms, in order
+  of preference:
   1. a tagged `:aurora_mysql` integration module (excluded by default, like `:disposable_mysql`)
      that reads endpoint, port, user, password and CA path from the environment
      (`AURORA_MYSQL_*`, listed in `.env.example` with empty values), runs on a cluster the
@@ -206,6 +213,16 @@ whether an enhanced-binlog writer's event bytes decode identically. None of thes
 yet: no Aurora cluster exists for this repository today, and the module and receipt this ADR
 names are the instruments that turn them. The live run is the maintainer's cost decision
 (CI-created cluster or out-of-suite receipt).
+
+**Simulator arm (added 2026-09-29, owner decision: no AWS subscription yet).** The harness is
+committed (`scripts/aurora-sim/`: writer, promotable read-only GTID replica with binlog ON,
+read-only reader with binlog OFF, HAProxy endpoint with a TCP admin socket) and its tier is
+`test/integration/aurora_sim_test.exs` (`:aurora_sim`, excluded by default). It proves on real
+MySQL: the reader-endpoint refusal arm of decision 1 (the five value variables pass, `log_bin`
+reads disabled, the gate refuses `:binlog_disabled` before the dump), two back-to-back
+failovers on `max_command_retries: 1` with loss 0 (the live red proof of the cycle reset), both
+writers' UUIDs in the checkpoint set, and the snapshot-across-failover halt-and-resume. The
+Aurora-INFERRED rows stay INFERRED — only a real cluster turns them OBSERVED.
 
 **OBSERVED on real (non-Aurora) MySQL during the 2026-09-29 build** (in-cluster throwaway
 servers built to `docs/testing.md`'s substrate flags, driven through capstan's own protocol

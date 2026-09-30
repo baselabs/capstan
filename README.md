@@ -42,7 +42,9 @@ violation): `binlog_format=ROW`, `binlog_row_image=FULL`, `binlog_row_metadata=F
 enabled — on Aurora this is the one variable that names a disabled binlog, because
 `binlog_format` still reads `ROW` when the cluster group turns logging off; ADR-0013).
 Amazon Aurora MySQL version 3 through the cluster writer endpoint is a named, documented
-source ([ADR-0013](https://github.com/baselabs/capstan/blob/main/docs/adr/0013-aurora-mysql-source.md)).
+source ([ADR-0013](https://github.com/baselabs/capstan/blob/main/docs/adr/0013-aurora-mysql-source.md)),
+and its failover contract is verifiable locally with no AWS account — three real MySQL
+nodes behind a flipping endpoint: [`scripts/aurora-sim`](https://github.com/baselabs/capstan/blob/main/scripts/aurora-sim/docker-compose.yml).
 Run
 [`scripts/capstan-preflight.sql`](https://github.com/baselabs/capstan/blob/main/scripts/capstan-preflight.sql) against a
 prospective source for a read-only readiness report.

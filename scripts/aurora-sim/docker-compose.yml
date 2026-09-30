@@ -1,0 +1,128 @@
+# capstan aurora-sim — verify the Aurora failover contract WITHOUT an AWS account.
+#
+# Real MySQL 8.0 servers and real binlogs/GTIDs — no mocks, no canned responses. What
+# it reproduces is the CLUSTER BEHAVIOR capstan depends on (ADR-0013), on your machine:
+#
+#   * an "endpoint" (HAProxy) that always points at the current writer and drops every
+#     open connection when a failover flips it — the cluster-endpoint contract;
+#   * a promotable GTID replica (read-only, binlog ON) that takes over on failover —
+#     its gtid_executed carries BOTH writers' UUIDs, exactly the promoted-writer
+#     continuity the ADR's failover acceptance names;
+#   * a "reader" (read-only, binlog OFF) that answers the gate's five value variables
+#     from the same configuration but refuses the dump — the reader-endpoint contract.
+#
+# ```bash
+#   docker compose -f scripts/aurora-sim/docker-compose.yml up -d
+#   # ~40s for first init, then:
+#   mix test --only aurora_sim
+#   docker compose -f scripts/aurora-sim/docker-compose.yml down -v
+# ```
+#
+# The `:aurora_sim` tier wires the replica chain itself in setup_all and drives the
+# failovers through HAProxy's admin socket; the ports it reads are in .env.example
+# (AURORA_SIM_*). It proves capstan's failover behavior on real MySQL; it does NOT
+# prove Aurora-specific engine behavior (the cluster parameter group's OFF semantics,
+# @@aurora_version, enhanced binlog) — those stay documented in ADR-0013 until a real
+# cluster run.
+
+services:
+  writer:
+    image: mysql:8.0
+    command:
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-row-metadata=FULL
+      - --binlog-row-value-options=
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --server-id=1
+      - --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: probe
+      MYSQL_DATABASE: probe_db
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d:ro
+      - writer-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pprobe"]
+      interval: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:37524:3306"
+
+  promotable:
+    image: mysql:8.0
+    command:
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-row-metadata=FULL
+      - --binlog-row-value-options=
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --log-replica-updates=ON
+      - --read-only=ON
+      - --super-read-only=ON
+      - --server-id=2
+      - --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: probe
+      MYSQL_DATABASE: probe_db
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d:ro
+      - promotable-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pprobe"]
+      interval: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:37525:3306"
+
+  reader:
+    # The "reader endpoint": read-only, binlog OFF. Answers the gate's five value
+    # variables from the same flags but log_bin reads 0 — the gate refuses
+    # :binlog_disabled, ADR-0013 decision 1's "reader reports log_bin = OFF" arm.
+    image: mysql:8.0
+    command:
+      - --skip-log-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-row-metadata=FULL
+      - --binlog-row-value-options=
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --read-only=ON
+      - --super-read-only=ON
+      - --server-id=3
+      - --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: probe
+      MYSQL_DATABASE: probe_db
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d:ro
+      - reader-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pprobe"]
+      interval: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:37527:3306"
+
+  endpoint:
+    # The "cluster endpoint": one frontend over the writer backend; the admin socket
+    # on 37528 is how the test tier flips the failover target at runtime.
+    image: haproxy:3.1
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      writer:
+        condition: service_healthy
+      promotable:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:37521:3306"
+      - "127.0.0.1:37528:9999"
+
+volumes:
+  writer-data:
+  promotable-data:
+  reader-data:

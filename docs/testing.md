@@ -85,6 +85,8 @@ The gate is `mix compile --warnings-as-errors && mix test && mix quality`.
 | `mix test --only live` | live marquees — real protocol, exact-`G` capture, snapshot paging | the substrate up |
 | `mix test --only integration` | end-to-end pipeline marquees (kill/restart, effect-once, fail-closed) | the substrate up |
 | `mix test --only disposable_mysql` | destructive marquees (gap purge, bootstrap purge race, compression, PARTIAL_JSON, the disposable guard) | the disposable server, `CAPSTAN_DISPOSABLE_MYSQL_PORT` set |
+| `mix test --only aurora_sim` | the Aurora-failover simulator marquees (ADR-0013: reader refusal, two failovers with loss 0, snapshot-across-failover) | `scripts/aurora-sim/` up (below) |
+| `mix test --only aurora_mysql` | the Aurora cluster marquees against a real cluster (ADR-0013's receipt form) | a real Aurora MySQL v3 cluster + the `AURORA_MYSQL_*` env |
 | `mix quality` | `format --check-formatted` + `credo --strict` + `dialyzer` | nothing |
 
 **Ordering caveat:** `--only live` and `--only integration` share one substrate. The live exact-`G`
@@ -97,3 +99,27 @@ hit that. CI runs `live` and then `integration` against the same container.
 
 [`examples/print_consumer.exs`](../examples/print_consumer.exs) is a minimal consumer you can run
 against the substrate to watch changes stream — see [`examples/README.md`](../examples/README.md).
+
+## The Aurora failover simulator (`:aurora_sim`)
+
+The Aurora-specific behaviors capstan cares about (ADR-0013) are reproducible locally on REAL
+MySQL — no AWS account: three MySQL 8.0 nodes (a writer; a promotable read-only GTID replica
+with binlog ON; a "reader" that is read-only with binlog OFF) behind an HAProxy "cluster
+endpoint" whose target the tests flip through its admin socket. That is the wire-level
+contract: the endpoint drops every connection on a flip, the promoted node's `gtid_executed`
+carries both writers' UUIDs, and the reader passes the gate's five value variables while
+`log_bin` names its condition (`:binlog_disabled`).
+
+```bash
+docker compose -f scripts/aurora-sim/docker-compose.yml up -d   # ~40s first init
+mix test --only aurora_sim
+docker compose -f scripts/aurora-sim/docker-compose.yml down -v
+```
+
+The ports default to the compose stack's (`AURORA_SIM_*` in `.env.example` overrides). What
+this tier does NOT claim: Aurora engine behavior (the cluster parameter group's OFF semantics,
+`@@aurora_version`, enhanced binlog) — those stay documented in ADR-0013 until a real cluster
+run, which is what the `:aurora_mysql` tier (same ADR) is for: it runs the same contract
+against a real Aurora MySQL version 3 cluster through the `AURORA_MYSQL_*` environment, one
+scenario at a time (the healthy cluster and each `AURORA_MYSQL_MISCONFIG` re-parameterization),
+and its run log IS the committed receipt (`test/receipts/aurora-mysql-<date>.md`).

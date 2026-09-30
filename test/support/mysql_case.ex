@@ -105,13 +105,16 @@ defmodule Capstan.MysqlCase do
   ## ---------------------------------------------------------------------------
 
   @doc """
-  Opens a live connection to `conn`, returning `{socket, handshake_info}` — the authenticated,
-  transport-tagged `Capstan.Protocol.Packet.socket` plus the negotiated handshake result (which
-  carries `:tls`). Raises on any handshake failure.
+  Opens a live connection to `conn` at ITS OWN `host:` (default `#{@host}`), returning
+  `{socket, handshake_info}` — the authenticated, transport-tagged
+  `Capstan.Protocol.Packet.socket` plus the negotiated handshake result (which carries
+  `:tls`). Raises on any handshake failure. `connect!/1` is this with the local
+  substrate host forced; the remote-source marquees (Aurora, aurora-sim) pass their own
+  `host:`.
   """
-  @spec connect!(keyword()) :: {Packet.socket(), map()}
-  def connect!(conn) do
-    host = @host |> String.to_charlist()
+  @spec connect_at!(keyword()) :: {Packet.socket(), map()}
+  def connect_at!(conn) do
+    host = conn |> Keyword.get(:host, @host) |> String.to_charlist()
     port = Keyword.fetch!(conn, :port)
     {:ok, raw} = :gen_tcp.connect(host, port, [:binary, active: false], @connect_timeout)
 
@@ -120,6 +123,15 @@ defmodule Capstan.MysqlCase do
       {:error, reason} -> raise "capstan mysql_case: handshake failed #{inspect(reason)}"
     end
   end
+
+  @doc """
+  Opens a live connection to `conn` on the LOCAL substrate host (`127.0.0.1`), returning
+  `{socket, handshake_info}` — the authenticated, transport-tagged
+  `Capstan.Protocol.Packet.socket` plus the negotiated handshake result (which carries
+  `:tls`). Raises on any handshake failure.
+  """
+  @spec connect!(keyword()) :: {Packet.socket(), map()}
+  def connect!(conn), do: connect_at!(Keyword.put_new(conn, :host, @host))
 
   @doc "Opens a live query socket and returns only the socket (the common case)."
   @spec socket!(keyword()) :: Packet.socket()
@@ -654,7 +666,8 @@ defmodule Capstan.MysqlCase do
   end
 
   ## ===========================================================================
-  ## ADR-0013: the Aurora source (the :aurora_mysql marquees)
+  ## ADR-0013: the Aurora source (the :aurora_mysql marquees) and its local
+  ## simulator (the :aurora_sim marquees, scripts/aurora-sim/)
   ## ===========================================================================
 
   @aurora_env_keys [

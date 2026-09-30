@@ -19,7 +19,6 @@ defmodule Capstan.Integration.AuroraMysqlMisconfigTest do
 
   alias Capstan.MysqlCase
   alias Capstan.MysqlCase.{SeededStore, Sink}
-  alias Capstan.Protocol.Handshake
 
   @moduletag :aurora_mysql
   @moduletag timeout: 300_000
@@ -92,16 +91,7 @@ defmodule Capstan.Integration.AuroraMysqlMisconfigTest do
   ## helpers (the same host-aware connect + loud setting read as the healthy module)
   ## ---------------------------------------------------------------------------
 
-  defp aurora_socket!(conn) do
-    host = conn[:host] |> String.to_charlist()
-
-    {:ok, raw} = :gen_tcp.connect(host, conn[:port], [:binary, active: false], 20_000)
-
-    case Handshake.connect({:gen_tcp, raw}, conn) do
-      {:ok, %{socket: socket}} -> socket
-      {:error, reason} -> raise "capstan aurora_mysql_test: connect failed #{inspect(reason)}"
-    end
-  end
+  defp aurora_socket!(conn), do: MysqlCase.connect_at!(conn) |> elem(0)
 
   defp aurora_setting!(key) do
     env_name = "AURORA_MYSQL_" <> (key |> Atom.to_string() |> String.upcase())

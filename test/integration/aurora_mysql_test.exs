@@ -38,7 +38,6 @@ defmodule Capstan.Integration.AuroraMysqlTest do
   alias Capstan.Gtid
   alias Capstan.MysqlCase
   alias Capstan.MysqlCase.{DurableStore, SeededStore, Sink}
-  alias Capstan.Protocol.Handshake
 
   @moduletag :aurora_mysql
   # Failovers and their reconnects run in minutes, not the 60s ExUnit default; the
@@ -495,18 +494,9 @@ defmodule Capstan.Integration.AuroraMysqlTest do
   ## helpers
   ## ---------------------------------------------------------------------------
 
-  # `MysqlCase.connect!/1` targets the LOCAL substrate host by construction; the Aurora
-  # marquee needs the cluster endpoint; so the module owns its host-aware connect.
-  defp aurora_socket!(conn) do
-    host = conn[:host] |> String.to_charlist()
-
-    {:ok, raw} = :gen_tcp.connect(host, conn[:port], [:binary, active: false], 20_000)
-
-    case Handshake.connect({:gen_tcp, raw}, conn) do
-      {:ok, %{socket: socket}} -> socket
-      {:error, reason} -> raise "capstan aurora_mysql_test: connect failed #{inspect(reason)}"
-    end
-  end
+  # The Aurora marquee connects at the cluster endpoint host (not the local substrate
+  # 127.0.0.1) — `connect_at!/1` honors `conn[:host]`.
+  defp aurora_socket!(conn), do: MysqlCase.connect_at!(conn) |> elem(0)
 
   # A prerequisite setting with a loud, named failure — never a silent skip. The
   # `AURORA_MYSQL_*` values ride through `config/runtime.exs` (Dotenvy does not export

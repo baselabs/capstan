@@ -22,7 +22,7 @@ Give it ~30 seconds to initialise, then run the cells top to bottom.
 
 ```elixir
 Mix.install([
-  {:capstan, "~> 1.1"},
+  {:capstan, "~> 1.3"},
   {:myxql, "~> 0.7"}
 ])
 ```
@@ -190,8 +190,21 @@ docker rm -f capstan-intro
 
 - [usage-rules](https://hexdocs.pm/capstan/usage-rules.html) — the full consumer contract:
   delivery guarantees, dedup, checkpoint semantics, telemetry, and every fail-closed halt.
+- [recipes](https://hexdocs.pm/capstan/recipes.html) — production recipes, including the
+  Amazon Aurora MySQL one: the cluster parameter group, `binlog retention hours`, the writer
+  endpoint, and TLS with the AWS CA bundle.
 - [README](https://github.com/baselabs/capstan) — substrate requirements and the
   `scripts/capstan-preflight.sql` readiness check for a real source.
+
+**Managed sources.** Aurora MySQL version 3 (the MySQL 8.0-compatible line) is a named source
+([ADR-0013](https://github.com/baselabs/capstan/blob/main/docs/adr/0013-aurora-mysql-source.md)).
+Two things this notebook's throwaway server did not exercise: `log_bin` (the gate's sixth
+variable — on by default here, and the ONE variable that names a binlog-disabled Aurora,
+because Aurora's `binlog_format` still reads `ROW` when its cluster group turns logging off),
+and failovers — a promoted writer behind the same endpoint resumes with loss 0 and the
+checkpoint set gaining both writers' UUIDs. You can watch that behavior locally with no AWS
+account: `docker compose -f scripts/aurora-sim/docker-compose.yml up -d` from the repo, then
+`mix test --only aurora_sim`.
 
 One thing you did **not** see above: a single row value in any log line. That is capstan's
 value-free contract (Rule 1), and it holds in production too.

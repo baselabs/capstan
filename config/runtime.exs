@@ -47,4 +47,19 @@ if config_env() in [:dev, :test] do
     cluster_id: env!("AURORA_MYSQL_CLUSTER_ID", :string, nil),
     reader_host: env!("AURORA_MYSQL_READER_HOST", :string, nil),
     misconfig: env!("AURORA_MYSQL_MISCONFIG", :string, nil)
+
+  # ADR-0013's simulator arm: the `:aurora_sim` marquees run against the local
+  # `scripts/aurora-sim/` stack (three real MySQL 8.0 nodes behind an HAProxy endpoint).
+  # Everything is local throwaway (127.0.0.1, root/probe), so the defaults ARE the
+  # compose stack's ports — the tier is excluded unless selected and fails loudly if
+  # nothing listens.
+  config :capstan, :aurora_sim,
+    host: env!("AURORA_SIM_HOST", :string, "127.0.0.1"),
+    user: env!("AURORA_SIM_USER", :string, "root"),
+    password: env!("AURORA_SIM_PASSWORD", :string, "probe"),
+    endpoint_port: env!("AURORA_SIM_ENDPOINT_PORT", :integer, 37521),
+    writer_port: env!("AURORA_SIM_WRITER_PORT", :integer, 37524),
+    promotable_port: env!("AURORA_SIM_PROMOTABLE_PORT", :integer, 37525),
+    reader_port: env!("AURORA_SIM_READER_PORT", :integer, 37527),
+    admin_port: env!("AURORA_SIM_ADMIN_PORT", :integer, 37528)
 end

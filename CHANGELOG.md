@@ -31,9 +31,18 @@ All notable changes to capstan are documented here. The format follows
 - A tagged `:aurora_mysql` integration module (`test/integration/aurora_mysql_test.exs`,
   excluded by default like `:disposable_mysql`) runs the ADR-0013 acceptance against a
   real cluster through the `AURORA_MYSQL_*` environment (`.env.example` documents every
-  key). AUTHORED, NOT YET EXECUTED: no Aurora cluster exists for the repository today —
-  the run receipt (or the `ci/aurora/` workflow) is the outstanding half of the C7
-  roadmap row.
+  key). AUTHORED, NOT YET EXECUTED: no Aurora cluster exists for the repository today
+  (owner decision 2026-09-29: no AWS subscription yet) — the run receipt (or the
+  `ci/aurora/` workflow) turns it on when a cluster exists.
+- **The Aurora failover contract is verifiable with no AWS account**:
+  `scripts/aurora-sim/` brings up three REAL MySQL 8.0 nodes — a writer, a promotable
+  read-only GTID replica, and a read-only binlog-off "reader" — behind an HAProxy
+  cluster endpoint whose target the `:aurora_sim` tier flips through its admin socket.
+  Proven on real MySQL: the reader-endpoint refusal (`:binlog_disabled` before the
+  dump), two back-to-back failovers on `max_command_retries: 1` with loss 0 and both
+  writers' UUIDs in the checkpoint (the live red proof of the cycle reset), and the
+  snapshot-across-failover halt-and-resume. `docker compose -f
+  scripts/aurora-sim/docker-compose.yml up -d && mix test --only aurora_sim`.
 
 ## [1.2.3] - 2026-08-24
 
