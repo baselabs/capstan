@@ -387,7 +387,7 @@ defmodule Capstan.Protocol.HandshakeTest do
           Process.sleep(50)
         end)
 
-      assert {:error, {:tls_failed, {:tls_alert, {:bad_certificate, reason}}}} =
+      assert {:error, {:tls_failed, {:tls_alert, reason}}} =
                Handshake.connect(socket,
                  host: "managed.example.invalid",
                  username: @username,
@@ -396,12 +396,16 @@ defmodule Capstan.Protocol.HandshakeTest do
                  ssl_opts: [cacerts: cacerts]
                )
 
+      # OTP 28 nests the decoded alert; OTP 26 returns the raw TLS alert charlist.
       reason_str = inspect(reason)
+      assert reason_str =~ "hostname_check_failed", "the hostname check must have ENGAGED"
 
-      assert reason_str =~ "managed.example.invalid",
-             "the hostname check must engage against the HOST"
+      if is_tuple(reason) do
+        assert reason_str =~ "managed.example.invalid",
+               "the hostname check must engage against the HOST"
 
-      refute reason_str =~ "{127, 0, 0, 1}", "must not validate against the peer ADDRESS"
+        refute reason_str =~ "{127, 0, 0, 1}", "must not validate against the peer ADDRESS"
+      end
     end
 
     test "takes the secure-channel cleartext path (never RSA) on full auth over the TLS socket" do

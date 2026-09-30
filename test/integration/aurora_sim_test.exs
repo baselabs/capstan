@@ -62,6 +62,15 @@ defmodule Capstan.Integration.AuroraSimTest do
     promotable = connect_node!(sim, :promotable_port)
     reader = connect_node!(sim, :reader_port)
 
+    # The read-only posture is applied HERE (dynamic), not at container init —
+    # read-only during INITIALIZE makes first boot exit 1 (found in CI).
+    run!(promotable, "SET GLOBAL super_read_only = OFF")
+    run!(promotable, "SET GLOBAL read_only = ON")
+    run!(promotable, "SET GLOBAL super_read_only = ON")
+    run!(reader, "SET GLOBAL super_read_only = OFF")
+    run!(reader, "SET GLOBAL read_only = ON")
+    run!(reader, "SET GLOBAL super_read_only = ON")
+
     # The role shapes ARE the simulator's contract — a node that comes up in the wrong
     # role is a broken harness, and every marquee below would lie.
     assert [["0", "1"]] = query!(writer, "SELECT @@innodb_read_only, @@global.log_bin")
