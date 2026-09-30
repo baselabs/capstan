@@ -6,6 +6,22 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-09-30
+
+### Fixed — the shipped aurora-sim harness actually runs
+
+The 1.3.0 tarball shipped `scripts/aurora-sim/` with two first-boot defects, found and
+fixed by the simulator's first executions (now wired into CI on every push): the
+promotable and reader nodes started with `--read-only=ON`, which makes MySQL's
+first-time datadir initialization exit 1 (the read-only posture is now applied by the
+test tier at runtime, `SET GLOBAL super_read_only`); and the HAProxy endpoint's health
+check used `mysql-check` with a probe account the nodes never create (plain TCP check
+now). Also: the tier's replica channels authenticate caching_sha2 over plaintext with
+`GET_SOURCE_PUBLIC_KEY=1`, and its root-level connections allow the stack's
+`mysql_native_password` bootstrap account. The `:aurora_sim` marquees are green in CI —
+`docker compose -f scripts/aurora-sim/docker-compose.yml up -d && mix test --only
+aurora_sim` works as shipped.
+
 ## [1.3.0] - 2026-09-30
 
 ### Fixed — two defects found by the live Aurora receipt run (ADR-0013)
