@@ -96,7 +96,16 @@ Name Aurora MySQL version 3 as a supported source, with these additions and rule
   account: `scripts/aurora-sim/` (three MySQL 8.0 nodes behind an HAProxy endpoint the
   `:aurora_sim` tier flips through its admin socket — real binlogs, real GTID promotion, no
   canned responses). That arm verifies capstan's behavior; it does not verify Aurora's engine,
-  and its receipts are labeled simulator-observed, never OBSERVED-on-Aurora.
+  and its receipts are labeled simulator-observed, never OBSERVED-on-Aurora. The emulator
+  landscape was surveyed for a one-stop alternative before settling on the harness
+  (2026-09-29): LocalStack's RDS/Aurora is paid-only and lists `FailoverDBCluster` as not
+  implemented; Floci (MIT) implements the Aurora control plane further than anyone —
+  `CreateDBCluster` and even `FailoverDBCluster` — but per its own docs it runs a cluster's
+  instances in ONE container (failover is a metadata role move: no endpoint flip, no
+  `@@server_uuid` change), exposes no MySQL server-flag mechanism (parameter groups are
+  metadata-only), and terminates TLS at its auth proxy. None of them can exercise the
+  data-plane contract this tier exists to prove; the survey is revisited when one grows
+  per-instance containers with endpoint flips and flag passthrough.
 - The proof of **Aurora itself** is a real Aurora MySQL version 3 cluster. No mock, no stand-in
   MySQL 8.0 configured to look like Aurora, no canned failover. Two acceptable forms, in order
   of preference:
