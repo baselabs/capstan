@@ -405,13 +405,21 @@ defmodule Capstan.Integration.AuroraSimTest do
   defp sim_env, do: Application.fetch_env!(:capstan, :aurora_sim)
 
   defp node_conn(sim, port_key, username \\ nil, password \\ nil) do
-    [
+    conn = [
       host: sim[:host],
       port: sim[port_key],
       username: username || sim[:user],
       password: password || sim[:password],
       ssl: false
     ]
+
+    # The stack's containers start with mysql_native_password ROOT (the compose flags), so
+    # the harness's own connections allow it. The PIPELINE connections pass the
+    # capstan_sha2 account explicitly and keep the default caching_sha2 posture, as
+    # against any real source.
+    if is_nil(username),
+      do: Keyword.put(conn, :auth_plugins, [:mysql_native_password]),
+      else: conn
   end
 
   defp endpoint_conn(sim, username \\ nil, password \\ nil),
