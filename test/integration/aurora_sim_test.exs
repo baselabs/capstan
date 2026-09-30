@@ -384,11 +384,17 @@ defmodule Capstan.Integration.AuroraSimTest do
     end
   end
 
-  # HAProxy runtime API over TCP: enable the target backend server, park the other.
+  # HAProxy runtime API over TCP: enable the target backend server, park the other, and
+  # SEVER the parked server's established sessions — `state maint` alone only refuses NEW
+  # connections (existing ones drain on the demoted node), while a real cluster failover
+  # drops every open connection through the endpoint. Without the shutdown the pipeline
+  # keeps streaming from the demoted writer (its reverse replication makes that path
+  # deliver!) and no reconnect — no cycle reset, no identity check — is ever exercised.
   defp flip_endpoint!(sim, target) do
     other = if target == :promotable, do: :writer, else: :promotable
     admin_cmd!(sim, "set server writer_nodes/#{target} state ready")
     admin_cmd!(sim, "set server writer_nodes/#{other} state maint")
+    admin_cmd!(sim, "shutdown sessions server writer_nodes/#{other}")
   end
 
   defp admin_cmd!(sim, command) do
