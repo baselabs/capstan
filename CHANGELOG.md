@@ -8,6 +8,22 @@ All notable changes to capstan are documented here. The format follows
 
 ## [1.3.0] - 2026-09-30
 
+### Fixed — two defects found by the live Aurora receipt run (ADR-0013)
+
+- **TLS: a CA source with no explicit `server_name_indication` now defaults the hostname
+  check to the connection's `host`.** Without the default, `:ssl` validated the certificate
+  against the peer ADDRESS — an IP no managed source's DNS SANs ever carry — so hostname
+  verification against any DNS-named certificate (the documented Aurora/RDS recipe) was
+  impossible. An explicit `server_name_indication` (including `:disable`, the self-signed
+  recipe) is never overridden. Found on first contact with a real Aurora cluster; fixed
+  red-first and re-verified live.
+- **`:binlog_disabled` is now budgeted, not an immediate halt.** The five value variables
+  remain immediate halts (configuration cannot be cured by reconnecting), but a managed
+  failover window can transiently answer the gate with `log_bin` disabled (observed on a
+  real Aurora promotion) — the refusal now spends `max_command_retries` and retries, and
+  the budget's exhaustion keeps the distinct `:binlog_disabled` reason. Without this, every
+  Aurora failover halted the pipeline.
+
 ### Added — Amazon Aurora MySQL as a named source (ADR-0013); the gate gains `log_bin`
 
 - The connect-time precondition gate reads a SIXTH variable, `log_bin`, refusing

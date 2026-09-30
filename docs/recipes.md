@@ -191,7 +191,21 @@ connection: [
 
 Unlike the self-signed recipe above, hostname verification stays ON: Aurora's
 certificate chains to the AWS CA and names the endpoint host, so no
-`server_name_indication: :disable`. **First start:** prefer
+`server_name_indication: :disable` (with a `cacertfile` and no explicit SNI, capstan defaults
+the hostname check to the connection's `host` — ADR-0013's receipt run fixed this).
+
+**Auth:** Aurora MySQL 3's master user defaults to `mysql_native_password` — the inverse of
+stock MySQL 8.0 — so capstan's default `caching_sha2_password` posture is refused until the
+account is re-pointed once (`ALTER USER … IDENTIFIED WITH caching_sha2_password BY …`;
+`default_authentication_plugin` is not modifiable in the cluster group on this engine).
+
+**Failover budget:** a promotion at Serverless v2's floor takes minutes, and the window can
+transiently answer the connect-time gate with the binlog disabled. Size the retry budget to
+the window — `max_command_retries: 120, reconnect_backoff: 5_000` (≈10 minutes) rode out
+every forced failover in the receipt run — and remember failovers count toward the
+established-then-dropped budget on a same-uuid cluster (see ADR-0013's uuid observation).
+
+**First start:** prefer
 `start_position: :current` (or pre-seed the checkpoint from
 `SELECT @@global.gtid_executed`) — an empty checkpoint against Aurora's almost
 never-empty `gtid_purged` refuses `:data_gap` by design. **Failovers are not

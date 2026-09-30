@@ -194,6 +194,98 @@ defmodule Capstan.ConnectionTest do
   end
 
   ## ---------------------------------------------------------------------------
+  ## Lifecycle — a transiently disabled log_bin (the Aurora failover window)
+  ## ---------------------------------------------------------------------------
+
+  describe "lifecycle — log_bin is budgeted, not an immediate halt (the Aurora failover window)" do
+    test "a promotion-window server (log_bin 0) is retried and the stream resumes when it clears" do
+      # OBSERVED on a real Aurora cluster (ADR-0013's receipt run): during a writer
+      # promotion the endpoint can transiently answer the gate with log_bin disabled —
+      # the five VALUE variables are configuration (a violation is permanent), but
+      # log_bin is also TOPOLOGY (transiently off across managed failovers). Budgeting
+      # it like a command fault (and keeping the DISTINCT reason on exhaustion) lets a
+      # pipeline ride out the window instead of dying on the first reconnect.
+      test_pid = self()
+      attempts = :counters.new(1, [])
+
+      connect_fun = fn _connection ->
+        :counters.add(attempts, 1, 1)
+        n = :counters.get(attempts, 1)
+        # Attempts 1-2: the failover window — the gate reads log_bin = 0. Attempt 3:
+        # promotion complete — healthy six, stream delivers.
+        row =
+          if n <= 2,
+            do: ["ROW", "FULL", "FULL", "", "ON", "0"],
+            else: ["ROW", "FULL", "FULL", "", "ON", "1"]
+
+        {port, _srv} =
+          start_mock_server(fn sock, inner ->
+            serve_full_establish(sock, @executed, @purged, inner, @uuid, row)
+            stream_event(sock, "AFTER-WINDOW", 1)
+          end)
+
+        {:ok, raw} = :gen_tcp.connect(@loopback, port, [:binary, active: false], 5000)
+        send(test_pid, {:window_attempt, n})
+        {:ok, {:gen_tcp, raw}, %{server_version: "mock", tls: false}}
+      end
+
+      start_conn(
+        server_id: 50,
+        connection: [],
+        max_command_retries: 3,
+        receiver: test_pid,
+        start_position: %Position{gtid_set: @checkpoint},
+        connect_fun: connect_fun,
+        reconnect_backoff: 20
+      )
+
+      assert_receive {:window_attempt, 1}, 2000
+      assert_receive {:window_attempt, 2}, 2000
+      assert_receive {:window_attempt, 3}, 2000
+      assert_receive {:binlog_event, "AFTER-WINDOW"}, 2000
+    end
+
+    test "a PERMANENTLY disabled binlog exhausts the budget and halts the distinct :binlog_disabled" do
+      test_pid = self()
+
+      connect_fun = fn _connection ->
+        {port, _srv} =
+          start_mock_server(fn sock, inner ->
+            serve_full_establish(sock, @executed, @purged, inner, @uuid, [
+              "ROW",
+              "FULL",
+              "FULL",
+              "",
+              "ON",
+              "0"
+            ])
+          end)
+
+        {:ok, raw} = :gen_tcp.connect(@loopback, port, [:binary, active: false], 5000)
+        send(test_pid, :perm_attempt)
+        {:ok, {:gen_tcp, raw}, %{server_version: "mock", tls: false}}
+      end
+
+      start_conn(
+        server_id: 51,
+        connection: [],
+        max_command_retries: 2,
+        receiver: test_pid,
+        start_position: %Position{gtid_set: @checkpoint},
+        connect_fun: connect_fun,
+        reconnect_backoff: 20
+      )
+
+      # Exactly max+1 (=3) attempts — then the DISTINCT reason, not the generic one.
+      assert_receive :perm_attempt, 2000
+      assert_receive :perm_attempt, 2000
+      assert_receive :perm_attempt, 2000
+      assert_receive {:capstan_halt, :binlog_disabled}, 2000
+      refute_receive :perm_attempt, 300
+    end
+  end
+
+  ## ---------------------------------------------------------------------------
   ## Lifecycle — a mid-stream 1236 halt is discriminated (F5)
   ## ---------------------------------------------------------------------------
 
@@ -819,8 +911,20 @@ defmodule Capstan.ConnectionTest do
   # the read-then-SET-before-dump ordering (F4). `uuid` is the @@server_uuid this mock
   # server reports — a CONSTANT across cycles models one server (an eviction must count);
   # a fresh value per cycle models a failover (the reset must fire).
-  defp serve_full_establish(sock, executed, purged, test, uuid \\ @uuid) do
-    serve_through_gtid(sock, executed, purged, test)
+  defp serve_full_establish(
+         sock,
+         executed,
+         purged,
+         test,
+         uuid \\ @uuid,
+         precond_row \\ ["ROW", "FULL", "FULL", "", "ON", "1"]
+       ) do
+    {0, precond_cmd} = recv_pkt(sock)
+    send(test, {:server_recv, classify_cmd(precond_cmd)})
+    serve_resultset(sock, precond_row)
+    {0, gtid_cmd} = recv_pkt(sock)
+    send(test, {:server_recv, classify_cmd(gtid_cmd)})
+    serve_resultset(sock, [executed, purged])
     {0, uuid_cmd} = recv_pkt(sock)
     send(test, {:server_recv, classify_cmd(uuid_cmd)})
     serve_resultset(sock, [uuid])

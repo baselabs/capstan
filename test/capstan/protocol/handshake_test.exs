@@ -358,6 +358,52 @@ defmodule Capstan.Protocol.HandshakeTest do
       assert byte_size(tls_response.token) == 32
     end
 
+    test "a CA source with no explicit SNI defaults hostname verification to the connection host" do
+      # The managed-source posture (the documented Aurora/RDS recipe): a CA source and a
+      # DNS-named endpoint, with server_name_indication deliberately NOT set. Without a
+      # default, :ssl validates the cert against the peer ADDRESS — an IP no managed
+      # source's DNS SANs ever carry, so every DNS-named certificate failed closed. Found
+      # live against a real Aurora cluster (ADR-0013's receipt run): hostname_check_failed
+      # with `requested {ip}` while the cert's SANs carried the endpoints. Here the
+      # trust chain is VALID (the pkix root), so the ONLY failure is the hostname check —
+      # and the alert names what it checked: the HOST string with the default, the peer
+      # IP without it. An explicit :server_name_indication (including :disable, the
+      # self-signed recipe) remains the operator's choice and is never overridden.
+      {tls_opts, cacerts} = pkix_server_with_root()
+
+      socket =
+        mock_client(fn srv, _test ->
+          t_send(srv, build_handshake(salt: @salt), 0)
+          {1, _ssl_request} = t_recv_pkt(srv)
+
+          # The client aborts during ITS handshake (hostname mismatch, by design) — the
+          # listener's own handshake then fails receiving the alert, which is the
+          # expected shape, not an error.
+          case :ssl.handshake(srv, tls_opts, 5000) do
+            {:ok, tls} -> _ = t_recv_pkt({:ssl, tls})
+            {:error, _client_alert} -> :ok
+          end
+
+          Process.sleep(50)
+        end)
+
+      assert {:error, {:tls_failed, {:tls_alert, {:bad_certificate, reason}}}} =
+               Handshake.connect(socket,
+                 host: "managed.example.invalid",
+                 username: @username,
+                 password: @password,
+                 ssl: true,
+                 ssl_opts: [cacerts: cacerts]
+               )
+
+      reason_str = inspect(reason)
+
+      assert reason_str =~ "managed.example.invalid",
+             "the hostname check must engage against the HOST"
+
+      refute reason_str =~ "{127, 0, 0, 1}", "must not validate against the peer ADDRESS"
+    end
+
     test "takes the secure-channel cleartext path (never RSA) on full auth over the TLS socket" do
       tls_opts = server_tls_opts()
 
@@ -813,6 +859,21 @@ defmodule Capstan.Protocol.HandshakeTest do
       })
 
     [cert: conf[:cert], key: conf[:key]]
+  end
+
+  # An unrelated trust anchor (a second pkix server certificate): valid DER that trusts
+  # nothing the listener presents — the client handshake must still run FAR ENOUGH to
+  # perform the hostname check and name what it checked.
+  defp pkix_server_with_root do
+    key = fn -> :public_key.generate_key({:rsa, 2048, 65_537}) end
+
+    %{server_config: conf} =
+      :public_key.pkix_test_data(%{
+        server_chain: %{root: [key: key.()], intermediates: [], peer: [key: key.()]},
+        client_chain: %{root: [key: key.()], intermediates: [], peer: [key: key.()]}
+      })
+
+    {[cert: conf[:cert], key: conf[:key]], conf[:cacerts]}
   end
 
   defp fetch_substrate_ca do

@@ -337,12 +337,16 @@ processes exit `{:shutdown, {:halt, reason}}` and — because every child is
 via `[:capstan, :connection, :halt]` / `[:capstan, :assembler, :halt]` telemetry (metadata
 `reason`) and decides whether to restart, reprovision, or page. Every reason is value-free.
 
-**Server preconditions** (checked at every connect; a violation halts without retrying):
-`:binlog_format_not_row`, `:binlog_row_image_not_full`, `:binlog_row_metadata_not_full`,
-`:binlog_row_value_options_not_empty`, `:gtid_mode_not_on`, `:binlog_disabled` (the binary
-log itself is off — on Aurora the documented way this happens leaves `binlog_format`
-reading `ROW`, so `log_bin` is the variable that names it; ADR-0013),
-`:precondition_query_failed`.
+**Server preconditions** (checked at every connect): `:binlog_format_not_row`,
+`:binlog_row_image_not_full`, `:binlog_row_metadata_not_full`,
+`:binlog_row_value_options_not_empty`, `:gtid_mode_not_on` — these five are configuration and
+halt IMMEDIATELY (reconnecting cannot cure them). `:binlog_disabled` is the sixth variable
+with different semantics: `log_bin` is also TOPOLOGY — a managed failover window (observed on
+Aurora; ADR-0013) can transiently disable it — so a `:binlog_disabled` refusal is BUDGETED
+against `max_command_retries` and retried; when the budget exhausts, the halt keeps the
+distinct `:binlog_disabled` reason. An Aurora pipeline riding out failovers sizes its budget
+to the promotion window (the receipt's recipe: `max_command_retries: 120,
+reconnect_backoff: 5_000`). `:precondition_query_failed` halts without retrying.
 
 **Compressed transactions are consumed.** `binlog_transaction_compression=ON` sources stream
 normally: each `TRANSACTION_PAYLOAD` event is inflated by capstan's in-library pure-Elixir

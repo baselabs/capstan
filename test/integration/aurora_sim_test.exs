@@ -254,7 +254,7 @@ defmodule Capstan.Integration.AuroraSimTest do
       pid: self(),
       ledger: ledger,
       pk_columns: ["id"],
-      pk_types: [:integer],
+      pk_types: [:int],
       value_column: "v"
     })
 

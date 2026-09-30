@@ -145,9 +145,18 @@ defmodule Capstan.Connection do
     :binlog_row_metadata_not_full,
     :binlog_row_value_options_not_empty,
     :gtid_mode_not_on,
-    :binlog_disabled,
     :precondition_query_failed
   ]
+
+  # log_bin is deliberately NOT in the immediate-halt set: the five VALUE variables are
+  # configuration (a violation is permanent — reconnecting cannot cure them), but
+  # log_bin is also TOPOLOGY. OBSERVED on a real Aurora cluster (ADR-0013's receipt
+  # run): during a writer promotion the endpoint can transiently answer the gate with
+  # log_bin disabled; an immediate halt would kill an otherwise survivable failover.
+  # It is budgeted like a command fault instead, and the budget's exhaustion keeps the
+  # DISTINCT reason (:binlog_disabled), so a permanently disabled source still halts
+  # with the actionable name after max_command_retries.
+  @budgeted_precondition_halts [:binlog_disabled]
 
   defstruct [
     :server_id,
@@ -430,7 +439,7 @@ defmodule Capstan.Connection do
       start_streaming(state)
     else
       {:halt, reason} -> halt(state, reason)
-      {:command_error, _reason} -> note_command_failure(state)
+      {:command_error, reason} -> note_command_failure(state, reason)
     end
   end
 
@@ -478,6 +487,9 @@ defmodule Capstan.Connection do
     case Config.check_preconditions(socket) do
       :ok -> :ok
       {:error, reason} when reason in @precondition_halts -> {:halt, reason}
+      # Budgeted (see @budgeted_precondition_halts): spent against the command budget
+      # and retried; the exhaustion halt below keeps the distinct reason.
+      {:error, reason} when reason in @budgeted_precondition_halts -> {:command_error, reason}
       {:error, other} -> {:command_error, other}
     end
   end
@@ -715,19 +727,24 @@ defmodule Capstan.Connection do
     end
   end
 
-  # A failure BEFORE establishing spends the command budget (A6). The budget resets on
-  # frame arrival; this counts only pre-establish faults.
-  defp note_command_failure(state) do
+  # A failure BEFORE establishing spends the command budget (A6). This counts only
+  # pre-establish faults. The exhaustion halt keeps the DISTINCT reason when the last
+  # failure was a budgeted precondition one (:binlog_disabled — a permanently disabled
+  # source stays actionable); every other exhaustion is the generic reason.
+  defp note_command_failure(state, reason \\ nil) do
     state = close_current_socket(state)
     failures = state.command_failures + 1
     state = %{state | command_failures: failures}
 
     if failures > state.max_command_retries do
-      halt(state, :command_retries_exhausted)
+      halt(state, exhaustion_reason(state, reason))
     else
       schedule_reconnect(state)
     end
   end
+
+  defp exhaustion_reason(_state, reason) when reason in [:binlog_disabled], do: reason
+  defp exhaustion_reason(_state, _other), do: :command_retries_exhausted
 
   defp schedule_reconnect(state) do
     timer = Process.send_after(self(), :reconnect, state.reconnect_backoff)

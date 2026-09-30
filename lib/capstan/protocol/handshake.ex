@@ -132,7 +132,7 @@ defmodule Capstan.Protocol.Handshake do
     # its own error paths, so a `perform/4` error is passed through untouched and is
     # never routed through this `else` (no double-close).
     with {:ok, lead} <- lead_plugin(auth_plugins),
-         {:ok, transport} <- transport(ssl?, ssl_opts) do
+         {:ok, transport} <- transport(ssl?, ssl_opts, opts) do
       perform(socket, transport, lead, ctx)
     else
       {:error, reason} ->
@@ -317,18 +317,47 @@ defmodule Capstan.Protocol.Handshake do
 
   # F6 / Q17: with TLS on, require an explicit verification choice — a CA source or
   # an explicit `verify:`. Otherwise fail closed rather than defaulting.
-  defp transport(false, _ssl_opts), do: {:ok, :plaintext}
+  defp transport(false, _ssl_opts, _opts), do: {:ok, :plaintext}
 
-  defp transport(true, ssl_opts) do
+  defp transport(true, ssl_opts, opts) do
     cond do
       Keyword.has_key?(ssl_opts, :verify) ->
         {:ok, {:tls, ssl_opts}}
 
       Keyword.has_key?(ssl_opts, :cacertfile) or Keyword.has_key?(ssl_opts, :cacerts) ->
-        {:ok, {:tls, Keyword.put(ssl_opts, :verify, :verify_peer)}}
+        {:ok, {:tls, default_sni(ssl_opts, opts)}}
 
       true ->
         {:error, :tls_verification_unspecified}
+    end
+  end
+
+  # The CA-source arm derives verify_peer; it must ALSO default the hostname check to
+  # the HOST the caller asked to connect to. Without server_name_indication, :ssl
+  # validates the certificate against the peer ADDRESS — an IP that no managed source's
+  # DNS SANs ever carry, so every DNS-named certificate (the documented Aurora/RDS
+  # recipe) failed closed (found live on a real Aurora cluster, ADR-0013's receipt).
+  # An EXPLICIT :server_name_indication — including :disable, the self-signed recipe
+  # of ADR-0002 — is the operator's choice and is never overridden; the default only
+  # fills the absent case.
+  defp default_sni(ssl_opts, opts) do
+    ssl_opts = Keyword.put(ssl_opts, :verify, :verify_peer)
+
+    case Keyword.get(ssl_opts, :server_name_indication) do
+      nil ->
+        case Keyword.get(opts, :host) do
+          host when is_binary(host) and host != "" ->
+            Keyword.put(ssl_opts, :server_name_indication, String.to_charlist(host))
+
+          host when is_list(host) and host != [] ->
+            Keyword.put(ssl_opts, :server_name_indication, host)
+
+          _no_host ->
+            ssl_opts
+        end
+
+      _explicit ->
+        ssl_opts
     end
   end
 

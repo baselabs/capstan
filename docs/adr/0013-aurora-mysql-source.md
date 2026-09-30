@@ -1,8 +1,8 @@
 # ADR-0013: Amazon Aurora MySQL as a named, tested source
 
-**Status:** Proposed (2026-09-29; documentation-verified the same day — every INFERRED fact
-below was checked against the AWS Aurora MySQL User Guide, and each row now names its source or
-names the live probe that must settle it; see Evidence) · **Extends:**
+**Status:** Accepted (2026-09-30 — the cluster run landed; its receipt is
+`test/receipts/aurora-mysql-2026-09-30.md`, and every live-probe question below is settled by it,
+including two corrections the run itself forced). Proposed and documentation-verified 2026-09-29 · **Extends:**
 [ADR-0002](0002-fail-closed-server-preconditions.md) (the connect-time gate gains `log_bin`)
 · **Honors:** [ADR-0001](0001-position-and-dedup-model.md) (a failover adds a source UUID to
 the set; nothing ordinal), [ADR-0003](0003-transaction-shape-and-checkpoint-semantics.md)
@@ -215,13 +215,31 @@ not `:precondition_query_failed` (the error is a server error, not a malformed r
 documented OFF semantics it reads `ROW`, so the binlog-disabled cluster is caught by `log_bin`
 (`:binlog_disabled`) instead.
 
-**Still INFERRED — settled only by the live cluster run:** what a reader answers to `@@log_bin`
-and to `COM_BINLOG_DUMP_GTID` (undocumented; decides the optional `:binlog_source_not_writer`);
-whether the promoted writer's `gtid_executed` carries the old writer's GTIDs after a failover;
-whether an enhanced-binlog writer's event bytes decode identically. None of these is OBSERVED
-yet: no Aurora cluster exists for this repository today, and the module and receipt this ADR
-names are the instruments that turn them. The live run is the maintainer's cost decision
-(CI-created cluster or out-of-suite receipt).
+**Settled by the 2026-09-30 run (receipt: `test/receipts/aurora-mysql-2026-09-30.md`):**
+
+- **Reader (OBSERVED):** a reader-endpoint connection passes the five value variables and is
+  refused `:binlog_disabled` BEFORE the dump — decision 1's "reader reports `log_bin = OFF`"
+  arm. **No `:binlog_source_not_writer` reason is added** (no observed need).
+- **`@@server_uuid` (OBSERVED, correcting the proposal's premise):** Aurora MySQL reports ONE
+  cluster-wide uuid — writer and reader carry the same value, so a failover does NOT change the
+  endpoint's identity. The cycle reset's uuid-change trigger therefore never fires on Aurora
+  (it remains correct for every multi-uuid topology — self-managed failovers, orchestrator
+  moves, the simulator); on a same-uuid cluster a failover's drop lands as a same-uuid cycle,
+  and an Aurora pipeline's `max_command_retries` must be sized to its expected failover count
+  (the receipt's recipe: 120 × 5s rode out every promotion). `gtid_executed` continuity across
+  promotion holds — trivially, under one uuid — and the checkpoint set stays single-source.
+- **`log_bin` during promotion (OBSERVED, forcing a design amendment):** the failover window
+  can transiently answer the gate with `log_bin` disabled. The five VALUE variables stay
+  immediate halts (configuration cannot be cured by reconnecting); `log_bin` is BUDGETED —
+  spent against `max_command_retries`, retried, and the budget's exhaustion keeps the distinct
+  `:binlog_disabled` reason. Without this, every Aurora failover killed the pipeline.
+- **Enhanced binlog: still unobserved** (the run's cluster ran community binlog; the first
+  `aurora_enhanced_binlog=1` run records it).
+
+Two product defects the run surfaced were fixed before it went green (both in 1.3.0): the TLS
+`server_name_indication` default (hostname verification against DNS names was impossible
+without it) and the budgeted `log_bin` above — each red-first in the unit suite and
+live-verified on the cluster.
 
 **Simulator arm (added 2026-09-29, owner decision: no AWS subscription yet).** The harness is
 committed (`scripts/aurora-sim/`: writer, promotable read-only GTID replica with binlog ON,
