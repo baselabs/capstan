@@ -89,7 +89,7 @@ defmodule Capstan.Integration.AuroraSimTest do
       run_tolerant(
         follower,
         "CHANGE REPLICATION SOURCE TO SOURCE_HOST='#{@source_writer}', " <>
-          "SOURCE_PORT=3306, SOURCE_USER='#{@repl_user}', SOURCE_PASSWORD='#{@repl_password}', SOURCE_AUTO_POSITION=1"
+          "SOURCE_PORT=3306, SOURCE_USER='#{@repl_user}', SOURCE_PASSWORD='#{@repl_password}', SOURCE_AUTO_POSITION=1, GET_SOURCE_PUBLIC_KEY=1"
       )
 
       run!(follower, "START REPLICA")
@@ -351,7 +351,7 @@ defmodule Capstan.Integration.AuroraSimTest do
     run_tolerant(
       old_active,
       "CHANGE REPLICATION SOURCE TO SOURCE_HOST='#{source_name}', SOURCE_PORT=3306, " <>
-        "SOURCE_USER='#{@repl_user}', SOURCE_PASSWORD='#{@repl_password}', SOURCE_AUTO_POSITION=1"
+        "SOURCE_USER='#{@repl_user}', SOURCE_PASSWORD='#{@repl_password}', SOURCE_AUTO_POSITION=1, GET_SOURCE_PUBLIC_KEY=1"
     )
 
     run!(old_active, "START REPLICA")
