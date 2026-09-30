@@ -25,13 +25,14 @@ Elixir (`:gen_tcp`/`:ssl`/`:crypto` only).
 | Schema-change notifications without DDL text leaking into logs | ✅ DDL redacted by design |
 | A source with `binlog_transaction_compression=ON` | ✅ consumed — the in-library zstd decoder inflates each compressed transaction (byte-exact conformance vs the reference `zstd`) |
 | XA (two-phase) transactions | ✅ tracked or refused, never half-delivered (`xa:` policy) |
+| Amazon Aurora MySQL v3 as the source | ✅ named + documented (ADR-0013); a failover resets the cycle budget and the checkpoint set gains both writers' UUIDs |
 
 ## Install
 
 ```elixir
 def deps do
   [
-    {:capstan, "~> 1.2"}
+    {:capstan, "~> 1.3"}
   ]
 end
 ```
@@ -159,7 +160,8 @@ payload — that boundary is enforced at runtime, not by convention.
   measurements and metadata, plus attach examples.
 - **[docs/recipes.md](https://github.com/baselabs/capstan/blob/main/docs/recipes.md)** — idempotent sinks, warehouse loading,
   snapshot-then-stream migration, batching tradeoffs, TLS, "start from now",
-  XA sources.
+  XA sources, and the Amazon Aurora MySQL recipe (cluster parameter group, retention
+  hours, the writer endpoint, the AWS CA bundle).
 - **[ADRs](docs/adr/README.md)** — the decision record (position model, fail-closed
   posture, snapshot cursor gate, XA tracking, zstd consumption, …).
 - **[CHANGELOG](CHANGELOG.md)**.
@@ -171,7 +173,7 @@ payload — that boundary is enforced at runtime, not by convention.
 | `lib/` | The Elixir library (Hex package `capstan`) |
 | `notebooks/` | The getting-started Livebook |
 | `examples/` | Runnable minimal consumers ([examples/README.md](https://github.com/baselabs/capstan/tree/main/examples)) |
-| `scripts/` | The MySQL init seed (`mysql-init/`) + the read-only preflight report |
+| `scripts/` | The MySQL init seed (`mysql-init/`), the read-only preflight report, and `aurora-sim/` (the local Aurora-failover harness) |
 | `probe/` | The executed protocol viability probe + committed evidence |
 | `docs/` | ADRs, telemetry reference, recipes |
 | `usage-rules.md` | Consumer-facing usage contract |

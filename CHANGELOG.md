@@ -6,6 +6,8 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-30
+
 ### Added — Amazon Aurora MySQL as a named source (ADR-0013); the gate gains `log_bin`
 
 - The connect-time precondition gate reads a SIXTH variable, `log_bin`, refusing
@@ -38,10 +40,10 @@ All notable changes to capstan are documented here. The format follows
   `scripts/aurora-sim/` brings up three REAL MySQL 8.0 nodes — a writer, a promotable
   read-only GTID replica, and a read-only binlog-off "reader" — behind an HAProxy
   cluster endpoint whose target the `:aurora_sim` tier flips through its admin socket.
-  Proven on real MySQL: the reader-endpoint refusal (`:binlog_disabled` before the
-  dump), two back-to-back failovers on `max_command_retries: 1` with loss 0 and both
-  writers' UUIDs in the checkpoint (the live red proof of the cycle reset), and the
-  snapshot-across-failover halt-and-resume. `docker compose -f
+  The tier proves on real MySQL: the reader-endpoint refusal (`:binlog_disabled`
+  before the dump), two back-to-back failovers on `max_command_retries: 1` with loss 0
+  and both writers' UUIDs in the checkpoint (the live red proof of the cycle reset),
+  and the snapshot-across-failover halt-and-resume. `docker compose -f
   scripts/aurora-sim/docker-compose.yml up -d && mix test --only aurora_sim`.
 
 ## [1.2.3] - 2026-08-24

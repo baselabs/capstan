@@ -105,6 +105,13 @@ confidentiality without authentication). Neither given → fail closed `:tls_ver
     mix quality        # format --check-formatted + credo --strict + dialyzer
 
 All gates must pass before a commit. `mix quality` and `mix audit` are defined in `mix.exs`.
+
+**Publish gate:** a version bump or Hex publish requires a FULL documentation sweep first —
+every doc in the `mix.exs` `files:` set (including `notebooks/getting_started.livemd` and both
+`examples/` READMEs) read end-to-end for correctness against the released behavior, current
+version pins, and working instructions (not grep-checked — read), plus the mechanical relative-link
+sweep over the shipped set (zero broken; repo-only targets link absolutely). An edit-only pass is
+not a sweep: stale text lives in the docs a change never touched.
 Per-file floor on every touched file, **prod AND test**: format, compile (warnings-as-errors), credo.
 
 ## Testing

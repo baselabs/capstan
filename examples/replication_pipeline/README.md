@@ -58,7 +58,7 @@ The checkpoint row (`capstan_checkpoint`) is what made that resume gap-free.
 | `ReplicationPipeline.Materializer` | idempotent upsert-by-PK is what turns at-least-once delivery into exactly-once effects |
 | `ReplicationPipeline.CheckpointStore` | the durable GTID-set watermark in the destination DB; query faults return value-free errors and capstan applies retry-then-halt |
 | `ReplicationPipeline.BootSeed` | the first-boot position seed — an empty checkpoint would request the server's FULL retained history, and a server that has purged refuses it (`:data_gap`). See the module doc for why seed-once beats a persistent `start_position: :current` |
-| `docker-compose.yml` (source flags) | the five fail-closed source preconditions capstan checks at every connect |
+| `docker-compose.yml` (source flags) | the six fail-closed source preconditions capstan checks at every connect |
 
 The mirror is intentionally minimal (one table, `id` PK). Real deployments
 extend `Materializer` per table — the seam is the point, not the schema.

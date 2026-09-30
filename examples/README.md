@@ -1,8 +1,9 @@
 # capstan examples
 
 Runnable, minimal consumers that show how to integrate capstan end-to-end. They are **not** part of
-the test suite — run them by hand against the dev substrate. (Exception:
-`replication_pipeline/` IS wired into CI as the public sink API's canary.)
+the test suite — run them by hand against a MySQL 8.0 you start yourself (this repository ships no
+database container; the repo's `docs/testing.md` gives the exact `docker run` line and flags).
+(Exception: `replication_pipeline/` IS wired into CI as the public sink API's canary.)
 
 ## `replication_pipeline/` — the durable reference stack (docker)
 
@@ -21,24 +22,28 @@ A ~90-line consumer: a `Capstan.Sink` that prints every committed row change, a 
 
 ### Run it
 
-1. **Bring up the dev substrate** (from the repo root):
+1. **Start a throwaway source** (repository file; the flags below are five of the six
+   preconditions capstan checks — `log_bin` is on by default in this image; `docs/testing.md`
+   carries the canonical line):
 
    ```sh
-   docker compose up -d --wait
+   docker run -d --name capstan-example-src -p 127.0.0.1:3306:3306 \
+     -e MYSQL_ROOT_PASSWORD=probe -e MYSQL_DATABASE=capstan_example mysql:8.0 \
+     --binlog-format=ROW --binlog-row-image=FULL --binlog-row-metadata=FULL \
+     --binlog-row-value-options= --gtid-mode=ON --enforce-gtid-consistency=ON --server-id=1
    ```
 
 2. **Create the demo table** on the source:
 
    ```sh
-   docker compose exec mysql-cdc-probe mysql -uroot -pprobe -e "
-     CREATE DATABASE IF NOT EXISTS capstan_example;
+   docker exec capstan-example-src mysql -uroot -pprobe -e "
      CREATE TABLE IF NOT EXISTS capstan_example.demo (id INT PRIMARY KEY, name VARCHAR(50), qty INT) ENGINE=InnoDB;"
    ```
 
 3. **Start the consumer, seeded to stream from *now*** (so it doesn't replay retained history):
 
    ```sh
-   START_GTID=$(docker compose exec -T mysql-cdc-probe mysql -uroot -pprobe -N -e "SELECT @@global.gtid_executed" | tr -d '\n') \
+   START_GTID=$(docker exec capstan-example-src mysql -uroot -pprobe -N -e "SELECT @@global.gtid_executed" | tr -d '\n') \
      mix run examples/print_consumer.exs
    ```
 
@@ -48,11 +53,13 @@ A ~90-line consumer: a `Capstan.Sink` that prints every committed row change, a 
 4. **In another terminal, make some changes** and watch them stream:
 
    ```sh
-   docker compose exec mysql-cdc-probe mysql -uroot -pprobe -e "
+   docker exec capstan-example-src mysql -uroot -pprobe -e "
      INSERT INTO capstan_example.demo (id, name, qty) VALUES (1, 'widget', 10);
      UPDATE capstan_example.demo SET qty = 20 WHERE id = 1;
      DELETE FROM capstan_example.demo WHERE id = 1;"
    ```
+
+   Tear the source down when done: `docker rm -f capstan-example-src`.
 
    The consumer prints:
 
