@@ -480,7 +480,10 @@ defmodule Capstan.Integration.AuroraSimTest do
     end
   end
 
-  defp await_snapshot_halt!(deadline) do
+  # Loop over in-flight chunk events until the failover's identity halt arrives. Every
+  # OTHER event is logged and accumulated, and the timeout flunk names what actually
+  # fired — a snapshot run's halt reason is a finding, never noise.
+  defp await_snapshot_halt!(deadline, seen \\ []) do
     receive do
       {:snapshot_event, :halt, _measurements, %{reason: :snapshot_source_mismatch}} = halt ->
         halt
@@ -488,13 +491,18 @@ defmodule Capstan.Integration.AuroraSimTest do
       {:connection_halt, :snapshot_source_mismatch} = halt ->
         halt
 
-      _in_flight_chunk ->
-        await_snapshot_halt!(deadline)
+      other ->
+        IO.puts("[aurora-sim-receipt] awaiting halt, saw: #{inspect(other)}")
+        await_snapshot_halt!(deadline, [other | seen])
     after
       1_000 ->
         if System.monotonic_time() > deadline,
-          do: flunk("timed out waiting for :snapshot_source_mismatch across the failover"),
-          else: await_snapshot_halt!(deadline)
+          do:
+            flunk(
+              "timed out waiting for :snapshot_source_mismatch across the failover; events seen: " <>
+                inspect(Enum.reverse(seen))
+            ),
+          else: await_snapshot_halt!(deadline, seen)
     end
   end
 end
