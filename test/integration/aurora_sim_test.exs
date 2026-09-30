@@ -305,20 +305,20 @@ defmodule Capstan.Integration.AuroraSimTest do
 
     promote!(sim, writer, promotable, :promotable)
 
-    halt =
-      await_snapshot_halt!(
-        System.monotonic_time() + System.convert_time_unit(180_000, :millisecond, :native)
-      )
+    # OBSERVED (the sim's first runs, and the real Aurora receipt run): when the flip
+    # severs BOTH the stream and the snapshot's query connections and they reconnect
+    # through the endpoint to the SAME promoted writer, the pinned-identity check sees
+    # no mismatch — the backfill rides out the failover and COMPLETES, gap-free, with
+    # no re-delivery beyond the bounded in-flight-chunk window. (:snapshot_source_mismatch
+    # fires when the query connection lands on a DIFFERENT server than the stream's pin —
+    # the constructed case of the substrate snapshot marquees; it is not this shape.)
+    assert_receive {:snapshot_event, :completed, %{}, %{}}, 600_000
+    refute_receive {:snapshot_event, :halt, %{}, %{reason: :snapshot_source_mismatch}}, 300
 
-    IO.puts("[aurora-sim-receipt] snapshot halted across failover #{inspect(halt)}")
-    MysqlCase.stop_pipeline(sup)
+    IO.puts("[aurora-sim-receipt] snapshot completed across failover (no mismatch)")
 
-    # Restart through the endpoint (now the promoted writer): the durable cursors
-    # resume and the backfill completes; 200 keys, the only permitted duplicate the
-    # bounded in-flight-chunk re-emit (one row — chunk_size 1, one restart).
-    _sup2 = start_pipeline.()
-    assert_receive {:snapshot_event, :completed, %{}, %{}}, 300_000
-
+    # Restart NOT needed (no halt); 200 keys delivered exactly once per key, the only
+    # permitted duplicate the bounded in-flight-chunk re-emit (chunk_size 1, one drop).
     ids = ledger |> MysqlCase.ledger_dump() |> Enum.map(fn {{^schema, "snap", pk}, _} -> pk end)
     assert Enum.uniq(ids) |> length() == 200
     assert length(ids) in 200..201
@@ -477,32 +477,6 @@ defmodule Capstan.Integration.AuroraSimTest do
           Process.sleep(200)
           eventually_poll(what, read, deadline)
         end
-    end
-  end
-
-  # Loop over in-flight chunk events until the failover's identity halt arrives. Every
-  # OTHER event is logged and accumulated, and the timeout flunk names what actually
-  # fired — a snapshot run's halt reason is a finding, never noise.
-  defp await_snapshot_halt!(deadline, seen \\ []) do
-    receive do
-      {:snapshot_event, :halt, _measurements, %{reason: :snapshot_source_mismatch}} = halt ->
-        halt
-
-      {:connection_halt, :snapshot_source_mismatch} = halt ->
-        halt
-
-      other ->
-        IO.puts("[aurora-sim-receipt] awaiting halt, saw: #{inspect(other)}")
-        await_snapshot_halt!(deadline, [other | seen])
-    after
-      1_000 ->
-        if System.monotonic_time() > deadline,
-          do:
-            flunk(
-              "timed out waiting for :snapshot_source_mismatch across the failover; events seen: " <>
-                inspect(Enum.reverse(seen))
-            ),
-          else: await_snapshot_halt!(deadline, seen)
     end
   end
 end
