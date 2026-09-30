@@ -195,6 +195,63 @@ jobs:
         if: always()
         run: docker rm -f mysql-cdc-probe capstan-disposable || true
 
+  # The AURORA FAILOVER SIMULATOR (scripts/aurora-sim): three real MySQL 8.0 nodes —
+  # a writer, a promotable read-only GTID replica, and a read-only binlog-off "reader" —
+  # behind an HAProxy "cluster endpoint" the :aurora_sim tier flips through its admin
+  # socket (ADR-0013's simulator arm). No AWS account: this is the local, per-push
+  # verification of the failover contract (reader refusal at the gate, two promotions
+  # with loss 0 under the cycle-reset budget, snapshot-across-failover). The compose
+  # file publishes exactly the ports config/runtime.exs defaults to (AURORA_SIM_*), so
+  # the suite needs no environment wiring here; `--wait` blocks on the healthchecks.
+  aurora-sim:
+    name: Aurora failover simulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MIX_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Require Docker
+        run: |
+          docker info >/dev/null 2>&1 || { echo "::error::Docker daemon unavailable — the simulator marquees cannot run."; exit 1; }
+
+      - name: Start the simulator stack
+        run: docker compose -f scripts/aurora-sim/docker-compose.yml up -d --wait
+
+      - name: Set up BEAM (Erlang/OTP + Elixir)
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+
+      - name: Cache deps and _build
+        uses: actions/cache@v5
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-aurora-sim-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-aurora-sim-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      # The tier wires the GTID replica chain itself in setup_all and drives the
+      # failovers through HAProxy's admin socket. A red run is a REAL finding (harness
+      # or contract drift), never skipped.
+      - name: Aurora-sim marquees
+        run: mix test --only aurora_sim
+
+      - name: Teardown
+        if: always()
+        run: docker compose -f scripts/aurora-sim/docker-compose.yml down -v
+
   # The REFERENCE EXAMPLE (examples/replication_pipeline): a docker stack
   # (source MySQL → capstan release container → destination MySQL) that is the
   # public sink API's canary — if capstan breaks its consumer surface, this
