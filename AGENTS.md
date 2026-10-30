@@ -74,30 +74,20 @@ defaults `:ssl.connect` to `verify_peer` and MySQL's auto-generated cert is self
 true` requires EITHER a `cacertfile` OR an explicit `verify: :verify_none` (documented as
 confidentiality without authentication). Neither given → fail closed `:tls_verification_unspecified`.
 
-## Workflow (owner ruling, October 28, 2026)
+## Workflow
 
-Process is sized to the risk of the specific change, never the repository. Each check, gate,
-record or review names the failure it prevents.
+Make the change, run the tests that cover it, commit with named paths, and push to `main`. CI runs
+once on `main`; if it goes red, fix forward. Publishing, deploying and pushes to mirrors need the
+owner's approval for that action.
 
-- **Heavy** when the diff touches the MySQL protocol, handshake/TLS or binlog decoding
-  (`lib/capstan/protocol/`, `lib/capstan/connection.ex`, `lib/capstan/binlog/`,
-  `lib/capstan/zstd*`), GTID position, checkpoint or transaction assembly (`gtid.ex`,
-  `position.ex`, `checkpoint_store.ex`, `assembler*.ex`, `xa/`), the precondition gate
-  (`config.ex`, `query.ex`) or the Rule 1 redaction boundary (`error.ex`, `telemetry.ex`). Write
-  the failing test first, get one independent review and do one fix round, and run the declared
-  local gate once before pushing. Heavy pushes need the owner's approval.
-- **Light** for everything else: focused checks on the changed behavior, then push; hosted CI
-  is the gate. No outcome record, gauge or review; the commit message is the record. A light
-  change the owner asked for lands without a separate push approval.
-- Publishing, deploying and pushes to mirrors always need the owner's approval for that action.
 - A test that fails on every run is a defect: fix it, or quarantine it with a reason, in the
   change that finds it.
 - Update the CHANGELOG when behavior, a dependency or a contract changes; other docs only when
   a contract changes.
 
-Declared local gate: `mix compile --warnings-as-errors && mix test && mix quality` (`mix quality`
-= format check + `credo --strict` + dialyzer; `mix audit` also lives in `mix.exs`). Focused checks
-on touched files, prod and test: format, compile with warnings as errors, credo.
+CI runs: `mix compile --warnings-as-errors`, `mix format --check-formatted`, `mix credo --strict`,
+`mix test` (plus the `live`, `integration`, `disposable_mysql` and `aurora_sim` tiers) and
+`mix dialyzer`; `mix quality` bundles format, credo and dialyzer. Run the ones that cover your change.
 
 **Publish gate:** a version bump or Hex publish requires a FULL documentation sweep first — every
 doc in the `mix.exs` `files:` set (including `notebooks/getting_started.livemd` and both
