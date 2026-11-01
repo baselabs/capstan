@@ -6,6 +6,16 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-11-01
+
+### Fixed — the package description and the `Capstan` moduledoc opening still said effect-once was "planned"
+
+Both carried 1.0-era text ("sink-owned effect-once mode planned" / "C1 validates but does
+not yet run") into the hex.pm storefront and the hexdocs landing page. The sink-owned
+effect-once mode shipped in 1.2.0 (C1a) and is proven live by the effect-once integration
+marquee. A version bump because a package's description is immutable tarball metadata;
+nothing else changes.
+
 ## [1.3.2] - 2026-11-01
 
 ### Fixed — the aurora-sim CI harness (test-only; no library change)
@@ -558,7 +568,8 @@ C1 ships **lib-owned checkpoint mode** and **resume-from-durable-checkpoint**
 (`:sink_owned_mode_unsupported`, `:start_position_override_unsupported`,
 `:start_position_current_unsupported`).
 
-[Unreleased]: https://github.com/baselabs/capstan/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/baselabs/capstan/compare/v1.3.3...HEAD
+[1.3.3]: https://github.com/baselabs/capstan/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/baselabs/capstan/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/baselabs/capstan/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/baselabs/capstan/compare/v1.2.3...v1.3.0

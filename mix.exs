@@ -1,7 +1,7 @@
 defmodule Capstan.MixProject do
   use Mix.Project
 
-  @version "1.3.2"
+  @version "1.3.3"
   @source_url "https://github.com/baselabs/capstan"
 
   def project do
@@ -25,8 +25,8 @@ defmodule Capstan.MixProject do
       name: "Capstan",
       description:
         "Framework-agnostic Elixir CDC consumer for MySQL binary-log replication (row-based " <>
-          "binlog) — streams committed transactions to a pluggable sink, fail-closed, " <>
-          "at-least-once (sink-owned effect-once mode planned).",
+          "binlog) — streams committed transactions to a pluggable sink, fail-closed; " <>
+          "at-least-once, or effect-once in sink-owned checkpoint mode.",
       source_url: @source_url,
       homepage_url: @source_url,
       dialyzer: [

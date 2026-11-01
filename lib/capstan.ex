@@ -3,11 +3,12 @@ defmodule Capstan do
   Framework-agnostic Elixir CDC consumer for MySQL row-based binary-log replication,
   delivering committed transactions to a pluggable **sink** with fail-closed,
   transaction-granularity delivery: the checkpoint advances only after the sink has
-  durably applied a transaction (ADR-0003). In C1's lib-owned checkpoint mode this
+  durably applied a transaction (ADR-0003). In the default lib-owned checkpoint mode this
   is **at-least-once** — a crash between the sink write and the checkpoint re-delivers the
-  transaction on restart (a bounded duplicate window). Effect-once delivery is the
-  sink-owned atomic path (the sink persisting its write and the position together), which
-  C1 validates but does not yet run — see `Capstan.Sink` and ADR-0004.
+  transaction on restart (a bounded duplicate window). **Effect-once** delivery is the
+  sink-owned atomic path — the sink persists its write and the position together via
+  `c:Capstan.Sink.checkpoint/0` (ADR-0004's deferred arm, landed; see "Checkpoint mode"
+  and usage-rules "Sink-owned checkpoint mode").
 
   ## Starting a pipeline
 
