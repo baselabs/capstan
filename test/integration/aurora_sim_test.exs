@@ -44,8 +44,6 @@ defmodule Capstan.Integration.AuroraSimTest do
   # in a cluster manifest); the throwaway harness accounts from scripts/aurora-sim/init.
   @source_writer "writer"
   @source_promotable "promotable"
-  @admin_user "admin_sim"
-  @admin_password "admin_sim_pw"
   @repl_user "repl"
   @repl_password "repl_pw"
 
@@ -296,6 +294,24 @@ defmodule Capstan.Integration.AuroraSimTest do
       sup
     end
 
+    # The flip below inverts the topology (promotable leads, the writer demoted
+    # read-only) and nothing later in this marquee flips it back. ExUnit's test order
+    # is random, and "two failovers" plants on the WRITER node — run this test first
+    # and that one meets a super-read-only writer (MySQL 1290) at its first CREATE.
+    # Restore the setup_all shape here, whatever this test's own outcome; registered
+    # before the pipeline's own on_exit so it runs after the pipeline is stopped.
+    on_exit(fn ->
+      writer_sock = connect_node!(sim, :writer_port)
+      promotable_sock = connect_node!(sim, :promotable_port)
+
+      if query!(writer_sock, "SELECT @@global.super_read_only") == [["1"]] do
+        promote!(sim, promotable_sock, writer_sock, :writer)
+      end
+
+      MysqlCase.close!(writer_sock)
+      MysqlCase.close!(promotable_sock)
+    end)
+
     sup = start_pipeline.()
 
     # Several chunks in, the backfill is demonstrably live; flip INTO it.
@@ -332,11 +348,14 @@ defmodule Capstan.Integration.AuroraSimTest do
         MysqlCase.stop_pipeline(sup)
         _sup2 = start_pipeline.()
 
+        # Only the halted-and-restarted shape owes a completion: the receive above
+        # consumed the ONE completed event the coordinator ever emits, so awaiting
+        # another after :completed_in_place can only time out.
+        assert_receive {:snapshot_event, :completed, %{}, %{}}, 600_000
+
       :completed_in_place ->
         :ok
     end
-
-    assert_receive {:snapshot_event, :completed, %{}, %{}}, 600_000
 
     ids = ledger |> MysqlCase.ledger_dump() |> Enum.map(fn {{^schema, "snap", pk}, _} -> pk end)
     assert Enum.uniq(ids) |> length() == 200
