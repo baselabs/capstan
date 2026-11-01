@@ -6,7 +6,9 @@
 
 capstan speaks the MySQL wire protocol and the replication protocol directly: handshake and
 authentication (including `caching_sha2_password`'s RSA/SCRAM exchange), TLS negotiation, the
-five-variable precondition query, `SET @master_binlog_checksum` / `@master_heartbeat_period`,
+precondition query (five variables at C1; six since
+[ADR-0013](0013-aurora-mysql-source.md) added `log_bin`), `SET @master_binlog_checksum` /
+`@master_heartbeat_period`,
 and `COM_BINLOG_DUMP_GTID` with a GTID-set resume position — then a lifetime of binlog event
 bytes. The ecosystem norm for this in BEAM-land is either a NIF wrapper around a C client or a
 protocol dependency; capstan's sibling (replicant, Postgres) instead owns its protocol surface

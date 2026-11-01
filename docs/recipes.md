@@ -57,7 +57,7 @@ write.
 Capstan.start_link(
   connection: connection_opts(),
   server_id: 4321,
-  sink: MyApp.WarehouseSink,          # implements handle_batch/2 + checkpoint/0
+  sink: MyApp.WarehouseSink,          # implements handle_batch/2 (the atomic batch write below)
   checkpoint_store: [module: MyApp.CheckpointStore],
   batch: [max_transactions: 200, flush_ms: 500, mode: :sink_owned],
   tables: [{"shop", "orders"}]

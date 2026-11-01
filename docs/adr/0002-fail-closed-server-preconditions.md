@@ -1,6 +1,9 @@
 # ADR-0002 — Fail-closed server preconditions
 
-**Status:** Accepted (C1) · **Design refs:** Q3, Q5, Q16, Q17, F6
+**Status:** Accepted (C1) · **Design refs:** Q3, Q5, Q16, Q17, F6 · **Extended by:**
+[ADR-0013](0013-aurora-mysql-source.md) (2026-09-29 — the gate reads a SIXTH variable, `log_bin`,
+refusing `:binlog_disabled`; on Aurora it is the one variable that names a disabled binlog. The
+five-variables language below is the C1-era decision as accepted)
 
 ## Context
 

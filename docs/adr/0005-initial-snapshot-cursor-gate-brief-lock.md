@@ -2,6 +2,16 @@
 
 **Status:** Accepted (user-approved 2026-07-21) · **Extends:** [ADR-0002](0002-fail-closed-server-preconditions.md) (adds snapshot-path preconditions) · **Honors, does not supersede:** [ADR-0001](0001-position-and-dedup-model.md), [ADR-0003](0003-transaction-shape-and-checkpoint-semantics.md), [ADR-0004](0004-c1-scope-lib-owned-checkpoint-only.md)
 
+## Implementation-currency amendment (2026-11-01)
+
+Two refusals this ADR shipped were discharged by the recorded 1.2.0 release: explicit start
+positions (`%Position{}` override / `:current` — §1's "C1b stays deferred" below is historical;
+the `P0` pre-seed now rides the same machinery), and `tables: :all` snapshot resolution (§7's
+`:config_invalid` refusal — C2b resolves `:all` to the scoped base-table set when the capture
+allowlist is itself `:all`). The string-PK refusal named in §7 landed as
+[ADR-0012](0012-collation-string-pk-weight-cursor.md). See [CHANGELOG](../../CHANGELOG.md#120---2026-08-23).
+No other clause below is affected.
+
 ## Context
 
 C2 backfills the rows that pre-exist a capstan pipeline's start, woven into the continuously-running

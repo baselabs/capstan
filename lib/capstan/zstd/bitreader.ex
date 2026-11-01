@@ -64,7 +64,10 @@ defmodule Capstan.Zstd.BitReader do
   # -- reverse (MSB-first, from the end) ---------------------------------------
 
   defmodule Reverse do
-    @moduledoc false
+    @moduledoc """
+    The MSB-first, last-byte-first bit reader — see the parent module's moduledoc for the
+    RFC 8878 conventions it implements. Internal to the zstd decoder.
+    """
     @type t :: %__MODULE__{bits: tuple(), pos: non_neg_integer()}
     defstruct [:bits, :pos]
 

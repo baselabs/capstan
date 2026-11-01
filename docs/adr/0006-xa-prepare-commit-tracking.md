@@ -9,7 +9,7 @@ that path. · **Honors:** [0001](0001-position-and-dedup-model.md), [0002](0002-
 
 ## September 21, 2026 implementation-currency amendment
 
-OBSERVED through `rg -n` source reads: `Assembler.apply_decoded` routes `:track` XA prepares into the bounded pool and keeps `:refuse` as a distinct refusal path; `Connection.maybe_xa_recover` performs the tracking-mode recovery setup. [CHANGELOG](../../CHANGELOG.md#120---2026-08-23) records C5 delivery in 1.2.0. The prior "implementation pending" status is superseded. These are source and recorded-release facts, not a new executed acceptance receipt. The held-out watermark, restart recovery, and consumer durability obligations below remain the contract.
+OBSERVED through `rg -n` source reads: `Capstan.Assembler.apply_decoded` routes `:track` XA prepares into the bounded pool and keeps `:refuse` as a distinct refusal path; `Capstan.Connection.maybe_xa_recover` performs the tracking-mode recovery setup. [CHANGELOG](../../CHANGELOG.md#120---2026-08-23) records C5 delivery in 1.2.0. The prior "implementation pending" status is superseded. These are source and recorded-release facts, not a new executed acceptance receipt. The held-out watermark, restart recovery, and consumer durability obligations below remain the contract.
 
 ## Context
 

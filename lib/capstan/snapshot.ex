@@ -1,7 +1,7 @@
 defmodule Capstan.Snapshot do
   @moduledoc """
   Initial-snapshot public config validation + the **bootstrap orchestration** (C2 —
-  the `P0` pre-seed that avoids C1b, design Q10 / Ch5).
+  the `P0` pre-seed; design Q10 / Ch5).
 
   ## What the bootstrap does
 
@@ -30,8 +30,8 @@ defmodule Capstan.Snapshot do
     4. **Seed the checkpoint store.** `P0` is written ONLY when the checkpoint is empty or
        already equals `p0` (`seed_checkpoint/2`) — it NEVER regresses a watermark the stream
        already advanced. This makes the dump AND the assembler watermark both resolve to `P0`
-       through the sanctioned `start_position: :checkpoint` path (no C1b, no ADR-0004
-       supersession).
+       through the sanctioned `start_position: :checkpoint` path — the seed makes the two
+       agree by construction, no explicit start-position override needed.
     5. **Seed the durable `%State{}` + open the readers.** A `Capstan.Snapshot.ChunkReader` is
        opened per not-done snapshot table (introspecting the order-faithful PK + baseline
        fingerprint), and the `%State{}` (per-table `pk_cursor: :start`, `p0`) is persisted. On

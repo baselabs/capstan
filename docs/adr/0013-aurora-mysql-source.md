@@ -53,7 +53,7 @@ Name Aurora MySQL version 3 as a supported source, with these additions and rule
    text that names the reader role maps to a new `:binlog_source_not_writer`; if a reader
    reports `log_bin = OFF`, `:binlog_disabled` already covers it and no second reason is added.
    No reason is added that the probe did not show a need for.
-2. **Identity and gap checks.** They apply unchanged. `Connection.gap_check/3`
+2. **Identity and gap checks.** They apply unchanged. `Capstan.Connection.gap_check/3`
    (checkpoint not a subset of `gtid_executed` halts `:source_identity_mismatch`; unapplied
    remainder intersecting `gtid_purged` halts `:data_gap`) is the whole failover and retention
    story. After a failover the checkpoint's GTIDs must appear in the new writer's
@@ -62,7 +62,7 @@ Name Aurora MySQL version 3 as a supported source, with these additions and rule
    (documented maximum 2160 on version 3); capstan does not read or set that value itself.
 3. **The cycle counter.** It learns to tell a failover from an eviction. When a reconnect observes a
    different `@@server_uuid` from the previous cycle (read through the existing
-   `Config.read_server_uuid/1` on the stream socket) and `gap_check/3` passes, the cycle
+   `Capstan.Config.read_server_uuid/1` on the stream socket) and `gap_check/3` passes, the cycle
    counter resets: the server changed, which an eviction by duplicate `server_id` never does.
    A cycle against the same `@@server_uuid` still counts, so `:server_id_conflict` keeps its
    meaning. The reset is value-free (`@@server_uuid` is structural identity, as `Capstan.Query`
@@ -255,5 +255,5 @@ Aurora-INFERRED rows stay INFERRED — only a real cluster turns them OBSERVED.
 servers built to `docs/testing.md`'s substrate flags, driven through capstan's own protocol
 client): `SELECT @@global.log_bin` returns the text `"1"` on MySQL 8.0.46 and 8.4.11 (never
 `"ON"`), the full six-variable row reads `["ROW","FULL","FULL","","ON","1"]` on both, and
-`Config.check_preconditions/1` returns `:ok` on both — the gate's enabled literal and the
+`Capstan.Config.check_preconditions/1` returns `:ok` on both — the gate's enabled literal and the
 unchanged behavior on a healthy self-managed source are proven, not assumed.

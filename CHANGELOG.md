@@ -6,6 +6,53 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-01
+
+### Fixed — the aurora-sim CI harness (test-only; no library change)
+
+The Aurora failover simulator job had gone red on a seed-order-dependent harness defect pair,
+both in the test tier — the library's behavior matched its documented contract in both cases:
+
+- The snapshot-across-failover marquee's outcome `receive` consumed the ONE completed event the
+  coordinator ever emits, then unconditionally awaited a second — a structural deadlock whenever
+  the backfill rode out the flip (`:completed_in_place`, one of the two documented outcomes).
+  The final completion assert now lives only in the halted-and-restarted branch that owes it.
+- That marquee leaves the topology inverted (promotable leads, writer super-read-only,
+  endpoint → promotable) and restored nothing; with ExUnit's randomized per-run ordering, any
+  seed ordering it before "two failovers" failed that test's first `CREATE DATABASE` with MySQL
+  1290. An `on_exit` promote-back restores the setup shape whatever the outcome. Also drops two
+  dead module attributes (test-compile warnings).
+- Proven on real MySQL both orderings (random seed and the previously failing seed).
+
+### Fixed — documentation truth (the full pre-release sweep)
+
+- **usage-rules.md** still described sink-owned checkpointing and explicit start positions as
+  deferred, listed three start-up refusal atoms retired in 1.2.0 (`:sink_owned_mode_unsupported`,
+  `:start_position_override_unsupported`, `:start_position_current_unsupported`), said "Four
+  callbacks" while omitting `handle_snapshot/2` and `handle_batch/2`, and called `checkpoint/0`
+  "consulted only in the (deferred) sink-owned mode" — all 1.2.0-era staleness. The Sink section
+  now carries all five callbacks with per-mode requirements.
+- **Hexdocs rendered the ADR set incompletely**: `docs/adr/*` ships in the tarball, but the ExDoc
+  extras stopped at ADR-0011 — the ADR index, ADR-0012 (collation string PKs) and ADR-0013
+  (Aurora) were invisible, and README's relative ADR-index link 404ed there. All 14 now render.
+- **CHANGELOG link references** were two majors stale: only `0.1.0`/`0.2.0` had compare links,
+  so every `[1.x.y]` heading rendered as literal text. All released versions now link.
+- Dated implementation-currency amendments on ADR-0002/0003/0005 (the six-variable gate, XA
+  opt-in supersession, the 1.2.0 discharge of the C1b/`:all` refusals), the precondition-query
+  count in ADR-0008, and ADR-0012's marquee file pointer (`snapshot_string_pk_test.exs`, not
+  `snapshot_test.exs`).
+- The getting-started Livebook's flow re-verified live end-to-end against the released code
+  (seed → stream → kill → change-while-down → restart → resume with zero replays); its `~> 1.3`
+  pin and six-variable narrative are current — no change needed.
+
+### Changed — dependency hygiene
+
+- `mix.lock` pins `decimal` 3.2.0, clearing EEF security advisory
+  [EEF-CVE-2026-97853](https://security.erlef.org/) (unbounded allocation in
+  `Decimal.round/3`; decimal is transitive here and the existing `~> 3.1` requirement already
+  admits 3.2.0 — `mix deps.update decimal` is all a consumer needs; the published package's
+  constraint is unchanged).
+
 ## [1.3.1] - 2026-09-30
 
 ### Fixed — the shipped aurora-sim harness actually runs
@@ -511,6 +558,17 @@ C1 ships **lib-owned checkpoint mode** and **resume-from-durable-checkpoint**
 (`:sink_owned_mode_unsupported`, `:start_position_override_unsupported`,
 `:start_position_current_unsupported`).
 
-[Unreleased]: https://github.com/baselabs/capstan/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/baselabs/capstan/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/baselabs/capstan/compare/v1.3.1...v1.3.2
+[1.3.1]: https://github.com/baselabs/capstan/compare/v1.3.0...v1.3.1
+[1.3.0]: https://github.com/baselabs/capstan/compare/v1.2.3...v1.3.0
+[1.2.3]: https://github.com/baselabs/capstan/compare/v1.2.2...v1.2.3
+[1.2.2]: https://github.com/baselabs/capstan/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/baselabs/capstan/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/baselabs/capstan/compare/v1.1.1...v1.2.0
+[1.1.1]: https://github.com/baselabs/capstan/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/baselabs/capstan/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/baselabs/capstan/compare/v0.3.0...v1.0.0
+[0.3.0]: https://github.com/baselabs/capstan/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/baselabs/capstan/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/baselabs/capstan/releases/tag/v0.1.0

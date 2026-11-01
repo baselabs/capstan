@@ -6,8 +6,7 @@ supervision tree. This file is the consumer-facing contract; the permanent decis
 
 > **Checkpoint modes:** **lib-owned** (default — capstan persists the processed GTID
 > set) and **sink-owned** (C1a — the sink persists its data and the position atomically
-> together; see "Sink-owned checkpoint mode"). Explicit start positions remain a named
-> follow-up (C1b).
+> together; see "Sink-owned checkpoint mode").
 
 ## Starting a pipeline
 
@@ -109,16 +108,23 @@ is simply resumed from:
 `:server_id_required`, `:config_invalid`, `:tls_verification_unspecified`,
 `:invalid_liveness_config`, `:unknown_option`, `:invalid_sink`,
 `:sink_missing_handle_transaction`, `:sink_missing_checkpoint`,
-`:sink_missing_handle_schema_change`, `:checkpoint_store_required`, `:sink_owned_mode_unsupported`,
-`:start_position_override_unsupported`, `:start_position_current_unsupported`. In snapshot mode
+`:sink_missing_handle_schema_change`, `:checkpoint_store_required`. In snapshot mode
 also: `:sink_missing_handle_snapshot`, `:snapshot_table_not_captured`, and `:config_invalid` for a
-mis-shaped `snapshot:` block or a `tables: :all` snapshot set (see Initial snapshot). No row value,
+mis-shaped `snapshot:` block or a `tables: :all` snapshot set with a concrete capture list (see
+Initial snapshot). No row value,
 column value, or password ever appears in an error, log line, or telemetry payload (Rule 1).
 
 ## The `Capstan.Sink` behaviour
 
-Four callbacks; every one is `@optional_callbacks` — which are required depends on the mode.
-For C1's lib-owned mode you implement `handle_transaction/1` and `handle_schema_change/2`.
+Five callbacks; every one is `@optional_callbacks` — which are required depends on the mode:
+
+| Callback | Required when |
+| --- | --- |
+| `handle_transaction/1` | always |
+| `handle_schema_change/2` | always |
+| `handle_snapshot/2` | snapshot mode |
+| `handle_batch/2` | `batch: [mode: :sink_owned]` |
+| `checkpoint/0` | sink-owned checkpoint mode (`checkpoint_store:` omitted) |
 
 ```elixir
 @callback handle_transaction(Capstan.Transaction.t()) ::
@@ -127,8 +133,13 @@ For C1's lib-owned mode you implement `handle_transaction/1` and `handle_schema_
 @callback handle_schema_change(Capstan.SchemaChange.t(), Capstan.Position.t()) ::
             :ok | {:error, term()}
 
+@callback handle_snapshot([Capstan.Change.t()], Capstan.Snapshot.Meta.t()) ::
+            :ok | {:error, term()}
+
+@callback handle_batch([term()], Capstan.Position.t()) ::
+            {:ok, Capstan.Position.t()} | {:error, term()}
+
 @callback checkpoint() :: {:ok, Capstan.Position.t() | nil} | {:error, term()}
-# checkpoint/0 is consulted only in the (deferred) sink-owned mode.
 ```
 
 Three load-bearing rules — each guards a silent-loss class the type signature alone does not:
@@ -215,8 +226,10 @@ pre-5.6 temporals remain refused (a supported 8.0+ source never emits them).
 
 **Memory shape.** A transaction is buffered whole in pipeline memory between assembly and
 delivery, so peak memory scales with the source's largest single transaction; in snapshot mode
-add one fully-materialized chunk per table (bounded by `chunk_size`). Streaming/batched delivery
-of very large transactions is a named roadmap row (C3).
+add one fully-materialized chunk per table (bounded by `chunk_size`). A streaming (single-pass,
+non-buffering) delivery path for very large transactions is the multi-output-assembler
+follow-up noted in `docs/ROADMAP.md`'s C3 couplings — the day-one `changes` contract
+(`Enumerable.t()`, enumerate exactly once) already prepares sinks for it.
 
 ## Checkpoint store (lib-owned mode)
 
@@ -237,7 +250,7 @@ the persist boundary so you never leak `file`/`pos`.
 
 Wiring: `checkpoint_store: [module: impl, options: keyword()]` — the pipeline supervises the
 store, calling `impl.start_link(options)` (`options` defaults to `[]`). A store **fault** at
-read or write is retried up to 5 times (not configurable in C1; `:config_invalid` is treated
+read or write is retried up to 5 times (not configurable; `:config_invalid` is treated
 as permanent and halts immediately), then the pipeline halts fail-closed —
 `{:checkpoint_read_failed, reason}` / `{:checkpoint_write_failed, reason}`. This budget is
 separate from `max_command_retries`, which governs only pre-establish connection failures.

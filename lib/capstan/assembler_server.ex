@@ -3,7 +3,8 @@ defmodule Capstan.AssemblerServer do
   The composition point: the GenServer that turns a `Capstan.Connection`'s frame stream
   into durable, fail-closed, at-least-once delivery (lib-owned checkpoint mode — the
   checkpoint advances only after the sink's `{:ok, _}`, so a crash in between re-delivers;
-  see `Capstan` and ADR-0004. Effect-once is the deferred sink-owned atomic path).
+  see `Capstan` and ADR-0004. The sink-owned mode — `c:Capstan.Sink.checkpoint/0` — is
+  effect-once by construction).
 
   `Connection` owns ONLY the socket and forwards `{:binlog_event, raw}` (the raw 19-byte
   header + body + CRC — exactly `Capstan.Binlog.Event.parse/1`'s input) and

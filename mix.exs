@@ -1,7 +1,7 @@
 defmodule Capstan.MixProject do
   use Mix.Project
 
-  @version "1.3.1"
+  @version "1.3.2"
   @source_url "https://github.com/baselabs/capstan"
 
   def project do
@@ -103,6 +103,7 @@ defmodule Capstan.MixProject do
         "CHANGELOG.md",
         {"docs/recipes.md", title: "Recipes"},
         {"docs/telemetry.md", title: "Telemetry Reference"},
+        "docs/adr/index.md",
         "docs/adr/0001-position-and-dedup-model.md",
         "docs/adr/0002-fail-closed-server-preconditions.md",
         "docs/adr/0003-transaction-shape-and-checkpoint-semantics.md",
@@ -113,7 +114,9 @@ defmodule Capstan.MixProject do
         "docs/adr/0008-pure-elixir-protocol-client.md",
         "docs/adr/0009-fail-closed-supervision-and-streaming-liveness.md",
         "docs/adr/0010-exclusive-end-bound-of-com-binlog-dump-gtid.md",
-        "docs/adr/0011-transaction-compression-precondition.md"
+        "docs/adr/0011-transaction-compression-precondition.md",
+        "docs/adr/0012-collation-string-pk-weight-cursor.md",
+        "docs/adr/0013-aurora-mysql-source.md"
       ],
       groups_for_modules: [
         "Consumer API": [
@@ -140,11 +143,13 @@ defmodule Capstan.MixProject do
           Capstan.Pipeline,
           Capstan.Supervisor,
           Capstan.Telemetry,
+          Capstan.Zstd,
           Capstan.Binlog.Decoder,
           Capstan.Binlog.Event,
           Capstan.Binlog.Rows,
           Capstan.Binlog.TableMap,
           Capstan.Binlog.TableRegistry,
+          Capstan.Binlog.TransactionPayload,
           Capstan.Casting.Types,
           Capstan.Protocol.Command,
           Capstan.Protocol.Handshake,

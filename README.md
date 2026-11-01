@@ -162,7 +162,7 @@ payload — that boundary is enforced at runtime, not by convention.
   snapshot-then-stream migration, batching tradeoffs, TLS, "start from now",
   XA sources, and the Amazon Aurora MySQL recipe (cluster parameter group, retention
   hours, the writer endpoint, the AWS CA bundle).
-- **[ADRs](docs/adr/README.md)** — the decision record (position model, fail-closed
+- **[ADRs](docs/adr/index.md)** — the decision record (position model, fail-closed
   posture, snapshot cursor gate, XA tracking, zstd consumption, …).
 - **[CHANGELOG](CHANGELOG.md)**.
 
@@ -185,4 +185,4 @@ sibling). Issues and pull requests are welcome; there is no support SLA.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/baselabs/capstan/blob/main/LICENSE).

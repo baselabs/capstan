@@ -230,8 +230,9 @@ defmodule Capstan.Zstd.Fse do
   # -- decode step --------------------------------------------------------------
 
   @doc "One FSE decode step: `{symbol, next_reader}` for the current state."
-  @spec decode(bitreader_state :: non_neg_integer(), map(), Capstan.Zstd.BitReader.Reverse.t()) ::
-          {non_neg_integer(), non_neg_integer(), Capstan.Zstd.BitReader.Reverse.t()}
+  @type reverse_reader :: Capstan.Zstd.BitReader.Reverse.t()
+  @spec decode(bitreader_state :: non_neg_integer(), map(), reverse_reader()) ::
+          {non_neg_integer(), non_neg_integer(), reverse_reader()}
   def decode(state, cells, reader) do
     {sym, nb, base} = Map.get(cells, state, @cell_default)
     {value, reader2} = BitReader.Reverse.read(reader, nb)

@@ -88,6 +88,6 @@ and in the NOT-NULL unique-key fallback — with the **server as the only collat
 - Probes: `probe/collation_weight_probe.exs` (16/16) + `probe/collation_extra_probe.exs`
   (COLLATE pin), findings recorded in `probe/FINDINGS.md`; refman `WEIGHT_STRING()` read
   first-hand.
-- Marquee: `test/integration/snapshot_test.exs` (ai_ci + as_cs arms with concurrent
+- Marquee: `test/integration/snapshot_string_pk_test.exs` (ai_ci + as_cs arms with concurrent
   straddling changes, delivered-record-keys invariant, resume).
 - Unit tripwires: `test/capstan/snapshot/{primary_key,cursor_gate,chunk_reader,coordinator}_test.exs`.

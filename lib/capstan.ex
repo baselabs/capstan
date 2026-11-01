@@ -22,7 +22,7 @@ defmodule Capstan do
         server_id: 1001,                       # replica identity; MUST be unique in the topology
         sink: MyApp.OrdersSink,                # implements Capstan.Sink
         checkpoint_store: [module: MyApp.Store],   # lib-owned mode; see below
-        start_position: :checkpoint,           # C1: :checkpoint (default) only — see below
+        start_position: :checkpoint,           # :checkpoint (default) | %Position{} | :current
         max_command_retries: 5,
         heartbeat_period_ms: 15_000,           # liveness: the window MUST exceed the heartbeat
         stream_timeout_ms: 60_000              # (defaults shown; see "Streaming liveness")
@@ -80,7 +80,6 @@ defmodule Capstan do
   sink must implement `c:Capstan.Sink.handle_snapshot/2` (else `:sink_missing_handle_snapshot`),
   the snapshot tables must be a subset of the capture allowlist (else
   `:snapshot_table_not_captured`), and a missing/mis-shaped `store` is refused `:config_invalid`.
-  `:current` / `%Capstan.Position{}` start positions stay refused fail-closed (no C1b).
   """
 
   alias Capstan.Config

@@ -1,6 +1,10 @@
 # ADR-0003 — Transaction shape and checkpoint semantics
 
-**Status:** Accepted (C1) · **Design refs:** Q13, Q14 (plus the Q8 `server_id`-conflict detail)
+**Status:** Accepted (C1) · **Design refs:** Q13, Q14 (plus the Q8 `server_id`-conflict detail) ·
+**Superseded in part by:** [ADR-0006](0006-xa-prepare-commit-tracking.md) for the opt-in
+`xa: :track` path (§2's refusal below is, and remains, the DEFAULT posture) · **Extended by:**
+[ADR-0013](0013-aurora-mysql-source.md) (a failover-observed `@@server_uuid` change is not a
+`server_id` conflict)
 
 ## Context
 
