@@ -49,7 +49,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       # DOCKER MANDATE (routed from Task 18). CI provides both servers as runner containers: the
       # shared substrate the :live/:integration marquees stream from, and the disposable MySQL 8.0
@@ -103,13 +103,13 @@ jobs:
             --default-authentication-plugin=mysql_native_password
 
       - name: Set up BEAM (Erlang/OTP + Elixir)
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           otp-version: "28"
           elixir-version: "1.19"
 
       - name: Cache deps and _build
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             deps
@@ -211,7 +211,7 @@ jobs:
       MIX_ENV: test
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Require Docker
         run: |
@@ -221,13 +221,13 @@ jobs:
         run: docker compose -f scripts/aurora-sim/docker-compose.yml up -d --wait
 
       - name: Set up BEAM (Erlang/OTP + Elixir)
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           otp-version: "28"
           elixir-version: "1.19"
 
       - name: Cache deps and _build
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             deps
@@ -267,7 +267,7 @@ jobs:
         working-directory: examples/replication_pipeline
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Build and start the stack
         run: docker compose up -d --build
@@ -335,16 +335,16 @@ jobs:
       MIX_ENV: test
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up BEAM (Erlang/OTP + Elixir)
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           otp-version: "26"
           elixir-version: "1.15.8"
 
       - name: Cache deps and _build
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             deps
