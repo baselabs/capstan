@@ -76,9 +76,11 @@ confidentiality without authentication). Neither given → fail closed `:tls_ver
 
 ## Workflow
 
-Make the change, run the tests that cover it, commit with named paths, and push to `main`. CI runs
-once on `main`; if it goes red, fix forward. Publishing, deploying and pushes to mirrors need the
-owner's approval for that action.
+Make the change, run the tests that cover it, and commit with named paths. Land every change with
+`~/Developer/kimosabe/bin/kimosabe-land --repo . --sha HEAD`: it pushes `kci/<sha>`, waits for that
+run's `qualified` check, and moves the default branch. CI runs once, on the candidate. Nobody pushes
+the default branch; if CI goes red, fix forward. Publishing, deploying and pushes to mirrors need
+the owner's approval for that action.
 
 - A test that fails on every run is a defect: fix it, or quarantine it with a reason, in the
   change that finds it.

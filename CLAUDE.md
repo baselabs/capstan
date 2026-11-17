@@ -7,6 +7,8 @@ the seven binding Critical Rules, the workflow, testing, and the local substrate
   ports from `.env`, `MYSQL_PORT_80`/`MYSQL_PORT_84` = 11619/15401, user `capstan_sha2`). Never start
   a local MySQL; if a server is unreachable, stop and report it. `:disposable_mysql` tests use
   `CAPSTAN_DISPOSABLE_MYSQL_PORT` (`docs/testing.md`).
-- **Workflow:** change it, run the tests that cover it, commit with named paths, push to `main`;
-  CI runs once there, fix forward if it goes red.
+- **Workflow:** change it, run the tests that cover it, and commit with named paths. Land every
+  change with `~/Developer/kimosabe/bin/kimosabe-land --repo . --sha HEAD`: it pushes `kci/<sha>`,
+  waits for that run's `qualified` check, and moves the default branch. CI runs once, on the
+  candidate. Nobody pushes the default branch; fix forward if CI goes red.
 - **History:** `docs/reference/agent-history.md`.
