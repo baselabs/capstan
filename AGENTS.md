@@ -155,3 +155,10 @@ starts it as a runner container; `docs/testing.md` describes providing it.
 `graphify query|explain|path` for orientation. Output is NAVIGATION, never evidence (Elixir edges
 are file-local; alias-mediated calls are not resolved): verify load-bearing claims against live
 code. `graphify update .` refreshes it after large uncommitted changes.
+
+## CI/CD and releases
+
+Releases, deployments, and publications are done by the infra session (`infra-1`). The project
+lands on its default branch with `kimosabe-land --repo . --sha <full sha>` and stops there.
+The requirements live in the infra repository at `baselabs/docs/ci.md`,
+"What infra requires of every product".

@@ -13,7 +13,7 @@ WORKDIR /build
 # capstan (path dep) is COPYed first so dep layers cache independently.
 COPY mix.exs mix.lock README.md LICENSE ./
 COPY lib ./lib
-COPY examples/replication_pipeline/mix.exs ./examples/replication_pipeline/mix.exs
+COPY examples/replication_pipeline/mix.exs examples/replication_pipeline/mix.lock ./examples/replication_pipeline/
 COPY examples/replication_pipeline/lib ./examples/replication_pipeline/lib
 COPY examples/replication_pipeline/priv ./examples/replication_pipeline/priv
 
@@ -22,7 +22,7 @@ WORKDIR /build/examples/replication_pipeline
 ENV MIX_ENV=prod
 
 RUN mix local.hex --force && mix local.rebar --force \
-    && mix deps.get --only prod \
+    && mix deps.get --only prod --check-locked \
     && mix compile --warnings-as-errors
 
 RUN mix release
