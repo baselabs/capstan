@@ -111,16 +111,6 @@ jobs:
       - name: Set up BEAM (Erlang/OTP + Elixir)
         uses: ./.github/actions/setup-beam
 
-      - name: Cache deps and _build
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: |
-            deps
-            _build
-          key: ${{ runner.os }}-mix-${{ matrix.mysql }}-${{ hashFiles('mix.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-mix-${{ matrix.mysql }}-
-
       - name: Install dependencies
         run: mix deps.get --check-locked
 
@@ -240,16 +230,6 @@ jobs:
 
       - name: Set up BEAM (Erlang/OTP + Elixir)
         uses: ./.github/actions/setup-beam
-
-      - name: Cache deps and _build
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: |
-            deps
-            _build
-          key: ${{ runner.os }}-mix-aurora-sim-${{ hashFiles('mix.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-mix-aurora-sim-
 
       - name: Install dependencies
         run: mix deps.get --check-locked
@@ -378,18 +358,7 @@ jobs:
       - name: Set up BEAM (Erlang/OTP + Elixir)
         uses: ./.github/actions/setup-beam
         with:
-          otp-version: "26.2.5.21"
-          elixir-version: "1.15.8-otp-26"
-
-      - name: Cache deps and _build
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: |
-            deps
-            _build
-          key: ${{ runner.os }}-mix-floor-${{ hashFiles('mix.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-mix-floor-
+          tool-versions: .github/toolchains/floor.tool-versions
 
       - name: Install dependencies
         run: mix deps.get --check-locked
