@@ -2,10 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, 'kci/**']
-    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE*', '.github/ISSUE_TEMPLATE/**']
-  pull_request:
-    branches: [main]
+    branches: ['kci/**']
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -361,3 +358,21 @@ jobs:
 
       - name: Unit tests
         run: mix test
+
+  qualified:
+    if: always()
+    needs: [test, aurora-sim, reference-example, floor]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every qualification job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          results = json.loads(os.environ['NEEDS'])
+          failed = [name for name, job in results.items() if job['result'] != 'success']
+          if failed:
+              print('Qualification refused: ' + ', '.join(failed))
+          sys.exit(bool(failed) or not results)
+          PY
