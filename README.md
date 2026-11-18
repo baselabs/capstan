@@ -183,6 +183,11 @@ payload — that boundary is enforced at runtime, not by convention.
 capstan is maintained as the MySQL side of the baselabs CDC stack (replicant's
 sibling). Issues and pull requests are welcome; there is no support SLA.
 
+## Publication
+
+The publication workflow publishes new versions of existing Hex.pm packages only and
+refuses a package name the registry has never had. A first publication is the owner's decision.
+
 ## License
 
 MIT — see [LICENSE](https://github.com/baselabs/capstan/blob/main/LICENSE).
