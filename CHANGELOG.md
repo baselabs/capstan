@@ -6,6 +6,8 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+- Audit the example project with both dependency feeds; add `mix_audit` as development and test tooling.
+
 ## [1.3.3] - 2026-11-01
 
 ### Fixed — the package description and the `Capstan` moduledoc opening still said effect-once was "planned"

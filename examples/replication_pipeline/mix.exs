@@ -27,7 +27,8 @@ defmodule ReplicationPipeline.MixProject do
       # The CDC engine, from THIS checkout (the example is part of its repo).
       {:capstan, path: "../.."},
       # Destination + source-seeding client.
-      {:myxql, "~> 0.7"}
+      {:myxql, "~> 0.7"},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 end

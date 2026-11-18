@@ -283,7 +283,9 @@ jobs:
       - name: Audit example dependency retirements
         run: mix hex.audit
 
-      # This example has no mix_audit dependency; infra reports that product blocker.
+      - name: Audit example dependency advisories
+        run: mix deps.audit
+
       - name: Build and start the stack
         run: docker compose up -d --build
 
