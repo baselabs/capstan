@@ -142,7 +142,7 @@ starts it as a runner container; `docs/testing.md` describes providing it.
 
 ## Docs & artifacts
 
-- **Tracked / publishable:** `AGENTS.md`, `CLAUDE.md`, `README.md`, `CHANGELOG.md`, `usage-rules.md`,
+- **Tracked / publishable:** `AGENTS.md`, `README.md`, `CHANGELOG.md`, `usage-rules.md`,
   `docs/adr/`, `docs/ROADMAP.md`, `docs/telemetry.md`, `docs/recipes.md`, the `examples/` READMEs,
   `notebooks/`, `scripts/`, `LICENSE`. The `mix.exs` `files:` list ships every consumer doc the
   README links; relative links in shipped docs must resolve inside the tarball.
