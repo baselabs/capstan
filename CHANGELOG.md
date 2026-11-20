@@ -6,6 +6,7 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
+- Publish Hex releases with GitHub workload identity in a separate upload job; build and read-back hold no publishing credential.
 - Audit the example project with both dependency feeds; add `mix_audit` as development and test tooling.
 
 ## [1.3.3] - 2026-11-01
