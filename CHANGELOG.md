@@ -7,6 +7,7 @@ All notable changes to capstan are documented here. The format follows
 ## [Unreleased]
 
 - Publish Hex releases with GitHub workload identity in a separate upload job; build and read-back hold no publishing credential.
+- Run every CI step under bash with `pipefail`, including the reference example job that sets its own working directory, so a failure behind a pipe fails its step; the MySQL init script passes the root password through `MYSQL_PWD`, not its arguments.
 - Audit the example project with both dependency feeds; add `mix_audit` as development and test tooling.
 
 ## [1.3.3] - 2026-11-01

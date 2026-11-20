@@ -14,7 +14,8 @@ set -euo pipefail
 USER="${CAPSTAN_SHA2_USER:-capstan_sha2}"
 PASS="${CAPSTAN_SHA2_PASSWORD:-capstan_sha2_pw}"
 
-mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" <<SQL
+# The client reads the password from MYSQL_PWD, never from its arguments.
+MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -uroot <<SQL
 CREATE USER IF NOT EXISTS '${USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${PASS}';
 ALTER USER '${USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${PASS}';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT, LOCK TABLES ON *.* TO '${USER}'@'%';

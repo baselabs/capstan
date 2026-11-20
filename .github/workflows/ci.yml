@@ -12,6 +12,11 @@ concurrency:
 permissions:
   contents: read
 
+# Every step runs as bash -eo pipefail; a failure behind a pipe fails its step.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   test:
     name: MySQL ${{ matrix.mysql }}
@@ -265,8 +270,10 @@ jobs:
     timeout-minutes: 5 # run 44103320817
     env:
       MYSQL_PWD: probe
+    # A job's defaults.run replaces the workflow's, so it names the shell again.
     defaults:
       run:
+        shell: bash
         working-directory: examples/replication_pipeline
     steps:
       - name: Checkout
