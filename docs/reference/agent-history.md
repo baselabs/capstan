@@ -22,9 +22,8 @@ docker stack (repo-side, CI-gated as the public sink API canary). Omitting
 the historical roadmap definitions do not reopen the delivered C5 and follow-up mechanisms. The rules below are binding invariants for the
 landed code and future rows, grounded in live MySQL probes under `probe/`.
 `docs/ROADMAP.md` carries authored scope and acceptance definitions. Current work
-pickup uses the GitHub owner queue configured in `.kimosabe/config.toml`
+pickup uses the GitHub owner queue
 (`baselabs/capstan`); reconcile existing work and receipts before adding tasks.
-Historical `.forge/` plans are not the current queue.
 
 ## From AGENTS.md "Local substrate" (Compose removal)
 
@@ -36,12 +35,10 @@ script works (`docs/testing.md` gives the `docker run` lines).
 
 ## From AGENTS.md "Docs & lifecycle-artifact policy" (machine-local coordination)
 
-- **Machine-local coordination:** `.kimosabe/` holds local configuration, memory, and
-  evidence under the repository's local exclusion policy. Historical `.forge/` artifacts
-  remain historical evidence, not current task state; neither is a bare-clone dependency.
+- **Machine-local coordination:** local configuration, memory, and evidence stay under the
+  repository's local exclusion policy and are never a bare-clone dependency.
   `docs/ROADMAP.md` carries authored scope/acceptance. The configured GitHub owner
-  queue and actual receipts govern execution/completion; `forge-roadmap.py` is retired
-  as the current pickup rule.
+  queue and actual receipts govern execution/completion.
 
 ## From AGENTS.md "Development workflow" (whole-repo gate, superseded October 28, 2026)
 
@@ -50,11 +47,10 @@ All gates must pass before a commit. `mix quality` and `mix audit` are defined i
 ## From CLAUDE.md "Quick pointers" (scope and coordination)
 
 - **Scope / pickup:** [`docs/ROADMAP.md`](docs/ROADMAP.md) defines authored scope and
-  acceptance. Current executable work uses the GitHub owner queue selected by
-  `.kimosabe/config.toml` (`baselabs/capstan`); reconcile existing work and receipts
+  acceptance. Current executable work uses the GitHub owner queue
+  (`baselabs/capstan`); reconcile existing work and receipts
   before adding tasks. The roadmap does not assert completion.
-- **Local coordination:** `.kimosabe/` holds local memory/evidence/configuration.
-  `.forge/` plans and derived status are historical, not the current work queue.
+- **Local coordination:** local memory, evidence and configuration are machine-local.
 
 ## AWS Agent Toolkit rules block (was in both AGENTS.md and CLAUDE.md; generic, not repo-specific)
 

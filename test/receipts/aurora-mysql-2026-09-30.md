@@ -112,5 +112,5 @@ in `gtid_purged`) needs a cluster past its window.
 | retention `:data_gap` | NOT RUNNABLE (fresh cluster; loud by design) |
 | misconfigurations ×6 | PASS (distinct reasons, per-row values above) |
 
-Run artifacts: `.kimosabe/scratch/aurora-*.log` (machine-local). Cluster and every
+Run artifacts: `aurora-*.log` (machine-local, not published). Cluster and every
 supporting AWS resource deleted at the end of the run.

@@ -9,7 +9,7 @@ defmodule Capstan.MysqlCase do
     * **The shared, running `mysql-cdc-probe`** (`127.0.0.1`, port `MYSQL_PORT_80` — `shared_port/0`)
       — every NON-destructive marquee streams from it read-mostly, on DEDICATED per-marquee
       tables (`DROP TABLE IF EXISTS` in setup). It is **never** restarted, reconfigured, or
-      duplicated (forge substrate rule).
+      duplicated (shared-substrate rule).
     * **The disposable MySQL 8.0** (`127.0.0.1`, port `CAPSTAN_DISPOSABLE_MYSQL_PORT`), which
       the environment provides and the suite may destroy. Every DESTRUCTIVE marquee
       (`PURGE BINARY LOGS`, `binlog_transaction_compression=ON`, `binlog_row_value_options=PARTIAL_JSON`)
@@ -718,7 +718,7 @@ defmodule Capstan.MysqlCase do
   @doc """
   A per-marquee throwaway SCHEMA name (`capstan_snap_<unique>`). Each snapshot marquee creates
   its own schema, provisions its tables inside it, and `DROP DATABASE`s it in `on_exit` — so no
-  marquee ever leaks a schema onto the shared substrate (design Q-tests / forge substrate rule).
+  marquee ever leaks a schema onto the shared substrate (design Q-tests / shared-substrate rule).
   """
   @spec unique_schema() :: String.t()
   def unique_schema, do: "capstan_snap_" <> Integer.to_string(System.unique_integer([:positive]))

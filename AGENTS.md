@@ -15,7 +15,7 @@ in-library and probe-proven (`:gen_tcp`/`:ssl`/`:crypto` only; `decimal` + `jaso
 Elixir `~> 1.15`. **1.3.1 is the latest release; never pin 1.3.0** (its aurora-sim compose is
 first-boot broken). The rules below are grounded in live MySQL probes under `probe/`.
 `docs/ROADMAP.md` carries authored scope; current work comes from the GitHub queue
-`baselabs/capstan`. `.forge/` is historical. Dated narratives: `docs/reference/agent-history.md`.
+`baselabs/capstan`. Dated narratives: `docs/reference/agent-history.md`.
 
 ## Critical rules
 
@@ -77,7 +77,7 @@ confidentiality without authentication). Neither given → fail closed `:tls_ver
 ## Workflow
 
 Make the change, run the tests that cover it, and commit with named paths. Land every change with
-`~/Developer/kimosabe/bin/kimosabe-land --repo . --sha HEAD`: it pushes `kci/<sha>`, waits for that
+the landing tool, by full commit SHA: it pushes `kci/<sha>`, waits for that
 run's `qualified` check, and moves the default branch. CI runs once, on the candidate. Nobody pushes
 the default branch; if CI goes red, fix forward. Publishing, deploying and pushes to mirrors need
 the owner's approval for that action.
@@ -146,7 +146,7 @@ starts it as a runner container; `docs/testing.md` describes providing it.
   `docs/adr/`, `docs/ROADMAP.md`, `docs/telemetry.md`, `docs/recipes.md`, the `examples/` READMEs,
   `notebooks/`, `scripts/`, `LICENSE`. The `mix.exs` `files:` list ships every consumer doc the
   README links; relative links in shipped docs must resolve inside the tarball.
-- `.kimosabe/` is machine-local (local exclusion); `.forge/` is historical. Neither is a bare-clone
+- Machine-local agent state stays out of tracked files (local exclusion) and is never a bare-clone
   dependency. AI-tool state dirs (`.claude/`, `.serena/`, `graphify-out/`) are gitignored.
 
 ## graphify (code knowledge graph)
@@ -158,7 +158,6 @@ code. `graphify update .` refreshes it after large uncommitted changes.
 
 ## CI/CD and releases
 
-Releases, deployments, and publications are done by the infra session (`infra-1`). The project
-lands on its default branch with `kimosabe-land --repo . --sha <full sha>` and stops there.
-The requirements live in the infra repository at `baselabs/docs/ci.md`,
-"What infra requires of every product".
+Releases, deployments, and publications are done by the organization's infrastructure session.
+The project lands on its default branch through the landing tool, by full commit SHA, and stops
+there. The organization's CI requirements for every product govern releases.

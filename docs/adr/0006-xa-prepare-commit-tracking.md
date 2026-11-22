@@ -26,10 +26,9 @@ a GTID the checkpoint already covers, and any rows held only in memory are then 
 
 The design was chosen by conformance-gated best-of-N (three fresh-context, frame-independent candidate
 designs — spec-literal / risk-first / simplest-architecture — **all converged** on the same core; winner
-spec-literal), then hardened by a fresh-context adversarial pass (8 challenges, all accepted). Full
-deliberation: `.forge/specs/2026-07-22-capstan-c5-xa-design.md`; best-of-N audit
-`.forge/best-of-n/c5-xa-core-mechanism.md`; adversarial reconciliation
-`.forge/reviews/2026-07-22-c5-xa-design-adversarial.md`.
+spec-literal), then hardened by a fresh-context adversarial pass (8 challenges, all accepted). The full
+deliberation, best-of-N audit and adversarial reconciliation were machine-local working notes,
+not published.
 
 ## Decision
 
@@ -95,7 +94,7 @@ deliberation: `.forge/specs/2026-07-22-capstan-c5-xa-design.md`; best-of-N audit
 
 ## Evidence
 
-Design note `.forge/specs/2026-07-22-capstan-c5-xa-design.md` (§2 live XA binlog grammar; §6 synthesized
+The machine-local design note (§2 live XA binlog grammar; §6 synthesized
 mechanism + crash-window table; §5 decision log). Live probes: separate `G_p`/`G_c`, `G_p` in
 `@@gtid_executed` at prepare, interior-hole-resend (re-proven independently by the best-of-N judge),
 `XA RECOVER` enumeration. Anchors: `lib/capstan/assembler.ex` (fold + terminators), `binlog/decoder.ex:206`

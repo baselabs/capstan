@@ -1,10 +1,8 @@
 # capstan ROADMAP
 
 Authored scope and acceptance definitions. Current executable work belongs to the
-configured GitHub owner queue (`baselabs/capstan`; `.kimosabe/config.toml` selects
-its labels). Reconcile that queue and retained acceptance evidence before picking
+GitHub owner queue (`baselabs/capstan`, selected by its labels). Reconcile that queue and retained acceptance evidence before picking
 up or adding work; a roadmap row is not an installed task or completion receipt.
-The earlier `.forge/` derived-board convention is historical, not current pickup.
 
 **Source-currency amendment — September 21, 2026:** OBSERVED with `rg -n`, `nl -ba`, and `sed` reads: `mix.exs` declares 1.2.3; the 1.2.0 changelog records batching, type/compression breadth, XA tracking, sink-owned checkpoints, explicit starts, collation-string snapshots, table-set resolution, and empty-table completion. Source inspection confirms sink-owned initialization in `AssemblerServer`, selected-position handling in `Pipeline`, and XA prepare/recovery paths in `Assembler`/`Connection`. Earlier rows are authored requirements, not evidence that their original refusals remain active. [ADR 0004](adr/0004-c1-scope-lib-owned-checkpoint-only.md), [ADR 0006](adr/0006-xa-prepare-commit-tracking.md), and [ADR 0011](adr/0011-transaction-compression-precondition.md) carry their amendments. C6 remains generic producer/consumer conformance work; consumer domain adapters have separate owners. This reconciliation runs no runtime acceptance and authorizes no publication or consumer activation. Capstan remains an independently usable transport library.
 
