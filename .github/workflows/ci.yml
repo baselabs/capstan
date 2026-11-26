@@ -384,9 +384,42 @@ jobs:
       - name: Unit tests
         run: mix test
 
+  release-artifact:
+    name: Docs and package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30 # no green run yet
+    env:
+      MIX_ENV: dev
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-beam
+
+      - name: Install and verify the shared action's Hex client
+        working-directory: ${{ runner.temp }}
+        run: |
+          test ! -e mix.exs
+          hex_version="$(curl --fail --silent --show-error --max-time 30 'https://raw.githubusercontent.com/baselabs/.github/3bfbb84692a65b4d2c03dc3b7932353026fe6943/.github/actions/hex-publish/hex-version')"
+          [[ "$hex_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mix local.hex "$hex_version" --force
+          installed="$(mix hex.info | awk '$1 == "Hex:" {print $2}')"
+          if [ "$installed" != "$hex_version" ]; then
+            echo "::error::Installed Hex $installed; expected $hex_version."
+            exit 1
+          fi
+
+      - uses: baselabs/.github/.github/actions/hex-publish@3bfbb84692a65b4d2c03dc3b7932353026fe6943
+        with:
+          operation: qualify
+          package: capstan
+          package-directory: .
+
   qualified:
     if: always()
-    needs: [test, aurora-sim, reference-example, floor]
+    needs: [test, aurora-sim, reference-example, floor, release-artifact]
     runs-on: ubuntu-24.04
     timeout-minutes: 5 # run 44103320817
     steps:

@@ -6,7 +6,7 @@ All notable changes to capstan are documented here. The format follows
 
 ## [Unreleased]
 
-- Publish Hex releases with GitHub workload identity in a separate upload job; build and read-back hold no publishing credential.
+- Publish Hex releases through the shared Hex action: CI qualifies the package and docs archives declared in `.github/hex-packages.json`, and the dispatch-only publish workflow uploads those exact archives with GitHub workload identity, then reads them back; no stored Hex key is used.
 - Run every CI step under bash with `pipefail`, including the reference example job that sets its own working directory, so a failure behind a pipe fails its step; the MySQL init script passes the root password through `MYSQL_PWD`, not its arguments.
 - Audit the example project with both dependency feeds; add `mix_audit` as development and test tooling.
 

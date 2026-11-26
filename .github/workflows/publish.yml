@@ -2,8 +2,14 @@ name: Publish to Hex.pm
 
 on:
   workflow_dispatch:
+    inputs:
+      release_commit:
+        description: Full SHA of the landed release commit
+        required: true
+        type: string
 
-permissions: {}
+permissions:
+  contents: read
 
 defaults:
   run:
@@ -13,325 +19,145 @@ concurrency:
   group: publish
   cancel-in-progress: false
 
-env:
-  MIX_ENV: dev
-  HEX_API_URL: https://hex.pm/api
-
 jobs:
-  build:
-    name: Build and plan
+  upload:
     if: contains(fromJSON('["corepay","palermo-git"]'), github.actor) && contains(fromJSON('["corepay","palermo-git"]'), github.triggering_actor)
+    environment: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30 # no green run yet
     permissions:
       contents: read
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5 # no green keyless run yet; retain the existing small limit
-    outputs:
-      UPLOAD_PACKAGE: ${{ steps.plan.outputs.UPLOAD_PACKAGE }}
-      UPLOAD_DOCS: ${{ steps.plan.outputs.UPLOAD_DOCS }}
-      PACKAGE: ${{ steps.plan.outputs.PACKAGE }}
-      VERSION: ${{ steps.plan.outputs.VERSION }}
-    steps:
-      - name: Refuse a ref other than the default branch
-        env:
-          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
-        run: |
-          if [ "$GITHUB_REF" != "$DEFAULT_REF" ]; then
-            echo "::error::Run this workflow from the default branch."
-            exit 1
-          fi
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-beam
-
-      - name: Pin the Hex client used to build and publish
-        run: mix local.hex 2.7.0 --force
-
-      - name: Fetch locked dependencies
-        run: mix deps.get --check-locked
-
-      - name: Read the package identity
-        run: |
-          mix run --no-start -e '
-            config = Mix.Project.config()
-            package = to_string(Keyword.get(config[:package] || [], :name, config[:app]))
-            version = config[:version]
-            Version.parse!(version)
-            File.write!(System.fetch_env!("GITHUB_ENV"),
-              "PACKAGE=#{package}\nVERSION=#{version}\n" <>
-              "PACKAGE_ARCHIVE=#{System.fetch_env!("RUNNER_TEMP")}/#{package}-#{version}.tar\n" <>
-              "DOCS_ARCHIVE=#{System.fetch_env!("RUNNER_TEMP")}/hex-docs.tar.gz\n", [:append])
-          '
-
-      - name: Refuse a package name the registry has never had
-        run: |
-          python3 - <<'PYTHON'
-          import http.client, os, urllib.error, urllib.parse, urllib.request
-          name = os.environ['PACKAGE']
-          package = urllib.parse.quote(name, safe='')
-          package_url = f'https://hex.pm/api/packages/{package}'
-          try:
-              with urllib.request.urlopen(package_url, timeout=30) as response:
-                  if response.status != 200:
-                      raise SystemExit(f'::error::Hex.pm registry could not be read for {name} (HTTP {response.status})')
-          except urllib.error.HTTPError as error:
-              if error.code == 404:
-                  raise SystemExit(
-                      f'::error::{name} has never been published to Hex.pm: '
-                      'this workflow publishes new versions of existing packages only. '
-                      "A first publication is the owner's decision.")
-              raise SystemExit(f'::error::Hex.pm registry could not be read for {name} (HTTP {error.code})')
-          except (OSError, http.client.HTTPException):
-              raise SystemExit(f'::error::Hex.pm registry could not be read for {name}')
-          PYTHON
-
-      - name: Refuse a version that already has a tag
-        run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" "refs/tags/${VERSION}"; then
-            echo "::error::This version already has a tag: its release is complete."
-            exit 1
-          else
-            status=$?
-            [ "$status" -eq 2 ] || exit "$status"
-          fi
-
-      - name: Build documentation
-        run: |
-          mix docs --warnings-as-errors
-          test -s doc/index.html
-          # Docs render files the package does not carry; this names the commit that built them.
-          printf '{"package": "%s", "version": "%s", "commit": "%s"}\n' \
-            "$PACKAGE" "$VERSION" "$GITHUB_SHA" > doc/release.json
-          tar -C doc -czf "$DOCS_ARCHIVE" .
-
-      - name: Build and inspect the exact release archive
-        run: |
-          mix hex.build --output "$PACKAGE_ARCHIVE"
-          tar -tf "$PACKAGE_ARCHIVE"
-          tar -xOf "$PACKAGE_ARCHIVE" contents.tar.gz | tar -tzf -
-          # Relative names survive transfer to another job's RUNNER_TEMP.
-          cd "$RUNNER_TEMP"
-          sha256sum "${PACKAGE}-${VERSION}.tar" hex-docs.tar.gz > hex-publish.sha256
-
-      # A release is two uploads, and a second dispatch on the same commit finishes the first
-      # (the organization's CI requirements, Releases). The package is the release: served package bytes
-      # must equal the archive just built. Docs builds are not byte-stable, so served docs are
-      # kept and read back as present, never compared. Nothing is ever replaced.
-      - name: Plan the uploads from the served release
-        id: plan
-        run: |
-          python3 "$GITHUB_WORKSPACE/scripts/hex_release_state.py" plan > "$RUNNER_TEMP/hex-publish.plan"
-          printf 'PACKAGE=%s\nVERSION=%s\n' "$PACKAGE" "$VERSION" >> "$RUNNER_TEMP/hex-publish.plan"
-          cat "$RUNNER_TEMP/hex-publish.plan" >> "$GITHUB_OUTPUT"
-
-      - name: Pass the inspected archives, checksums and plan to the next jobs
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: hex-publish
-          path: |
-            ${{ env.PACKAGE_ARCHIVE }}
-            ${{ env.DOCS_ARCHIVE }}
-            ${{ runner.temp }}/hex-publish.sha256
-            ${{ runner.temp }}/hex-publish.plan
-          if-no-files-found: error
-          retention-days: 1
-
-  upload:
-    name: Upload inspected bytes
-    needs: build
-    if: contains(fromJSON('["corepay","palermo-git"]'), github.actor) && contains(fromJSON('["corepay","palermo-git"]'), github.triggering_actor) && (needs.build.outputs.UPLOAD_PACKAGE == 'true' || needs.build.outputs.UPLOAD_DOCS == 'true')
-    environment: publish
-    permissions:
-      contents: read # Sparse checkout of the workflow action and runtime declaration only.
+      actions: read
       id-token: write
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5 # no green keyless run yet; retain the existing small limit
-    env:
-      PACKAGE: ${{ needs.build.outputs.PACKAGE }}
-      VERSION: ${{ needs.build.outputs.VERSION }}
-      UPLOAD_PACKAGE: ${{ needs.build.outputs.UPLOAD_PACKAGE }}
-      UPLOAD_DOCS: ${{ needs.build.outputs.UPLOAD_DOCS }}
+    outputs:
+      qualification-run: ${{ steps.hex.outputs.qualification-run }}
+      qualification-sha256: ${{ steps.hex.outputs.qualification-sha256 }}
     steps:
-      - name: Refuse a ref other than the default branch
+      - name: Admit the default ref and full release commit
         env:
-          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_COMMIT: ${{ inputs.release_commit }}
         run: |
-          if [ "$GITHUB_REF" != "$DEFAULT_REF" ]; then
-            echo "::error::Run this workflow from the default branch."
-            exit 1
-          fi
+          [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
+          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ inputs.release_commit }}
+          fetch-depth: 0
           persist-credentials: false
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            /.github/
-            /.tool-versions
-
-      - uses: ./.github/actions/setup-beam
-
-      - name: Prepare isolated Hex and archive paths
+      - name: Read the release commit's declared runtime
+        id: runtime
         run: |
-          printf 'HEX_HOME=%s/hex-publish-home\nMIX_HOME=%s/hex-publish-mix\n' \
-            "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
-          printf 'PACKAGE_ARCHIVE=%s/%s-%s.tar\nDOCS_ARCHIVE=%s/hex-docs.tar.gz\n' \
-            "$RUNNER_TEMP" "$PACKAGE" "$VERSION" "$RUNNER_TEMP" >> "$GITHUB_ENV"
-
-      - name: Pin the Hex client without loading a project
-        run: |
-          cd "$RUNNER_TEMP"
-          mix local.hex 2.7.0 --force
-
-      - name: Download the inspected archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: hex-publish
-          path: ${{ runner.temp }}
-
-      - name: Verify the inspected archives
-        run: |
-          cd "$RUNNER_TEMP"
-          sha256sum --check hex-publish.sha256
-
-      - name: Exchange a package-scoped Hex workload token
-        run: |
-          python3 - <<'PYTHON'
-          import http.client, json, os, pathlib, urllib.error, urllib.parse, urllib.request
-
-          def request_json(url, data=None, headers=None):
-              try:
-                  request = urllib.request.Request(url, data=data, headers=headers or {})
-                  with urllib.request.urlopen(request, timeout=30) as response:
-                      return json.load(response)
-              except urllib.error.HTTPError as error:
-                  raise SystemExit(f'::error::Workload identity request failed (HTTP {error.code})') from None
-              except (OSError, http.client.HTTPException, ValueError):
-                  raise SystemExit('::error::Workload identity request failed') from None
-
-          # The configured audience is fixed here, never chosen by a server response.
-          if request_json('https://hex.pm/api/oidc/audience').get('audience') != 'hexpm':
-              raise SystemExit('::error::Hex workload identity audience differs from hexpm')
-          oidc = request_json(
-              os.environ['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&audience=hexpm',
-              headers={'Authorization': 'bearer ' + os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
-          assertion = oidc.get('value')
-          if not isinstance(assertion, str) or not assertion:
-              raise SystemExit('::error::GitHub returned no OIDC token')
-          scope = 'package:hexpm/' + os.environ['PACKAGE']
-          result = request_json('https://hex.pm/api/oauth/token', data=urllib.parse.urlencode({
-              'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-              'assertion': assertion,
-              'scope': scope,
-          }).encode(), headers={'Content-Type': 'application/x-www-form-urlencoded'})
-          token = result.get('access_token')
-          if not isinstance(token, str) or not token or not all(33 <= ord(char) <= 126 for char in token):
-              raise SystemExit('::error::Hex returned no usable access token')
-          # Persist before checking metadata so always() can revoke even an unexpected grant.
-          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'hex-publish-token'
-          descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-          with os.fdopen(descriptor, 'w') as handle:
-              handle.write(token)
-          if (result.get('token_type') != 'bearer' or result.get('scope') != scope or
-                  not isinstance(result.get('expires_in'), int) or not 0 < result['expires_in'] <= 900):
-              raise SystemExit('::error::Hex returned unexpected workload token metadata')
-          PYTHON
-
-      - name: Upload the inspected package and documentation bytes
-        run: |
-          # No mix.exs or dependency code is loaded in this job. Hex 2.7.0's
-          # lib/hex/api/client.ex:21-25 adds Bearer for the explicit oauth: true option.
-          cd "$RUNNER_TEMP"
-          mix run --no-mix-exs --no-start -e '
-            Hex.start()
-            token_file = Path.join(System.fetch_env!("RUNNER_TEMP"), "hex-publish-token")
-            auth = [key: File.read!(token_file), oauth: true]
-            published! = fn
-              {:ok, {_status, _, %{"status" => "staged"}}} ->
-                Mix.raise("Hex staged publication for approval; dispatch again on this commit once it is approved")
-              {:ok, {status, _, _}} when status in 200..299 -> :ok
-              _ -> Mix.raise("Hex publication failed")
-            end
-            if System.fetch_env!("UPLOAD_PACKAGE") == "true" do
-              Hex.API.Release.publish(nil, File.read!(System.fetch_env!("PACKAGE_ARCHIVE")),
-                auth, fn _ -> nil end, replace: false) |> published!.()
-            end
-            if System.fetch_env!("UPLOAD_DOCS") == "true" do
-              Hex.API.ReleaseDocs.publish(nil, System.fetch_env!("PACKAGE"),
-                System.fetch_env!("VERSION"), File.read!(System.fetch_env!("DOCS_ARCHIVE")), auth)
-                |> published!.()
-            end
+          git show HEAD:.tool-versions | python3 -I -c '
+          import os, re, sys
+          versions = {}
+          for line in sys.stdin.read().splitlines():
+              fields = line.split("#", 1)[0].split()
+              if fields:
+                  if len(fields) < 2 or fields[0] in versions:
+                      raise SystemExit("::error::Invalid or duplicate runtime declaration")
+                  versions[fields[0]] = fields[1]
+          elixir, otp = versions.get("elixir", ""), versions.get("erlang", "")
+          match = re.fullmatch(r"(\d+\.\d+\.\d+)-otp-(\d+)", elixir)
+          if not match or not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)*", otp) or match[2] != otp.split(".")[0]:
+              raise SystemExit("::error::Declare exact Elixir and OTP versions in .tool-versions")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"elixir={elixir}\notp={otp}\n")
           '
-
-      - name: Revoke the workload token and remove its file
-        if: always()
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ steps.runtime.outputs.elixir }}
+          otp-version: ${{ steps.runtime.outputs.otp }}
+          version-type: strict
+          install-hex: false
+          install-rebar: false
+      - name: Install the shared action's Hex client outside Mix source
+        working-directory: ${{ runner.temp }}
         run: |
-          python3 - <<'PYTHON'
-          import http.client, os, pathlib, urllib.error, urllib.parse, urllib.request
-          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'hex-publish-token'
-          if path.exists():
-              try:
-                  request = urllib.request.Request('https://hex.pm/api/oauth/revoke',
-                      data=urllib.parse.urlencode({'token': path.read_text()}).encode(),
-                      headers={'Content-Type': 'application/x-www-form-urlencoded'})
-                  with urllib.request.urlopen(request, timeout=30) as response:
-                      if response.status != 200:
-                          raise SystemExit('::error::Hex workload token revocation failed')
-              except urllib.error.HTTPError as error:
-                  raise SystemExit(f'::error::Hex workload token revocation failed (HTTP {error.code})') from None
-              except (OSError, http.client.HTTPException):
-                  raise SystemExit('::error::Hex workload token revocation failed') from None
-              finally:
-                  path.unlink()
-          PYTHON
+          test ! -e mix.exs
+          hex_version="$(curl --fail --silent --show-error --max-time 30 'https://raw.githubusercontent.com/baselabs/.github/3bfbb84692a65b4d2c03dc3b7932353026fe6943/.github/actions/hex-publish/hex-version')"
+          [[ "$hex_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mix local.hex "$hex_version" --force
+      - uses: baselabs/.github/.github/actions/hex-publish@3bfbb84692a65b4d2c03dc3b7932353026fe6943
+        id: hex
+        with:
+          operation: upload
+          package: capstan
+          package-directory: .
+          release-commit: ${{ inputs.release_commit }}
+          organization-read-key: ${{ secrets.HEX_ORG_KEY_PUBLISH_API_READ }}
 
   read-back:
-    name: Read back the release
-    needs: [build, upload]
-    if: >-
-      !cancelled() && contains(fromJSON('["corepay","palermo-git"]'), github.actor) && contains(fromJSON('["corepay","palermo-git"]'), github.triggering_actor) &&
-      needs.build.result == 'success' && (needs.upload.result == 'success' || needs.upload.result == 'skipped')
+    needs: upload
+    if: contains(fromJSON('["corepay","palermo-git"]'), github.actor) && contains(fromJSON('["corepay","palermo-git"]'), github.triggering_actor)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30 # no green run yet
     permissions:
       contents: read
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5 # no green keyless run yet; retain the existing small limit
-    env:
-      PACKAGE: ${{ needs.build.outputs.PACKAGE }}
-      VERSION: ${{ needs.build.outputs.VERSION }}
+      actions: read
+    outputs:
+      commit: ${{ steps.hex.outputs.commit }}
     steps:
-      - name: Refuse a ref other than the default branch
+      - name: Admit the default ref and full release commit
         env:
-          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_COMMIT: ${{ inputs.release_commit }}
         run: |
-          if [ "$GITHUB_REF" != "$DEFAULT_REF" ]; then
-            echo "::error::Run this workflow from the default branch."
-            exit 1
-          fi
+          [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
+          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ inputs.release_commit }}
+          fetch-depth: 0
           persist-credentials: false
-
-      - name: Download the inspected archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: hex-publish
-          path: ${{ runner.temp }}
-
-      - name: Verify the inspected archives and set their paths
+      - name: Read the release commit's declared runtime
+        id: runtime
         run: |
-          cd "$RUNNER_TEMP"
-          sha256sum --check hex-publish.sha256
-          printf 'PACKAGE_ARCHIVE=%s/%s-%s.tar\nDOCS_ARCHIVE=%s/hex-docs.tar.gz\n' \
-            "$RUNNER_TEMP" "$PACKAGE" "$VERSION" "$RUNNER_TEMP" >> "$GITHUB_ENV"
-
-      - name: Read back the served package bytes and docs, and assemble release-assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 "$GITHUB_WORKSPACE/scripts/hex_release_state.py" read-back
-
-      - name: Upload release-assets
+          git show HEAD:.tool-versions | python3 -I -c '
+          import os, re, sys
+          versions = {}
+          for line in sys.stdin.read().splitlines():
+              fields = line.split("#", 1)[0].split()
+              if fields:
+                  if len(fields) < 2 or fields[0] in versions:
+                      raise SystemExit("::error::Invalid or duplicate runtime declaration")
+                  versions[fields[0]] = fields[1]
+          elixir, otp = versions.get("elixir", ""), versions.get("erlang", "")
+          match = re.fullmatch(r"(\d+\.\d+\.\d+)-otp-(\d+)", elixir)
+          if not match or not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)*", otp) or match[2] != otp.split(".")[0]:
+              raise SystemExit("::error::Declare exact Elixir and OTP versions in .tool-versions")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"elixir={elixir}\notp={otp}\n")
+          '
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ steps.runtime.outputs.elixir }}
+          otp-version: ${{ steps.runtime.outputs.otp }}
+          version-type: strict
+          install-hex: false
+          install-rebar: false
+      - name: Install the shared action's Hex client outside Mix source
+        working-directory: ${{ runner.temp }}
+        run: |
+          test ! -e mix.exs
+          hex_version="$(curl --fail --silent --show-error --max-time 30 'https://raw.githubusercontent.com/baselabs/.github/3bfbb84692a65b4d2c03dc3b7932353026fe6943/.github/actions/hex-publish/hex-version')"
+          [[ "$hex_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mix local.hex "$hex_version" --force
+      - uses: baselabs/.github/.github/actions/hex-publish@3bfbb84692a65b4d2c03dc3b7932353026fe6943
+        id: hex
+        with:
+          operation: read-back
+          package: capstan
+          package-directory: .
+          release-commit: ${{ inputs.release_commit }}
+          qualification-run: ${{ needs.upload.outputs.qualification-run }}
+          qualification-sha256: ${{ needs.upload.outputs.qualification-sha256 }}
+          release-assets-directory: ${{ runner.temp }}/release-assets
+      - name: Retain the verified release assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-assets
           path: ${{ runner.temp }}/release-assets/
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
