@@ -10,6 +10,5 @@ probe
 scripts
 .claude
 .serena
-graphify-out
 examples/replication_pipeline/_build
 examples/replication_pipeline/deps

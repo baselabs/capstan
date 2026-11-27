@@ -147,14 +147,7 @@ starts it as a runner container; `docs/testing.md` describes providing it.
   `notebooks/`, `scripts/`, `LICENSE`. The `mix.exs` `files:` list ships every consumer doc the
   README links; relative links in shipped docs must resolve inside the tarball.
 - Machine-local agent state stays out of tracked files (local exclusion) and is never a bare-clone
-  dependency. AI-tool state dirs (`.claude/`, `.serena/`, `graphify-out/`) are gitignored.
-
-## graphify (code knowledge graph)
-
-`graphify-out/graph.json` maps this repo (tree-sitter AST; rebuilt by the post-commit hook). Prefer
-`graphify query|explain|path` for orientation. Output is NAVIGATION, never evidence (Elixir edges
-are file-local; alias-mediated calls are not resolved): verify load-bearing claims against live
-code. `graphify update .` refreshes it after large uncommitted changes.
+  dependency. AI-tool state dirs (`.claude/`, `.serena/`) are gitignored.
 
 ## CI/CD and releases
 
