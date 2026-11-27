@@ -402,7 +402,7 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           test ! -e mix.exs
-          hex_version="$(curl --fail --silent --show-error --max-time 30 'https://raw.githubusercontent.com/baselabs/.github/3bfbb84692a65b4d2c03dc3b7932353026fe6943/.github/actions/hex-publish/hex-version')"
+          hex_version="$(curl --fail --silent --show-error --max-time 30 'https://raw.githubusercontent.com/baselabs/.github/654fcd0ef63daf8e3f79dfeb4ca900adffd0d4e2/.github/actions/hex-publish/hex-version')"
           [[ "$hex_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           mix local.hex "$hex_version" --force
           installed="$(mix hex.info | awk '$1 == "Hex:" {print $2}')"
@@ -411,7 +411,7 @@ jobs:
             exit 1
           fi
 
-      - uses: baselabs/.github/.github/actions/hex-publish@3bfbb84692a65b4d2c03dc3b7932353026fe6943
+      - uses: baselabs/.github/.github/actions/hex-publish@654fcd0ef63daf8e3f79dfeb4ca900adffd0d4e2
         with:
           operation: qualify
           package: capstan
